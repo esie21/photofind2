@@ -33,5 +33,9 @@ export const API_CONFIG = {
       UPDATE: (id: string) => `${API_URL}/services/${id}`,
       DELETE: (id: string) => `${API_URL}/services/${id}`,
     },
+    // Admin endpoints
+    ADMIN: {
+      STATS: `${API_URL}/admin/stats`,
+    },
   },
 };

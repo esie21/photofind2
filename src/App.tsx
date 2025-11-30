@@ -23,6 +23,21 @@ export default function App() {
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
 
   const handleViewChange = (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin') => {
+    // If trying to route to admin, ensure user is admin
+    if (view === 'admin') {
+      if (!user || user.role !== 'admin') {
+        // Prevent access
+        alert('Access denied: admin only');
+        return;
+      }
+    }
+    // For provider dashboard, ensure user is provider or admin
+    if (view === 'provider') {
+      if (!user || (user.role !== 'provider' && user.role !== 'admin')) {
+        alert('Access denied: provider only');
+        return;
+      }
+    }
     setCurrentView(view);
   };
 

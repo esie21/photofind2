@@ -1,9 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { apiClient } from '../api/client';
+import { API_CONFIG } from '../api/config';
 import { Users, DollarSign, TrendingUp, AlertCircle, CheckCircle, XCircle, Search, Filter, MoreVertical, Eye, FileText } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 
 export function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'providers' | 'disputes' | 'analytics'>('overview');
+  const { user } = useAuth();
+  const [statsFromAPI, setStatsFromAPI] = useState<{ userCount?: string; serviceCount?: string } | null>(null);
 
   const stats = [
     { label: 'Total Users', value: '15,234', change: '+8%', icon: Users, color: 'blue' },
@@ -47,6 +52,29 @@ export function AdminDashboard() {
       { name: 'Tutors', percentage: 8, count: 312 },
     ],
   };
+
+  useEffect(() => {
+    if (!user || user.role !== 'admin') return;
+    (async () => {
+      try {
+        const data = await apiClient.get<any>(API_CONFIG.ENDPOINTS.ADMIN.STATS);
+        setStatsFromAPI(data);
+      } catch (err) {
+        console.error('Failed to fetch admin stats', err);
+      }
+    })();
+  }, [user]);
+
+  if (!user || user.role !== 'admin') {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6">
+        <div className="text-center">
+          <h2 className="text-lg font-semibold text-gray-900">Access Denied</h2>
+          <p className="text-sm text-gray-600">You must be an admin to view this page.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">

@@ -1,4 +1,5 @@
 import { Pool, Client } from 'pg';
+import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -75,6 +76,22 @@ export async function initializeTables() {
     `);
 
     console.log('Database tables initialized successfully');
+    // Seed admin user if not present
+    const adminEmail = process.env.ADMIN_EMAIL || 'esiecadungog772@gmail.com';
+    const adminPassword = process.env.ADMIN_PASSWORD || '12345678';
+    const adminName = process.env.ADMIN_NAME || 'Admin';
+
+    const adminCheck = await client.query('SELECT id FROM users WHERE email = $1', [adminEmail]);
+    if (adminCheck.rows.length === 0) {
+      const hashed = await bcrypt.hash(adminPassword, 10);
+      await client.query(
+        'INSERT INTO users (email, name, password_hash, role) VALUES ($1, $2, $3, $4)',
+        [adminEmail, adminName, hashed, 'admin']
+      );
+      console.log(`Admin user created: ${adminEmail}`);
+    } else {
+      console.log('Admin user already exists');
+    }
   } catch (error) {
     console.error('Error initializing tables:', error);
   } finally {

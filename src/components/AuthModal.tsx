@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Mail, Phone, Chrome, Loader } from 'lucide-react';
+import { X, Mail, Chrome, Loader } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 interface AuthModalProps {
@@ -14,7 +14,6 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
-  const [phone, setPhone] = useState('');
   const [selectedRole, setSelectedRole] = useState<'client' | 'provider' | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,19 +71,12 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
     }
   };
 
-  const handleMethodSubmit = async (method: 'google' | 'phone') => {
+  const handleMethodSubmit = async (method: 'google') => {
     setError(null);
     setLoading(true);
     try {
       if (method === 'google') {
         setError('Google sign-in is not configured yet');
-      } else if (method === 'phone') {
-        if (!phone) {
-          setError('Please enter a phone number');
-        } else {
-          // Placeholder for phone OTP logic
-          setError('Phone OTP flow is not implemented');
-        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Method failed');
@@ -185,7 +177,7 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
                 </div>
               </div>
 
-              {/* Social/Phone Options */}
+              {/* Social Options */}
               <div className="space-y-3">
                 <button 
                   onClick={() => handleMethodSubmit('google')}
@@ -194,28 +186,6 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
                   <Chrome className="w-5 h-5 text-gray-700" />
                   <span className="text-gray-700">Continue with Google</span>
                 </button>
-
-                <div>
-                  <label className="block text-sm text-gray-700 mb-2">Or use Phone</label>
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                      <input
-                        type="tel"
-                        value={phone}
-                        onChange={(e) => setPhone(e.target.value)}
-                        placeholder="+1 (555) 000-0000"
-                        className="w-full pl-11 pr-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
-                      />
-                    </div>
-                    <button 
-                      onClick={() => handleMethodSubmit('phone')}
-                      className="px-6 py-3 bg-gray-900 text-white rounded-xl hover:bg-gray-800 transition-colors"
-                    >
-                      Send OTP
-                    </button>
-                  </div>
-                </div>
               </div>
 
               {mode === 'login' && (

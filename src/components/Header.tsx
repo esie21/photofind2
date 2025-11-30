@@ -36,18 +36,22 @@ export function Header({ onViewChange, currentView, onAuthClick }: HeaderProps) 
                 >
                   Browse Services
                 </button>
+                {user?.role === 'provider' && (
                 <button 
                   onClick={() => onViewChange('provider')}
                   className={`text-sm ${currentView === 'provider' ? 'text-purple-600' : 'text-gray-600 hover:text-gray-900'}`}
                 >
                   Provider Dashboard
                 </button>
+                )}
+                {user?.role === 'admin' && (
                 <button 
                   onClick={() => onViewChange('admin')}
                   className={`text-sm ${currentView === 'admin' ? 'text-purple-600' : 'text-gray-600 hover:text-gray-900'}`}
                 >
                   Admin
                 </button>
+                )}
               </nav>
             )}
           </div>
