@@ -39,10 +39,22 @@ export async function initializeTables() {
         name VARCHAR(255) NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
         role VARCHAR(50) NOT NULL CHECK (role IN ('client', 'provider', 'admin')),
+        profile_image TEXT,
+        portfolio_images TEXT[] DEFAULT '{}',
+        bio TEXT,
+        years_experience INTEGER DEFAULT 0,
+        location VARCHAR(255),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+      // Ensure new columns exist (safe for existing DBs)
+      await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT;`);
+      await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_images TEXT[] DEFAULT '{}'::text[];`);
+      await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
+      await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS years_experience INTEGER DEFAULT 0;`);
+      await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);`);
 
     // Create services table
     await client.query(`

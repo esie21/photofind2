@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import authService, { User } from '../api/services/authService';
+import { API_CONFIG } from '../api/config';
 
 interface AuthContextProps {
   user: User | null;
@@ -29,7 +30,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           authService.setToken(token);
           const currentUser = await authService.getCurrentUser();
-          setUser(currentUser);
+          setUser(normalizeUserImages(currentUser));
         } catch (e) {
           // Token invalid or user not found
           setUser(null);
@@ -44,7 +45,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const response = await authService.login({ email, password });
     authService.setToken(response.token);
     setToken(response.token);
-    const user = response.user;
+    const user = normalizeUserImages(response.user);
     setUser(user);
     return user;
   };
@@ -53,7 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const response = await authService.signup(data as any);
     authService.setToken(response.token);
     setToken(response.token);
-    const user = response.user;
+    const user = normalizeUserImages(response.user);
     setUser(user);
     return user;
   };
@@ -67,7 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshUser = async () => {
     try {
       const currentUser = await authService.getCurrentUser();
-      setUser(currentUser);
+      setUser(normalizeUserImages(currentUser));
       return currentUser;
     } catch (e) {
       setUser(null);
@@ -80,4 +81,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   );
+}
+
+function normalizeUserImages(user: User) {
+  if (!user) return user;
+  const apiBase = API_CONFIG.BASE_URL.replace(/\/api$/i, '');
+  const resolveUrl = (url?: string | null) => {
+    if (!url) return url;
+    // If already an absolute URL, just return
+    if (/^https?:\/\//i.test(url)) return url;
+    if (url.startsWith('/uploads')) return `${apiBase}${url}`;
+    return url;
+  };
+
+  return {
+    ...user,
+    profile_image: resolveUrl(user.profile_image as any) as any,
+    portfolio_images: (user.portfolio_images || []).map((p) => resolveUrl(p) as any),
+  } as User;
 }

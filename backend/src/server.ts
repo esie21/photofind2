@@ -4,10 +4,14 @@ import dotenv from 'dotenv';
 import { testConnection, initializeTables } from './config/database';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
+import usersRoutes from './routes/users';
+import path from 'path';
 
 dotenv.config();
 
 const app: Express = express();
+
+
 
 // Middleware
 app.use(cors());
@@ -16,6 +20,10 @@ app.use(express.json());
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/users', usersRoutes);
+
+// Serve uploaded media from local 'uploads' directory
+app.use('/uploads', express.static(path.resolve(__dirname, '../uploads')));
 
 // Health check
 app.get('/api/health', (req: Request, res: Response) => {

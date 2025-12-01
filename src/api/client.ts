@@ -2,6 +2,7 @@ import { API_CONFIG } from './config';
 
 interface RequestOptions extends RequestInit {
   headers?: Record<string, string>;
+  isForm?: boolean;
 }
 
 class APIClient {
@@ -21,7 +22,7 @@ class APIClient {
     }
   }
 
-  private getHeaders(): Record<string, string> {
+  private getHeaders(isForm = false): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -38,12 +39,19 @@ class APIClient {
     options: RequestOptions = {}
   ): Promise<T> {
     try {
+      const isForm = options.isForm || false;
+      const headers = {
+        ...this.getHeaders(isForm),
+        ...options.headers,
+      } as Record<string,string>;
+      if (isForm) {
+        // Remove Content-Type for FormData so browser sets it with boundary
+        delete headers['Content-Type'];
+      }
+
       const response = await fetch(url, {
         ...options,
-        headers: {
-          ...this.getHeaders(),
-          ...options.headers,
-        },
+        headers,
       });
 
       if (!response.ok) {
@@ -77,6 +85,14 @@ class APIClient {
     return this.request<T>(url, {
       method: 'POST',
       body: data ? JSON.stringify(data) : undefined,
+    });
+  }
+
+  async postForm<T>(url: string, formData: FormData): Promise<T> {
+    return this.request<T>(url, {
+      method: 'POST',
+      body: formData,
+      isForm: true,
     });
   }
 

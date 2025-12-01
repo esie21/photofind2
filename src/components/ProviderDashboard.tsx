@@ -1,18 +1,73 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
+import { useAuth } from '../context/AuthContext';
+import userService from '../api/services/userService';
 import { ChatInterface } from './ChatInterface';
 
 export function ProviderDashboard() {
+  const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+  const STATIC_URL = 'http://localhost:3001/uploads';
   const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'bookings' | 'earnings' | 'reviews'>('overview');
   const [showChat, setShowChat] = useState(false);
+  const { user, refreshUser } = useAuth();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const portfolioFileRef = useRef<HTMLInputElement | null>(null);
+  const [editMode, setEditMode] = useState(false);
+  const [formState, setFormState] = useState<any>({
+  name: user?.name || 'Sarah Johnson',
+  title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
+  bio: user?.bio || '',
+  location: user?.location || '',
+  years_experience: user?.years_experience || 10,
+  profile_image: user?.profile_image
+    ? user.profile_image.startsWith('http')
+      ? user.profile_image
+      : `${STATIC_URL}/${user.profile_image}`
+    : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
+  portfolio_images: (user?.portfolio_images || []).map(
+    (img: string) => img.startsWith('http') ? img : `${STATIC_URL}/${img}`
+  ),
+});
+
+
+  useEffect(() => {
+    if (formState?.profile_image) {
+      console.log('ProviderDashboard: profile image set to', formState.profile_image);
+    }
+    if (formState?.portfolio_images) {
+      console.log('ProviderDashboard: portfolio images count', formState.portfolio_images.length);
+    }
+  }, [formState.profile_image, formState.portfolio_images]);
 
   const stats = [
-    { label: 'Total Bookings', value: '127', change: '+12%', icon: Calendar, color: 'purple' },
-    { label: 'This Month', value: '$8,450', change: '+23%', icon: DollarSign, color: 'green' },
-    { label: 'Avg Rating', value: '4.9', change: '+0.2', icon: Star, color: 'yellow' },
-    { label: 'Response Rate', value: '98%', change: '+5%', icon: TrendingUp, color: 'blue' },
+    { label: 'Upcoming Bookings', value: '12', change: '+3%', icon: Calendar, color: 'purple' },
+    { label: 'Earnings (30d)', value: '$8,450', change: '+6%', icon: DollarSign, color: 'green' },
+    { label: 'Completed Bookings', value: '230', change: '+10%', icon: TrendingUp, color: 'blue' },
+    { label: 'Avg Rating', value: '4.9', change: '+1%', icon: Star, color: 'yellow' },
   ];
+
+  // Sync formState when user changes
+useEffect(() => {
+  if (!user) return;
+
+  setFormState({
+    name: user.name || 'Sarah Johnson',
+    title: user.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
+    bio: user.bio || '',
+    location: user.location || '',
+    years_experience: user.years_experience || 10,
+    profile_image: user.profile_image
+      ? user.profile_image.startsWith('http')
+        ? user.profile_image
+        : `${STATIC_URL}/${user.profile_image}`
+      : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
+    portfolio_images: (user.portfolio_images || []).map(
+      (img: string) => img.startsWith('http') ? img : `${STATIC_URL}/${img}`
+    ),
+  });
+}, [user]);
+
 
   const bookingRequests = [
     { id: 1, client: 'Emma Williams', service: 'Wedding Photography', date: '2025-12-20', time: '3:00 PM', amount: 2400, status: 'pending', image: 'https://images.unsplash.com/photo-1643968612613-fd411aecd1fd?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwaG90b2dyYXBoZXIlMjBjYW1lcmElMjBwcm9mZXNzaW9uYWx8ZW58MXx8fHwxNzY0NDAwNjc1fDA&ixlib=rb-4.1.0&q=80&w=1080' },
@@ -64,7 +119,7 @@ export function ProviderDashboard() {
           <div className="space-y-6">
             {/* Stats Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {stats.map((stat, index) => {
+              {stats.map((stat: any, index: number) => {
                 const Icon = stat.icon;
                 return (
                   <div key={index} className="bg-white rounded-2xl p-6 shadow-sm">
@@ -160,31 +215,117 @@ export function ProviderDashboard() {
         {/* Profile Tab */}
         {activeTab === 'profile' && (
           <div className="space-y-6">
-            {/* Basic Info */}
             <div className="bg-white rounded-2xl p-6 shadow-sm">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-gray-900">Profile Information</h2>
-                <button className="px-4 py-2 border border-purple-600 text-purple-600 rounded-lg hover:bg-purple-50 transition-colors text-sm flex items-center gap-2">
-                  <Edit className="w-4 h-4" />
-                  Edit Profile
-                </button>
+                {!editMode ? (
+                  <button
+                    onClick={() => setEditMode(true)}
+                    className="px-4 py-2 border border-purple-600 text-purple-600 rounded-lg hover:bg-purple-50 transition-colors text-sm flex items-center gap-2"
+                    disabled={!user || (user.role !== 'provider' && user.role !== 'admin')}
+                  >
+                    <Edit className="w-4 h-4" />
+                    Edit Profile
+                  </button>
+                ) : (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        if (!user) return;
+                        try {
+                          const payload: any = {
+                            name: formState.name,
+                            bio: formState.bio,
+                            years_experience: formState.years_experience,
+                            location: formState.location,
+                            profile_image: formState.profile_image,
+                            portfolio_images: formState.portfolio_images,
+                          };
+                          await userService.updateUser(user.id, payload);
+                          await refreshUser();
+                          setEditMode(false);
+                        } catch (err) {
+                          console.error('Failed to save profile', err);
+                        }
+                      }}
+                      className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => {
+                        setFormState((s: any) => ({
+                          ...s,
+                          name: user?.name || s.name,
+                          bio: (user as any)?.bio || s.bio,
+                          years_experience: (user as any)?.years_experience || s.years_experience,
+                          location: (user as any)?.location || s.location,
+                          profile_image: (user as any)?.profile_image || s.profile_image,
+                          portfolio_images: (user as any)?.portfolio_images || s.portfolio_images,
+                        }));
+                        setEditMode(false);
+                      }}
+                      className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-6">
                 <div className="flex items-start gap-6">
                   <div className="relative">
                     <ImageWithFallback
-                      src="https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080"
+                      src={formState.profile_image}
                       alt="Profile"
                       className="w-24 h-24 object-cover rounded-2xl"
                     />
-                    <button className="absolute -bottom-2 -right-2 w-8 h-8 bg-purple-600 text-white rounded-full flex items-center justify-center hover:bg-purple-700">
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      name="profile"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file || !user) return;
+                        try {
+                          const response = await userService.uploadProfileImage(user.id, file);
+                          await refreshUser();
+                          setFormState((s: any) => ({ ...s, profile_image: response.profile_image }));
+                        } catch (err) {
+                          console.error('Profile image upload failed', err);
+                        }
+                      }}
+                    />
+                    <button
+                      onClick={() => { if (editMode) fileInputRef.current?.click(); }}
+                      className="absolute -bottom-2 -right-2 w-8 h-8 bg-purple-600 text-white rounded-full flex items-center justify-center hover:bg-purple-700"
+                      title="Change profile image"
+                    >
                       <Camera className="w-4 h-4" />
                     </button>
                   </div>
                   <div className="flex-1">
-                    <h3 className="text-gray-900 mb-2">Sarah Johnson</h3>
-                    <p className="text-gray-600 mb-4">Wedding & Portrait Photographer</p>
+                    {editMode ? (
+                      <input
+                        value={formState.name}
+                        onChange={(e) => setFormState((s: any) => ({ ...s, name: e.target.value }))}
+                        className="text-xl text-gray-900 font-semibold border border-gray-200 rounded-md px-2 py-1"
+                      />
+                    ) : (
+                      <h3 className="text-gray-900 mb-2">{formState.name}</h3>
+                    )}
+                    {editMode ? (
+                      <input
+                        value={formState.title}
+                        onChange={(e) => setFormState((s: any) => ({ ...s, title: e.target.value }))}
+                        className="text-sm text-gray-600 border border-gray-200 rounded-md px-2 py-1 mb-2"
+                      />
+                    ) : (
+                      <p className="text-gray-600 mb-4">{formState.title}</p>
+                    )}
                     <div className="flex items-center gap-4 text-sm text-gray-600">
                       <div className="flex items-center gap-1">
                         <Star className="w-4 h-4 fill-yellow-400 text-yellow-400" />
@@ -201,9 +342,11 @@ export function ProviderDashboard() {
                 <div>
                   <label className="block text-sm text-gray-700 mb-2">Bio</label>
                   <textarea
-                    defaultValue="Professional photographer with over 10 years of experience specializing in weddings, portraits, and events. Passionate about capturing authentic moments and creating timeless memories for my clients."
+                    value={formState.bio}
+                    onChange={(e) => setFormState((s: any) => ({ ...s, bio: e.target.value }))}
                     rows={4}
                     className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                    readOnly={!editMode}
                   />
                 </div>
 
@@ -212,7 +355,9 @@ export function ProviderDashboard() {
                     <label className="block text-sm text-gray-700 mb-2">Years of Experience</label>
                     <input
                       type="number"
-                      defaultValue="10"
+                      value={formState.years_experience}
+                      onChange={(e) => setFormState((s: any) => ({ ...s, years_experience: Number(e.target.value) }))}
+                      readOnly={!editMode}
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                     />
                   </div>
@@ -220,7 +365,9 @@ export function ProviderDashboard() {
                     <label className="block text-sm text-gray-700 mb-2">Location</label>
                     <input
                       type="text"
-                      defaultValue="New York, NY"
+                      value={formState.location}
+                      onChange={(e) => setFormState((s: any) => ({ ...s, location: e.target.value }))}
+                      readOnly={!editMode}
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                     />
                   </div>
@@ -232,20 +379,63 @@ export function ProviderDashboard() {
             <div className="bg-white rounded-2xl p-6 shadow-sm">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-gray-900">Portfolio</h2>
-                <button className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2">
+                <input
+                  type="file"
+                  accept="image/*"
+                  ref={portfolioFileRef}
+                  name="images"
+                  multiple
+                  className="hidden"
+                  onChange={async (e) => {
+                    const files = Array.from(e.target.files || []);
+                    if (!user || files.length === 0) return;
+                    try {
+                      const resp = await userService.uploadPortfolioImages(user.id, files);
+                      await refreshUser();
+                      setFormState((s: any) => ({ ...s, portfolio_images: resp.portfolio_images }));
+                    } catch (err) {
+                      console.error('Portfolio update failed', err);
+                    }
+                  }}
+                />
+                <button
+                  onClick={() => { if (editMode) portfolioFileRef.current?.click(); }}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2"
+                  disabled={!editMode}
+                >
                   <Plus className="w-4 h-4" />
                   Add Images
                 </button>
               </div>
 
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {portfolioImages.map((image, index) => (
+                {(formState.portfolio_images || []).map((image: string, index: number) => (
                   <div key={index} className="relative group aspect-square">
                     <ImageWithFallback
                       src={image}
                       alt={`Portfolio ${index + 1}`}
                       className="w-full h-full object-cover rounded-xl"
                     />
+                    {editMode && (
+                      <button
+                        onClick={async () => {
+                          const arr = (formState.portfolio_images || []).filter((_: any, i: number) => i !== index);
+                          setFormState((s: any) => ({ ...s, portfolio_images: arr }));
+                          if (user) {
+                            try {
+                              await userService.updateUser(user.id, { portfolio_images: arr });
+                              await refreshUser();
+                            } catch (err) {
+                              console.error('Failed to remove image', err);
+                            }
+                          }
+                        }}
+                        className="absolute top-2 right-2 p-2 bg-white rounded-md hover:bg-gray-100"
+                        title="Remove image"
+                      >
+                        <XCircle className="w-4 h-4 text-red-600" />
+                      </button>
+                    )}
                     <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center">
                       <button className="p-2 bg-white rounded-lg hover:bg-gray-100">
                         <Upload className="w-5 h-5 text-gray-700" />
@@ -262,7 +452,6 @@ export function ProviderDashboard() {
             {/* Pricing & Packages */}
             <div className="bg-white rounded-2xl p-6 shadow-sm">
               <h2 className="text-gray-900 mb-6">Pricing & Packages</h2>
-
               <div className="space-y-4">
                 {['Basic Package', 'Standard Package', 'Premium Package'].map((pkg, index) => (
                   <div key={index} className="p-4 border border-gray-200 rounded-xl">

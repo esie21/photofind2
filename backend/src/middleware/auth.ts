@@ -2,7 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 
 interface AuthRequest extends Request {
-  userId?: number;
+  userId?: string;
   role?: string;
 }
 
@@ -23,8 +23,12 @@ export function verifyToken(
       token,
       process.env.JWT_SECRET || 'your_secret_key'
     );
-    req.userId = decoded.userId;
+    // Keep userId as string (UUID or numeric string) for consistent comparisons with route params
+    req.userId = String(decoded.userId);
     req.role = decoded.role;
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[verifyToken] decoded user:', { userId: req.userId, role: req.role });
+    }
     next();
   } catch (error) {
     return res.status(401).json({ error: 'Invalid token' });

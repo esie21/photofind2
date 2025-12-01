@@ -27,6 +27,11 @@ export interface User {
   name: string;
   role: 'client' | 'provider' | 'admin';
   createdAt?: string;
+  profile_image?: string;
+  portfolio_images?: string[];
+  bio?: string;
+  years_experience?: number;
+  location?: string;
 }
 
 const authService = {

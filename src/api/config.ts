@@ -16,6 +16,8 @@ export const API_CONFIG = {
       GET_BY_ID: (id: string) => `${API_URL}/users/${id}`,
       UPDATE: (id: string) => `${API_URL}/users/${id}`,
       DELETE: (id: string) => `${API_URL}/users/${id}`,
+      UPLOAD_PROFILE: (id: string) => `${API_URL}/users/${id}/upload/profile`,
+      UPLOAD_PORTFOLIO: (id: string) => `${API_URL}/users/${id}/upload/portfolio`,
     },
     // Bookings endpoints
     BOOKINGS: {
