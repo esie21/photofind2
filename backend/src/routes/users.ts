@@ -71,6 +71,7 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
     }
 
     const { name, bio, years_experience, location, profile_image, portfolio_images } = req.body;
+    console.log('Update user payload', { reqUserId: req.userId, targetId: userId, payload: { name, bio, years_experience, location, profile_image, portfolio_images } });
 
     // Build dynamic update
     const updates = [] as string[];
@@ -109,7 +110,9 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
     const sql = `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${idx} RETURNING id, email, name, role, profile_image, portfolio_images, bio, years_experience, location`;
     values.push(userId);
 
+    console.log('Executing SQL', { sql, values });
     const result = await pool.query(sql, values);
+    console.log('SQL result for update', result.rows[0]);
       // return result including new fields
     res.json(result.rows[0]);
   } catch (error) {

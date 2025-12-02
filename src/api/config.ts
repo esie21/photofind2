@@ -19,6 +19,10 @@ export const API_CONFIG = {
       UPLOAD_PROFILE: (id: string) => `${API_URL}/users/${id}/upload/profile`,
       UPLOAD_PORTFOLIO: (id: string) => `${API_URL}/users/${id}/upload/portfolio`,
     },
+    // Providers endpoints
+    PROVIDERS: {
+      GET_ALL: `${API_URL}/providers`,
+    },
     // Bookings endpoints
     BOOKINGS: {
       GET_ALL: `${API_URL}/bookings`,

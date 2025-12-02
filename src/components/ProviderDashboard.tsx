@@ -241,7 +241,9 @@ useEffect(() => {
                             profile_image: formState.profile_image,
                             portfolio_images: formState.portfolio_images,
                           };
-                          await userService.updateUser(user.id, payload);
+                          console.log('Saving profile payload', { payload, userId: user.id });
+                          const res = await userService.updateUser(user.id, payload);
+                          console.log('Update response', res);
                           await refreshUser();
                           setEditMode(false);
                         } catch (err) {
@@ -310,6 +312,8 @@ useEffect(() => {
                   <div className="flex-1">
                     {editMode ? (
                       <input
+                        id="profile-name"
+                        name="name"
                         value={formState.name}
                         onChange={(e) => setFormState((s: any) => ({ ...s, name: e.target.value }))}
                         className="text-xl text-gray-900 font-semibold border border-gray-200 rounded-md px-2 py-1"
@@ -319,6 +323,8 @@ useEffect(() => {
                     )}
                     {editMode ? (
                       <input
+                        id="profile-title"
+                        name="title"
                         value={formState.title}
                         onChange={(e) => setFormState((s: any) => ({ ...s, title: e.target.value }))}
                         className="text-sm text-gray-600 border border-gray-200 rounded-md px-2 py-1 mb-2"
@@ -340,8 +346,10 @@ useEffect(() => {
                 </div>
 
                 <div>
-                  <label className="block text-sm text-gray-700 mb-2">Bio</label>
-                  <textarea
+                  <label htmlFor="profile-bio" className="block text-sm text-gray-700 mb-2">Bio</label>
+                    <textarea
+                      id="profile-bio"
+                      name="bio"
                     value={formState.bio}
                     onChange={(e) => setFormState((s: any) => ({ ...s, bio: e.target.value }))}
                     rows={4}
@@ -352,8 +360,10 @@ useEffect(() => {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm text-gray-700 mb-2">Years of Experience</label>
+                    <label htmlFor="profile-years-experience" className="block text-sm text-gray-700 mb-2">Years of Experience</label>
                     <input
+                      id="profile-years-experience"
+                      name="years_experience"
                       type="number"
                       value={formState.years_experience}
                       onChange={(e) => setFormState((s: any) => ({ ...s, years_experience: Number(e.target.value) }))}
@@ -362,8 +372,10 @@ useEffect(() => {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm text-gray-700 mb-2">Location</label>
+                    <label htmlFor="profile-location" className="block text-sm text-gray-700 mb-2">Location</label>
                     <input
+                      id="profile-location"
+                      name="location"
                       type="text"
                       value={formState.location}
                       onChange={(e) => setFormState((s: any) => ({ ...s, location: e.target.value }))}
@@ -384,6 +396,7 @@ useEffect(() => {
                   accept="image/*"
                   ref={portfolioFileRef}
                   name="images"
+                  id="profile-portfolio"
                   multiple
                   className="hidden"
                   onChange={async (e) => {
@@ -458,12 +471,16 @@ useEffect(() => {
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex-1">
                         <input
+                          id={`package-title-${index}`}
+                          name={`package_title_${index}`}
                           type="text"
                           defaultValue={pkg}
                           className="text-gray-900 bg-transparent border-0 outline-none p-0"
                         />
                       </div>
                       <input
+                        id={`package-price-${index}`}
+                        name={`package_price_${index}`}
                         type="number"
                         defaultValue={(index + 1) * 1200}
                         className="w-24 text-right px-2 py-1 border border-gray-200 rounded-lg text-purple-600"

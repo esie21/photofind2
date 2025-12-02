@@ -77,7 +77,7 @@ export function ChatInterface({ provider, onClose }: ChatInterfaceProps) {
           />
           <div className="flex-1">
             <h3 className="text-gray-900">{provider.name}</h3>
-            <p className="text-sm text-gray-500">{provider.service}</p>
+            <p className="text-sm text-gray-500">{provider.featured_service?.title || provider.service}</p>
           </div>
           <button className="p-2 hover:bg-gray-100 rounded-lg">
             <MoreVertical className="w-5 h-5 text-gray-600" />

@@ -7,6 +7,17 @@ const userService = {
     return apiClient.get<User[]>(API_CONFIG.ENDPOINTS.USERS.GET_ALL);
   },
 
+  async getAllProviders(params?: { q?: string; page?: number; limit?: number }): Promise<{ data: User[]; meta?: any }> {
+    const url = new URL(API_CONFIG.ENDPOINTS.PROVIDERS.GET_ALL as string);
+    if (params?.q) url.searchParams.set('q', params.q);
+    if (params?.page) url.searchParams.set('page', params.page.toString());
+    if (params?.limit) url.searchParams.set('limit', params.limit.toString());
+    const resp = await apiClient.get<{ data: User[]; meta?: any }>(url.toString());
+    // Normalize property `profile_image` -> `image` for UI compatibility
+    const data = (resp.data || []).map((u: any) => ({ ...u, image: u.profile_image || (u as any).image }));
+    return { data, meta: resp.meta };
+  },
+
   async getUserById(id: string): Promise<User> {
     return apiClient.get<User>(API_CONFIG.ENDPOINTS.USERS.GET_BY_ID(id));
   },

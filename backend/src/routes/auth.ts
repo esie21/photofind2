@@ -24,20 +24,26 @@ router.post('/login', async (req: AuthRequest, res: Response) => {
     }
 
     // Query user from database
+    console.debug('Login attempt for email:', email);
     const result = await pool.query(
       'SELECT id, email, password_hash, role, name FROM users WHERE email = $1',
       [email]
     );
+    console.debug('Login lookup rows:', result.rows.length);
 
     if (result.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const user = result.rows[0];
-    const passwordMatch = await bcrypt.compare(
-      password,
-      user.password_hash
-    );
+    let passwordMatch = false;
+    try {
+      passwordMatch = await bcrypt.compare(password, user.password_hash);
+    } catch (bcryptErr) {
+      console.error('Bcrypt compare failed', bcryptErr);
+      passwordMatch = false;
+    }
+    console.debug('Password match:', passwordMatch);
 
     if (!passwordMatch) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -144,6 +150,17 @@ router.get('/me', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ error: 'Failed to get user' });
+  }
+});
+
+// Logout endpoint (no-op for JWT-based auth but helpful for clients)
+router.post('/logout', async (req: Request, res: Response) => {
+  try {
+    // If you want server-side invalidation, implement a token blacklist store here
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Logout error:', error);
+    return res.status(500).json({ error: 'Logout failed' });
   }
 });
 

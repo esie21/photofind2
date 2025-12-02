@@ -4,7 +4,9 @@ import dotenv from 'dotenv';
 import { testConnection, initializeTables } from './config/database';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
+import debugRoutes from './routes/debug';
 import usersRoutes from './routes/users';
+import providersRoutes from './routes/providers';
 import path from 'path';
 
 dotenv.config();
@@ -21,6 +23,11 @@ app.use(express.json());
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/users', usersRoutes);
+app.use('/api/providers', providersRoutes);
+// Register debug routes only in non-production
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/debug', debugRoutes);
+}
 
 // Serve uploaded media from local 'uploads' directory
 app.use('/uploads', express.static(path.resolve(__dirname, '../uploads')));

@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Search, SlidersHorizontal, Star, MapPin, Calendar, MessageSquare, Clock, ChevronRight, Filter, DollarSign } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { ChatInterface } from './ChatInterface';
 import { NotificationsPanel } from './NotificationsPanel';
+import userService from '../api/services/userService';
 
 interface ClientDashboardProps {
   onStartBooking: () => void;
@@ -12,18 +13,19 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
   const [showFilters, setShowFilters] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<any>(null);
+  const [providersList, setProvidersList] = useState<any[]>([]);
+  const [loadingProviders, setLoadingProviders] = useState(false);
+  const [providersError, setProvidersError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [typedQuery, setTypedQuery] = useState('');
+  const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(12);
+  const [totalProviders, setTotalProviders] = useState<number | null>(null);
   const [priceRange, setPriceRange] = useState([0, 1000]);
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [sortBy, setSortBy] = useState('recommended');
 
-  const providers = [
-    { id: 1, name: 'Sarah Johnson', service: 'Wedding Photographer', rating: 4.9, reviews: 127, price: 300, location: 'New York, NY', available: true, image: 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080' },
-    { id: 2, name: 'Michael Chen', service: 'Commercial Videographer', rating: 5.0, reviews: 89, price: 450, location: 'Los Angeles, CA', available: true, image: 'https://images.unsplash.com/photo-1713392824135-a7c7db3d9465?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx2aWRlb2dyYXBoZXIlMjBmaWxtaW5nfGVufDF8fHx8MTc2NDQwNzk1M3ww&ixlib=rb-4.1.0&q=80&w=1080' },
-    { id: 3, name: 'Emily Rodriguez', service: 'Portrait Photographer', rating: 4.8, reviews: 234, price: 200, location: 'Chicago, IL', available: false, image: 'https://images.unsplash.com/photo-1643264623879-bb85ea39c62a?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMHBob3RvZ3JhcGhlciUyMHByb2Zlc3Npb25hbHxlbnwxfHx8fDE3NjQ0MDc5NTR8MA&ixlib=rb-4.1.0&q=80&w=1080' },
-    { id: 4, name: 'David Park', service: 'Brand Designer', rating: 4.9, reviews: 156, price: 250, location: 'San Francisco, CA', available: true, image: 'https://images.unsplash.com/photo-1760780567530-389d8a3fba75?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxjcmVhdGl2ZSUyMHByb2Zlc3Npb25hbCUyMHN0dWRpb3xlbnwxfHx8fDE3NjQzNzkwODF8MA&ixlib=rb-4.1.0&q=80&w=1080' },
-    { id: 5, name: 'Jessica Lee', service: 'Makeup Artist', rating: 4.7, reviews: 98, price: 180, location: 'Miami, FL', available: true, image: 'https://images.unsplash.com/photo-1698181842119-a5283dea1440?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxtYWtldXAlMjBhcnRpc3QlMjBiZWF1dHl8ZW58MXx8fHwxNzY0MzU4MjcwfDA&ixlib=rb-4.1.0&q=80&w=1080' },
-    { id: 6, name: 'Alex Thompson', service: 'Event Videographer', rating: 4.9, reviews: 145, price: 380, location: 'Austin, TX', available: true, image: 'https://images.unsplash.com/photo-1713392824135-a7c7db3d9465?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx2aWRlb2dyYXBoZXIlMjBmaWxtaW5nfGVufDF8fHx8MTc2NDQwNzk1M3ww&ixlib=rb-4.1.0&q=80&w=1080' },
-  ];
+  // The providers list is loaded from the backend using `userService.getAllProviders()`
 
   const upcomingBookings = [
     { id: 1, provider: 'Sarah Johnson', service: 'Wedding Photography', date: '2025-12-15', time: '2:00 PM', status: 'confirmed', image: 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080' },
@@ -34,10 +36,41 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
     setSelectedProvider(provider);
   };
 
+  useEffect(() => {
+    (async () => {
+      setLoadingProviders(true);
+      try {
+        const res = await userService.getAllProviders({ q: searchQuery, page, limit });
+        const list = res.data;
+        const total = res.meta?.total ?? null;
+        setProvidersError(null);
+        setProvidersList(list);
+        setTotalProviders(total);
+        const pageCount = total ? Math.max(1, Math.ceil(total / limit)) : null;
+        if (pageCount && page > pageCount) {
+          setPage(pageCount);
+          return;
+        }
+        if (list.length === 0 && page > 1) {
+          // If the current page has no results, reset to page 1
+          setPage(1);
+        }
+      } catch (err: any) {
+        console.error('Failed to fetch providers', err);
+        setProvidersError(err?.message || 'Failed to load providers');
+      } finally {
+        setLoadingProviders(false);
+      }
+    })();
+  }, [searchQuery, page, limit]);
+
   const handleSendMessage = (provider: any) => {
     setSelectedProvider(provider);
     setShowChat(true);
   };
+
+  const totalPages = totalProviders ? Math.max(1, Math.ceil(totalProviders / limit)) : null;
+  const isLastPage = totalPages ? page >= totalPages : providersList.length < limit;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -53,9 +86,18 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
                   <input
                     type="text"
                     placeholder="Search for services or professionals..."
+                    value={typedQuery}
+                    onChange={(e) => setTypedQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { setSearchQuery(typedQuery); setPage(1); } }}
                     className="w-full pl-11 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                   />
                 </div>
+                <button
+                  onClick={() => { setSearchQuery(typedQuery); setPage(1); }}
+                  className="px-6 py-3 border border-gray-200 rounded-xl hover:bg-gray-50 flex items-center gap-2 justify-center"
+                >
+                  Search
+                </button>
                 <button 
                   onClick={() => setShowFilters(!showFilters)}
                   className="px-6 py-3 border border-gray-200 rounded-xl hover:bg-gray-50 flex items-center gap-2 justify-center"
@@ -112,7 +154,13 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
               <h2 className="text-gray-900">Available Professionals</h2>
               
               <div className="grid grid-cols-1 gap-4">
-                {providers.map((provider) => (
+                {loadingProviders ? (
+                  <div>Loading providers...</div>
+                ) : providersError ? (
+                  <div className="text-sm text-red-500">{providersError}</div>
+                ) : providersList.length === 0 ? (
+                  <div className="text-sm text-gray-600">No providers found</div>
+                ) : (providersList.map((provider) => (
                   <div key={provider.id} className="bg-white rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow">
                     <div className="flex flex-col sm:flex-row gap-6">
                       <div className="relative w-full sm:w-32 h-32 flex-shrink-0">
@@ -132,10 +180,10 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
                         <div className="flex items-start justify-between mb-2">
                           <div>
                             <h3 className="text-gray-900 mb-1">{provider.name}</h3>
-                            <p className="text-gray-600 text-sm">{provider.service}</p>
+                            <p className="text-gray-600 text-sm">{provider.featured_service?.title || provider.service}</p>
                           </div>
                           <div className="text-right">
-                            <div className="text-purple-600">${provider.price}/hr</div>
+                            <div className="text-purple-600">{provider.featured_service?.price ? `$${provider.featured_service.price}/hr` : provider.price ? `$${provider.price}/hr` : ''}</div>
                           </div>
                         </div>
 
@@ -175,7 +223,25 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
                       </div>
                     </div>
                   </div>
-                ))}
+                ))) }
+                  {/* Pagination */}
+                  <div className="flex items-center justify-between mt-4">
+                    <button
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      disabled={page <= 1 || loadingProviders}
+                      className="px-3 py-2 border rounded-md"
+                    >
+                      Prev
+                    </button>
+                    <div className="text-sm text-gray-600">{totalPages ? `Page ${page} of ${totalPages}` : `Page ${page}`}</div>
+                    <button
+                      onClick={() => setPage((p) => p + 1)}
+                      className="px-3 py-2 border rounded-md"
+                      disabled={isLastPage || loadingProviders}
+                    >
+                      Next
+                    </button>
+                  </div>
               </div>
             </div>
           </div>
