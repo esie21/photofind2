@@ -1,16 +1,25 @@
 import { useState } from 'react';
-import { Check, Calendar, Clock, CreditCard, ChevronRight, MessageSquare } from 'lucide-react';
+import { Check, Calendar, Clock, CreditCard, ChevronRight, MessageSquare, AlertCircle, Loader } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
+import bookingService from '../api/services/bookingService';
+import { useAuth } from '../context/AuthContext';
 
 interface BookingFlowProps {
   onComplete: () => void;
+  providerId?: number;
+  providerName?: string;
+  providerImage?: string;
 }
 
-export function BookingFlow({ onComplete }: BookingFlowProps) {
+export function BookingFlow({ onComplete, providerId = 1, providerName = 'Sarah Johnson', providerImage = 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080' }: BookingFlowProps) {
+  const { user } = useAuth();
   const [currentStep, setCurrentStep] = useState(1);
   const [selectedService, setSelectedService] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState('');
   const [selectedTime, setSelectedTime] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
 
   const steps = [
     { number: 1, name: 'Select Service', icon: Check },
@@ -18,6 +27,7 @@ export function BookingFlow({ onComplete }: BookingFlowProps) {
     { number: 3, name: 'Payment', icon: CreditCard },
   ];
 
+  // Map services to have IDs that match database service IDs
   const services = [
     { id: 'basic', name: 'Basic Package', duration: '4 hours', photos: '200+ photos', price: 1200, features: ['4 hours coverage', '200+ edited photos', 'Online gallery', 'Print release'] },
     { id: 'standard', name: 'Standard Package', duration: '8 hours', photos: '400+ photos', price: 2400, features: ['8 hours coverage', '400+ edited photos', 'Online gallery', 'Print release', 'Engagement session', 'USB drive'] },
@@ -34,23 +44,89 @@ export function BookingFlow({ onComplete }: BookingFlowProps) {
   const platformFee = selectedServiceData ? selectedServiceData.price * 0.15 : 0;
   const total = selectedServiceData ? selectedServiceData.price + platformFee : 0;
 
-  const handleNext = () => {
-    if (currentStep < 3) {
-      setCurrentStep(currentStep + 1);
-    } else {
-      onComplete();
-    }
-  };
-
   const canProceed = () => {
     if (currentStep === 1) return selectedService !== null;
     if (currentStep === 2) return selectedDate && selectedTime;
     return true;
   };
 
+  const handleNext = async () => {
+    if (currentStep < 3) {
+      setCurrentStep(currentStep + 1);
+      setError(null);
+    } else {
+      await submitBooking();
+    }
+  };
+
+  const submitBooking = async () => {
+    if (!user || !selectedServiceData) {
+      setError('Missing required information. Please log in and select a service.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setError(null);
+
+    try {
+      // Convert date and time to ISO string for start_date
+      const [year, month, day] = selectedDate.split('-');
+      const [hourStr] = selectedTime.split(':');
+      const hour = parseInt(hourStr) + (selectedTime.includes('PM') && hourStr !== '12' ? 12 : 0);
+      const startDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day), hour, 0, 0).toISOString();
+      
+      // End date is start date + duration
+      const endDate = new Date(new Date(startDate).getTime() + 4 * 60 * 60 * 1000).toISOString();
+
+      const bookingData = {
+        provider_id: providerId,
+        service_id: 1, // Using 1 as default; in production would map service name to DB id
+        start_date: startDate,
+        end_date: endDate,
+        total_price: total,
+      };
+
+      console.log('Submitting booking:', bookingData);
+      await bookingService.createBooking(bookingData);
+      
+      setSuccess(true);
+      setTimeout(() => {
+        onComplete();
+      }, 2000);
+    } catch (err: any) {
+      console.error('Booking error:', err);
+      const errorMsg = err?.response?.data?.error || err?.message || 'Failed to create booking. Please try again.';
+      setError(errorMsg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 py-8">
       <div className="max-w-4xl mx-auto px-4">
+        {/* Error Alert */}
+        {error && (
+          <div className="mb-6 bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-red-900">Booking Error</p>
+              <p className="text-sm text-red-700 mt-1">{error}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Success Alert */}
+        {success && (
+          <div className="mb-6 bg-green-50 border border-green-200 rounded-2xl p-4 flex items-start gap-3">
+            <Check className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-green-900">Booking Submitted!</p>
+              <p className="text-sm text-green-700 mt-1">Your booking request has been sent to the provider. Redirecting...</p>
+            </div>
+          </div>
+        )}
+
         {/* Progress Steps */}
         <div className="bg-white rounded-2xl p-6 shadow-sm mb-6">
           <div className="flex items-center justify-between">
@@ -246,13 +322,13 @@ export function BookingFlow({ onComplete }: BookingFlowProps) {
                 {/* Provider */}
                 <div className="flex gap-3">
                   <ImageWithFallback
-                    src="https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080"
-                    alt="Sarah Johnson"
+                    src={providerImage}
+                    alt={providerName}
                     className="w-16 h-16 object-cover rounded-xl"
                   />
                   <div>
-                    <p className="text-gray-900">Sarah Johnson</p>
-                    <p className="text-sm text-gray-600">Wedding Photographer</p>
+                    <p className="text-gray-900">{providerName}</p>
+                    <p className="text-sm text-gray-600">Service Provider</p>
                   </div>
                 </div>
 
@@ -305,18 +381,28 @@ export function BookingFlow({ onComplete }: BookingFlowProps) {
               {currentStep > 1 && (
                 <button
                   onClick={() => setCurrentStep(currentStep - 1)}
-                  className="w-full py-3 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors"
+                  disabled={isSubmitting}
+                  className="w-full py-3 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Back
                 </button>
               )}
               <button
                 onClick={handleNext}
-                disabled={!canProceed()}
+                disabled={!canProceed() || isSubmitting}
                 className="w-full py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
-                {currentStep === 3 ? 'Complete Booking' : 'Continue'}
-                {currentStep < 3 && <ChevronRight className="w-5 h-5" />}
+                {isSubmitting ? (
+                  <>
+                    <Loader className="w-5 h-5 animate-spin" />
+                    Processing...
+                  </>
+                ) : (
+                  <>
+                    {currentStep === 3 ? 'Complete Booking' : 'Continue'}
+                    {currentStep < 3 && <ChevronRight className="w-5 h-5" />}
+                  </>
+                )}
               </button>
             </div>
 

@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Search, Camera, Video, Palette, GraduationCap, Sparkles, Star, MapPin, ChevronRight, ChevronLeft } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
+import userService from '../api/services/userService';
 
 interface LandingPageProps {
   onViewChange: (view: 'client' | 'provider') => void;
@@ -23,12 +24,33 @@ export function LandingPage({ onViewChange }: LandingPageProps) {
     { name: 'David Park', service: 'Brand Designer', rating: 4.9, reviews: 156, price: '$250/hr', location: 'San Francisco, CA', image: 'https://images.unsplash.com/photo-1760780567530-389d8a3fba75?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxjcmVhdGl2ZSUyMHByb2Zlc3Npb25hbCUyMHN0dWRpb3xlbnwxfHx8fDE3NjQzNzkwODF8MA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
   ];
 
+  const [remoteProviders, setRemoteProviders] = useState<any[] | null>(null);
+  const [loadingProviders, setLoadingProviders] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      setLoadingProviders(true);
+      try {
+        const res = await userService.getAllProviders({ page: 1, limit: 6 });
+        // userService maps `profile_image` -> `image` so UI can use `image`
+        setRemoteProviders(res.data || []);
+      } catch (err) {
+        console.error('Failed to load remote providers for landing page', err);
+        setRemoteProviders([]);
+      } finally {
+        setLoadingProviders(false);
+      }
+    })();
+  }, []);
+
+  const providersToShow = (remoteProviders && remoteProviders.length > 0) ? remoteProviders : featuredProviders;
+
   const nextSlide = () => {
-    setCurrentSlide((prev) => (prev + 1) % featuredProviders.length);
+    setCurrentSlide((prev) => (prev + 1) % providersToShow.length);
   };
 
   const prevSlide = () => {
-    setCurrentSlide((prev) => (prev - 1 + featuredProviders.length) % featuredProviders.length);
+    setCurrentSlide((prev) => (prev - 1 + providersToShow.length) % providersToShow.length);
   };
 
   return (
@@ -119,45 +141,63 @@ export function LandingPage({ onViewChange }: LandingPageProps) {
           <div className="overflow-hidden">
             <div 
               className="flex transition-transform duration-500 ease-out"
-              style={{ transform: `translateX(-${currentSlide * (100 / 3)}%)` }}
+              style={{ transform: `translateX(-${currentSlide * (100 / Math.min(3, providersToShow.length || 3))}%)` }}
             >
-              {featuredProviders.map((provider, index) => (
-                <div key={index} className="w-1/3 flex-shrink-0 px-3">
-                  <div className="bg-white rounded-2xl overflow-hidden shadow-md hover:shadow-xl transition-shadow">
+              {loadingProviders ? (
+                // show 3 skeleton cards while loading
+                Array.from({ length: Math.min(3, 3) }).map((_, idx) => (
+                  <div key={`skeleton-${idx}`} className="flex-shrink-0 px-3" style={{ width: `${100 / Math.min(3, providersToShow.length || 3)}%` }}>
+                    <div className="bg-white rounded-2xl overflow-hidden shadow-md p-4">
+                      <div className="h-44 bg-gray-200 animate-pulse rounded-lg mb-4" />
+                      <div className="h-4 bg-gray-200 animate-pulse rounded w-3/4 mb-2" />
+                      <div className="h-3 bg-gray-200 animate-pulse rounded w-1/2" />
+                    </div>
+                  </div>
+                ))
+              ) : (
+                providersToShow.map((provider, index) => (
+                  <button
+                    key={index}
+                    onClick={() => onViewChange('client')}
+                    className="flex-shrink-0 px-3 text-left"
+                    style={{ width: `${100 / Math.min(3, providersToShow.length || 3)}%` }}
+                  >
+                    <div className="bg-white rounded-2xl overflow-hidden shadow-md hover:shadow-xl transition-shadow">
                     <div className="relative h-64">
                       <ImageWithFallback
-                        src={provider.image}
+                        src={provider.image || provider.profile_image || provider.imageUrl}
                         alt={provider.name}
                         className="w-full h-full object-cover"
                       />
                       <div className="absolute top-4 right-4 px-3 py-1 bg-white rounded-full flex items-center gap-1 shadow-lg">
                         <Star className="w-4 h-4 fill-yellow-400 text-yellow-400" />
-                        <span className="text-sm text-gray-900">{provider.rating}</span>
+                        <span className="text-sm text-gray-900">{provider.rating || provider.reviews || ''}</span>
                       </div>
                     </div>
                     <div className="p-6">
                       <h3 className="text-gray-900 mb-1">{provider.name}</h3>
-                      <p className="text-gray-600 text-sm mb-3">{provider.service}</p>
+                      <p className="text-gray-600 text-sm mb-3">{provider.featured_service?.title || provider.service || provider.title}</p>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2 text-sm text-gray-500">
                           <MapPin className="w-4 h-4" />
                           <span>{provider.location}</span>
                         </div>
-                        <span className="text-purple-600">{provider.price}</span>
+                        <span className="text-purple-600">{provider.featured_service?.price ? `$${provider.featured_service.price}/hr` : provider.price || ''}</span>
                       </div>
                       <div className="mt-3 text-sm text-gray-500">
-                        {provider.reviews} reviews
+                        {provider.reviews || (provider.featured_service ? '' : '')} {provider.reviews ? 'reviews' : ''}
                       </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                  </button>
+                ))
+              )}
             </div>
           </div>
 
           {/* Dots Navigation */}
           <div className="flex justify-center gap-2 mt-6">
-            {featuredProviders.map((_, index) => (
+            {providersToShow.map((_, index) => (
               <button
                 key={index}
                 onClick={() => setCurrentSlide(index)}

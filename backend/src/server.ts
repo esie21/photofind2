@@ -7,6 +7,7 @@ import adminRoutes from './routes/admin';
 import debugRoutes from './routes/debug';
 import usersRoutes from './routes/users';
 import providersRoutes from './routes/providers';
+import bookingsRoutes from './routes/bookings';
 import path from 'path';
 
 dotenv.config();
@@ -24,6 +25,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/providers', providersRoutes);
+app.use('/api/bookings', bookingsRoutes);
 // Register debug routes only in non-production
 if (process.env.NODE_ENV !== 'production') {
   app.use('/api/debug', debugRoutes);

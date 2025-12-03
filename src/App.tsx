@@ -54,7 +54,14 @@ export default function App() {
       
       <main>
         {currentView === 'landing' && <LandingPage onViewChange={handleViewChange} />}
-        {currentView === 'client' && <ClientDashboard onStartBooking={() => setCurrentView('booking')} />}
+        {currentView === 'client' && <ClientDashboard onStartBooking={() => {
+            if (!user) {
+              setAuthMode('login');
+              setShowAuthModal(true);
+              return;
+            }
+            setCurrentView('booking');
+          }} />}
         {currentView === 'provider' && <ProviderDashboard />}
         {currentView === 'booking' && <BookingFlow onComplete={() => setCurrentView('client')} />}
         {currentView === 'admin' && <AdminDashboard />}
