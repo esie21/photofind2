@@ -8,7 +8,9 @@ import debugRoutes from './routes/debug';
 import usersRoutes from './routes/users';
 import providersRoutes from './routes/providers';
 import bookingsRoutes from './routes/bookings';
+import servicesRoutes from './routes/services';
 import path from 'path';
+
 
 dotenv.config();
 
@@ -26,13 +28,15 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/providers', providersRoutes);
 app.use('/api/bookings', bookingsRoutes);
+app.use('/api/services', servicesRoutes);
 // Register debug routes only in non-production
 if (process.env.NODE_ENV !== 'production') {
   app.use('/api/debug', debugRoutes);
 }
 
-// Serve uploaded media from local 'uploads' directory
-app.use('/uploads', express.static(path.resolve(__dirname, '../uploads')));
+// Serve uploaded media from project root 'uploads' directory
+// Use two-levels-up relative path so backend/src -> ../.. -> project root
+app.use('/uploads', express.static(path.resolve(__dirname, '../../uploads')));
 
 // Health check
 app.get('/api/health', (req: Request, res: Response) => {

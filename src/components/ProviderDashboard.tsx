@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
-import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus } from 'lucide-react';
+import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2 } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { useAuth } from '../context/AuthContext';
 import userService from '../api/services/userService';
+import serviceService from '../api/services/serviceService';
 import { ChatInterface } from './ChatInterface';
 
 export function ProviderDashboard() {
@@ -14,6 +15,8 @@ export function ProviderDashboard() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const portfolioFileRef = useRef<HTMLInputElement | null>(null);
   const [editMode, setEditMode] = useState(false);
+  const [packages, setPackages] = useState<any[]>([]);
+  const [isLoadingPackages, setIsLoadingPackages] = useState(false);
   const [formState, setFormState] = useState<any>({
   name: user?.name || 'Sarah Johnson',
   title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
@@ -67,6 +70,99 @@ useEffect(() => {
     ),
   });
 }, [user]);
+
+  // Load services/packages for the provider
+  useEffect(() => {
+    const loadPackages = async () => {
+      if (!user || user.role !== 'provider') return;
+      
+      setIsLoadingPackages(true);
+      try {
+        const allServices = await serviceService.getAllServices();
+        console.log('All services loaded:', allServices.length);
+        console.log('Current user ID:', user.id);
+        console.log('Sample service:', allServices[0]);
+        
+        // Filter services for current provider (handle both snake_case and camelCase)
+        const providerServices = allServices.filter((service: any) => {
+          const serviceUserId = String(service.providerId || service.provider_id || '');
+          const currentUserId = String(user.id || '');
+          const matches = serviceUserId === currentUserId;
+          if (!matches && service.providerId !== undefined) {
+            console.log('Service mismatch:', {
+              serviceId: service.id,
+              serviceProviderId: service.providerId,
+              serviceProvider_id: service.provider_id,
+              currentUserId: user.id
+            });
+          }
+          return matches;
+        });
+        
+        console.log('Filtered provider services:', providerServices.length);
+        
+        if (providerServices.length > 0) {
+          setPackages(providerServices.map((s: any) => ({
+            id: s.id,
+            title: s.title || '',
+            description: s.description || '',
+            price: parseFloat(s.price) || 0,
+            category: s.category || '',
+          })));
+        } else {
+          // Initialize with default packages if none exist
+          setPackages([
+            { id: null, title: 'Basic Package', description: 'Description of package features and benefits...', price: 1200, category: 'Photography' },
+            { id: null, title: 'Standard Package', description: 'Description of package features and benefits...', price: 2400, category: 'Photography' },
+            { id: null, title: 'Premium Package', description: 'Description of package features and benefits...', price: 3600, category: 'Photography' },
+          ]);
+        }
+      } catch (error) {
+        console.error('Failed to load packages:', error);
+        // Initialize with default packages on error
+        setPackages([
+          { id: null, title: 'Basic Package', description: 'Description of package features and benefits...', price: 1200, category: 'Photography' },
+          { id: null, title: 'Standard Package', description: 'Description of package features and benefits...', price: 2400, category: 'Photography' },
+          { id: null, title: 'Premium Package', description: 'Description of package features and benefits...', price: 3600, category: 'Photography' },
+        ]);
+      } finally {
+        setIsLoadingPackages(false);
+      }
+    };
+
+    loadPackages();
+  }, [user]);
+
+  // Reload packages when exiting edit mode (in case packages were saved)
+  useEffect(() => {
+    if (!editMode && user && user.role === 'provider') {
+      const loadPackages = async () => {
+        setIsLoadingPackages(true);
+        try {
+          const allServices = await serviceService.getAllServices();
+          // Filter services for current provider (handle both snake_case and camelCase)
+          const providerServices = allServices.filter(
+            (service: any) => String(service.providerId || service.provider_id) === String(user.id)
+          );
+          
+          if (providerServices.length > 0) {
+            setPackages(providerServices.map((s: any) => ({
+              id: s.id,
+              title: s.title || '',
+              description: s.description || '',
+              price: parseFloat(s.price) || 0,
+              category: s.category || '',
+            })));
+          }
+        } catch (error) {
+          console.error('Failed to reload packages:', error);
+        } finally {
+          setIsLoadingPackages(false);
+        }
+      };
+      loadPackages();
+    }
+  }, [editMode, user]);
 
 
   const bookingRequests = [
@@ -233,6 +329,7 @@ useEffect(() => {
                       onClick={async () => {
                         if (!user) return;
                         try {
+                          // Save profile information
                           const payload: any = {
                             name: formState.name,
                             bio: formState.bio,
@@ -244,6 +341,51 @@ useEffect(() => {
                           console.log('Saving profile payload', { payload, userId: user.id });
                           const res = await userService.updateUser(user.id, payload);
                           console.log('Update response', res);
+                          
+                          // Save packages/services
+                          if (packages.length > 0) {
+                            try {
+                              await Promise.all(
+                                packages.map(async (pkg) => {
+                                  if (pkg.id) {
+                                    // Update existing service
+                                    return serviceService.updateService(pkg.id, {
+                                      title: pkg.title,
+                                      description: pkg.description,
+                                      price: pkg.price,
+                                      category: pkg.category,
+                                    });
+                                  } else {
+                                    // Create new service
+                                    return serviceService.createService({
+                                      title: pkg.title,
+                                      description: pkg.description,
+                                      price: pkg.price,
+                                      category: pkg.category || 'Photography',
+                                    });
+                                  }
+                                })
+                              );
+                              console.log('Packages saved successfully');
+                              
+                              // Reload packages to get IDs for newly created ones
+                              const allServices = await serviceService.getAllServices();
+                              const providerServices = allServices.filter(
+                                (service: any) => String(service.providerId || service.provider_id) === String(user.id)
+                              );
+                              setPackages(providerServices.map((s: any) => ({
+                                id: s.id,
+                                title: s.title || '',
+                                description: s.description || '',
+                                price: parseFloat(s.price) || 0,
+                                category: s.category || '',
+                              })));
+                            } catch (packageError) {
+                              console.error('Failed to save packages:', packageError);
+                              // Continue even if packages fail to save
+                            }
+                          }
+                          
                           await refreshUser();
                           setEditMode(false);
                         } catch (err) {
@@ -464,36 +606,132 @@ useEffect(() => {
 
             {/* Pricing & Packages */}
             <div className="bg-white rounded-2xl p-6 shadow-sm">
-              <h2 className="text-gray-900 mb-6">Pricing & Packages</h2>
-              <div className="space-y-4">
-                {['Basic Package', 'Standard Package', 'Premium Package'].map((pkg, index) => (
-                  <div key={index} className="p-4 border border-gray-200 rounded-xl">
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex-1">
-                        <input
-                          id={`package-title-${index}`}
-                          name={`package_title_${index}`}
-                          type="text"
-                          defaultValue={pkg}
-                          className="text-gray-900 bg-transparent border-0 outline-none p-0"
-                        />
-                      </div>
-                      <input
-                        id={`package-price-${index}`}
-                        name={`package_price_${index}`}
-                        type="number"
-                        defaultValue={(index + 1) * 1200}
-                        className="w-24 text-right px-2 py-1 border border-gray-200 rounded-lg text-purple-600"
-                      />
-                    </div>
-                    <textarea
-                      defaultValue="Description of package features and benefits..."
-                      rows={2}
-                      className="w-full text-sm text-gray-600 bg-transparent border-0 outline-none p-0 resize-none"
-                    />
-                  </div>
-                ))}
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-gray-900">Pricing & Packages</h2>
+                {editMode && (
+                  <button
+                    onClick={() => {
+                      setPackages([...packages, {
+                        id: null,
+                        title: 'New Package',
+                        description: 'Description of package features and benefits...',
+                        price: 0,
+                        category: 'Photography'
+                      }]);
+                    }}
+                    className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Package
+                  </button>
+                )}
               </div>
+              {isLoadingPackages ? (
+                <div className="text-center py-8 text-gray-500">Loading packages...</div>
+              ) : (
+                <div className="space-y-4">
+                  {packages.map((pkg, index) => (
+                    <div key={index} className="p-4 border border-gray-200 rounded-xl">
+                      <div className="flex items-start justify-between gap-4 mb-3">
+                        <div className="flex-1">
+                          {editMode ? (
+                            <input
+                              type="text"
+                              value={pkg.title}
+                              onChange={(e) => {
+                                const updated = [...packages];
+                                updated[index].title = e.target.value;
+                                setPackages(updated);
+                              }}
+                              className="text-gray-900 border border-gray-200 rounded-md px-3 py-2 w-full focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                              placeholder="Package name"
+                            />
+                          ) : (
+                            <h3 className="text-gray-900">{pkg.title}</h3>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {editMode && (
+                            <span className="text-gray-400">$</span>
+                          )}
+                          {editMode ? (
+                            <input
+                              type="number"
+                              value={pkg.price}
+                              onChange={(e) => {
+                                const updated = [...packages];
+                                updated[index].price = parseFloat(e.target.value) || 0;
+                                setPackages(updated);
+                              }}
+                              className="w-24 text-right px-2 py-2 border border-gray-200 rounded-lg text-purple-600 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                              min="0"
+                              step="0.01"
+                            />
+                          ) : (
+                            <span className="text-purple-600 font-semibold">${pkg.price.toLocaleString()}</span>
+                          )}
+                          {editMode && packages.length > 1 && (
+                            <button
+                              onClick={async () => {
+                                if (pkg.id && user) {
+                                  try {
+                                    await serviceService.deleteService(pkg.id);
+                                  } catch (error) {
+                                    console.error('Failed to delete service:', error);
+                                  }
+                                }
+                                const updated = packages.filter((_, i) => i !== index);
+                                setPackages(updated);
+                              }}
+                              className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                              title="Delete package"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {editMode ? (
+                        <textarea
+                          value={pkg.description}
+                          onChange={(e) => {
+                            const updated = [...packages];
+                            updated[index].description = e.target.value;
+                            setPackages(updated);
+                          }}
+                          rows={3}
+                          className="w-full text-sm text-gray-600 border border-gray-200 rounded-md px-3 py-2 resize-none focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                          placeholder="Description of package features and benefits..."
+                        />
+                      ) : (
+                        <p className="text-sm text-gray-600 whitespace-pre-wrap">{pkg.description}</p>
+                      )}
+                    </div>
+                  ))}
+                  {packages.length === 0 && !isLoadingPackages && (
+                    <div className="text-center py-8 text-gray-500">
+                      <p className="mb-4">No packages added yet.</p>
+                      {editMode && (
+                        <button
+                          onClick={() => {
+                            setPackages([{
+                              id: null,
+                              title: 'New Package',
+                              description: 'Description of package features and benefits...',
+                              price: 0,
+                              category: 'Photography'
+                            }]);
+                          }}
+                          className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2 mx-auto"
+                        >
+                          <Plus className="w-4 h-4" />
+                          Add Your First Package
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}

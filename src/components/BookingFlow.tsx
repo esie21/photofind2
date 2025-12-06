@@ -79,11 +79,11 @@ export function BookingFlow({ onComplete, providerId = 1, providerName = 'Sarah 
       const endDate = new Date(new Date(startDate).getTime() + 4 * 60 * 60 * 1000).toISOString();
 
       const bookingData = {
-        provider_id: providerId,
+        provider_id: Number(providerId),
         service_id: 1, // Using 1 as default; in production would map service name to DB id
         start_date: startDate,
         end_date: endDate,
-        total_price: total,
+        total_price: Number(total.toFixed(2)),
       };
 
       console.log('Submitting booking:', bookingData);
@@ -95,7 +95,7 @@ export function BookingFlow({ onComplete, providerId = 1, providerName = 'Sarah 
       }, 2000);
     } catch (err: any) {
       console.error('Booking error:', err);
-      const errorMsg = err?.response?.data?.error || err?.message || 'Failed to create booking. Please try again.';
+      const errorMsg = err?.message || 'Failed to create booking. Please try again.';
       setError(errorMsg);
     } finally {
       setIsSubmitting(false);

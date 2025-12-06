@@ -15,11 +15,11 @@ export interface Booking {
 }
 
 export interface CreateBookingData {
-  providerId: string;
-  serviceId: string;
-  startDate: string;
-  endDate: string;
-  totalPrice: number;
+  provider_id: number;
+  service_id: number;
+  start_date: string;
+  end_date: string;
+  total_price: number;
 }
 
 const bookingService = {
@@ -34,10 +34,10 @@ const bookingService = {
   },
 
   async createBooking(data: CreateBookingData): Promise<Booking> {
-    return apiClient.post<Booking>(
+    return apiClient.post<{ data: Booking }>(
       API_CONFIG.ENDPOINTS.BOOKINGS.CREATE,
       data
-    );
+    ).then(response => response.data);
   },
 
   async updateBooking(id: string, data: Partial<Booking>): Promise<Booking> {
