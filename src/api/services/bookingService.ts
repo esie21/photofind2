@@ -8,7 +8,12 @@ export interface Booking {
   serviceId: string;
   startDate: string;
   endDate: string;
-  status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
+  status: 'pending' | 'accepted' | 'rejected' | 'confirmed' | 'completed' | 'cancelled';
+  booking_mode?: 'instant' | 'request';
+  accepted_at?: string | null;
+  rejected_at?: string | null;
+  cancelled_at?: string | null;
+  completed_at?: string | null;
   totalPrice: number;
   createdAt: string;
   updatedAt: string;
@@ -18,19 +23,30 @@ export interface CreateBookingData {
   provider_id: number;
   service_id: number;
   start_date: string;
-  end_date: string;
+  end_date?: string;
   total_price: number;
+  booking_mode?: 'instant' | 'request';
 }
 
 const bookingService = {
   async getAllBookings(): Promise<Booking[]> {
-    return apiClient.get<Booking[]>(API_CONFIG.ENDPOINTS.BOOKINGS.GET_ALL);
+    const resp = await apiClient.get<{ data: Booking[] }>(API_CONFIG.ENDPOINTS.BOOKINGS.GET_ALL);
+    return resp.data;
+  },
+
+  async getMyBookings(): Promise<Booking[]> {
+    const resp = await apiClient.get<{ data: Booking[] }>((API_CONFIG.ENDPOINTS.BOOKINGS as any).MY);
+    return resp.data;
+  },
+
+  async getMyProviderBookings(): Promise<Booking[]> {
+    const resp = await apiClient.get<{ data: Booking[] }>((API_CONFIG.ENDPOINTS.BOOKINGS as any).PROVIDER_MY);
+    return resp.data;
   },
 
   async getBookingById(id: string): Promise<Booking> {
-    return apiClient.get<Booking>(
-      API_CONFIG.ENDPOINTS.BOOKINGS.GET_BY_ID(id)
-    );
+    const resp = await apiClient.get<{ data: Booking }>(API_CONFIG.ENDPOINTS.BOOKINGS.GET_BY_ID(id));
+    return resp.data;
   },
 
   async createBooking(data: CreateBookingData): Promise<Booking> {
@@ -41,10 +57,8 @@ const bookingService = {
   },
 
   async updateBooking(id: string, data: Partial<Booking>): Promise<Booking> {
-    return apiClient.put<Booking>(
-      API_CONFIG.ENDPOINTS.BOOKINGS.UPDATE(id),
-      data
-    );
+    const resp = await apiClient.put<{ data: Booking }>(API_CONFIG.ENDPOINTS.BOOKINGS.UPDATE(id), data);
+    return resp.data;
   },
 
   async deleteBooking(id: string): Promise<void> {

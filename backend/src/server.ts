@@ -2,21 +2,26 @@ import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { testConnection, initializeTables } from './config/database';
+import { pool } from './config/database';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
 import debugRoutes from './routes/debug';
 import usersRoutes from './routes/users';
 import providersRoutes from './routes/providers';
 import bookingsRoutes from './routes/bookings';
+import availabilityRoutes from './routes/availability';
 import servicesRoutes from './routes/services';
+import messagesRoutes from './routes/messages';
+import chatRoutes from './routes/chat';
 import path from 'path';
-
+import http from 'http';
+import { Server as SocketIOServer } from 'socket.io';
+import type { Socket } from 'socket.io';
+import jwt from 'jsonwebtoken';
 
 dotenv.config();
 
 const app: Express = express();
-
-
 
 // Middleware
 app.use(cors());
@@ -28,7 +33,10 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/providers', providersRoutes);
 app.use('/api/bookings', bookingsRoutes);
+app.use('/api/availability', availabilityRoutes);
 app.use('/api/services', servicesRoutes);
+app.use('/api/messages', messagesRoutes);
+app.use('/api/chat', chatRoutes);
 // Register debug routes only in non-production
 if (process.env.NODE_ENV !== 'production') {
   app.use('/api/debug', debugRoutes);
@@ -45,6 +53,169 @@ app.get('/api/health', (req: Request, res: Response) => {
 
 const PORT = process.env.PORT || 3001;
 
+const httpServer = http.createServer(app);
+
+const io = new SocketIOServer(httpServer, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
+});
+
+app.set('io', io);
+
+type PresenceMap = Map<string, Set<string>>;
+const bookingPresence: PresenceMap = new Map();
+
+function getRoomName(bookingId: string) {
+  return `booking:${bookingId}`;
+}
+
+async function ensureBookingChat(bookingId: string) {
+  const bookingRes = await pool.query(
+    'SELECT id, client_id, provider_id FROM bookings WHERE id::text = $1',
+    [bookingId]
+  );
+  const booking = bookingRes.rows[0];
+  if (!booking) return null;
+
+  const existing = await pool.query('SELECT id FROM chats WHERE booking_id::text = $1', [bookingId]);
+  if (existing.rows[0]) {
+    return { chatId: String(existing.rows[0].id), booking };
+  }
+
+  const created = await pool.query(
+    'INSERT INTO chats (booking_id, user_a, user_b) VALUES ($1, $2, $3) RETURNING id',
+    [String(bookingId), String(booking.client_id), String(booking.provider_id)]
+  );
+  return { chatId: String(created.rows[0].id), booking };
+}
+
+function addPresence(bookingId: string, userId: string) {
+  const set = bookingPresence.get(bookingId) || new Set<string>();
+  set.add(userId);
+  bookingPresence.set(bookingId, set);
+}
+
+function removePresence(bookingId: string, userId: string) {
+  const set = bookingPresence.get(bookingId);
+  if (!set) return;
+  set.delete(userId);
+  if (set.size === 0) bookingPresence.delete(bookingId);
+}
+
+io.use((socket: Socket, next: (err?: Error) => void) => {
+  const token =
+    (socket.handshake.auth as any)?.token ||
+    socket.handshake.headers.authorization?.toString().split(' ')[1];
+
+  if (!token) return next(new Error('Unauthorized'));
+
+  try {
+    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'your_secret_key');
+    (socket.data as any).userId = String(decoded.userId);
+    next();
+  } catch (_e) {
+    next(new Error('Unauthorized'));
+  }
+});
+
+io.on('connection', (socket: Socket) => {
+  const userId = String((socket.data as any).userId || '');
+  (socket.data as any).joinedBookings = new Set<string>();
+
+  socket.on('chat:join', async (payload: any) => {
+    const bookingId = String(payload?.bookingId || '');
+    if (!bookingId) return;
+
+    const bookingRes = await pool.query(
+      'SELECT id, client_id, provider_id FROM bookings WHERE id::text = $1',
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) return;
+
+    if (String(booking.client_id) !== userId && String(booking.provider_id) !== userId) return;
+
+    const room = getRoomName(bookingId);
+    socket.join(room);
+    (socket.data as any).joinedBookings.add(bookingId);
+    addPresence(bookingId, userId);
+    io.to(room).emit('chat:presence', { bookingId, userId, online: true });
+  });
+
+  socket.on('chat:typing', (payload: any) => {
+    const bookingId = String(payload?.bookingId || '');
+    const isTyping = Boolean(payload?.isTyping);
+    if (!bookingId) return;
+    socket.to(getRoomName(bookingId)).emit('chat:typing', {
+      bookingId,
+      userId,
+      isTyping,
+    });
+  });
+
+  socket.on('chat:read', async (payload: any) => {
+    const bookingId = String(payload?.bookingId || '');
+    if (!bookingId) return;
+
+    const ensured = await ensureBookingChat(bookingId);
+    if (!ensured) return;
+
+    await pool.query(
+      `
+        UPDATE chat_messages
+        SET read_at = CURRENT_TIMESTAMP
+        WHERE chat_id = $1
+          AND sender_id IS NOT NULL
+          AND sender_id <> $2
+          AND read_at IS NULL
+      `,
+      [ensured.chatId, userId]
+    );
+
+    io.to(getRoomName(bookingId)).emit('chat:read', {
+      bookingId,
+      readerId: userId,
+      readAt: new Date().toISOString(),
+    });
+  });
+
+  socket.on('chat:send', async (payload: any) => {
+    const bookingId = String(payload?.bookingId || '');
+    const content = String(payload?.content || '').trim();
+    if (!bookingId || !content) return;
+
+    const ensured = await ensureBookingChat(bookingId);
+    if (!ensured) return;
+    if (String(ensured.booking.client_id) !== userId && String(ensured.booking.provider_id) !== userId) return;
+
+    const inserted = await pool.query(
+      `
+        INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+        VALUES ($1, $2, $3, FALSE)
+        RETURNING id, chat_id, sender_id, content, attachment_url, attachment_type, attachment_name, is_system, created_at, read_at
+      `,
+      [ensured.chatId, userId, content]
+    );
+
+    await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id::text = $1', [ensured.chatId]);
+
+    io.to(getRoomName(bookingId)).emit('chat:message', {
+      bookingId,
+      message: inserted.rows[0],
+    });
+  });
+
+  socket.on('disconnect', () => {
+    const joined: Set<string> = (socket.data as any).joinedBookings || new Set<string>();
+    joined.forEach((bookingId) => {
+      removePresence(bookingId, userId);
+      io.to(getRoomName(bookingId)).emit('chat:presence', { bookingId, userId, online: false });
+    });
+  });
+});
+
 async function startServer() {
   try {
     // Test database connection
@@ -53,7 +224,7 @@ async function startServer() {
     // Initialize tables
     await initializeTables();
 
-    app.listen(PORT, () => {
+    httpServer.listen(PORT, () => {
       console.log(`\n✅ Server running on http://localhost:${PORT}`);
       console.log(`📱 Frontend connects to: http://localhost:${PORT}/api`);
       console.log(`🗄️  Database: ${process.env.DB_NAME}`);

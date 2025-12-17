@@ -4,19 +4,29 @@ import { ImageWithFallback } from './figma/ImageWithFallback';
 import { useAuth } from '../context/AuthContext';
 import userService from '../api/services/userService';
 import serviceService from '../api/services/serviceService';
+import bookingService from '../api/services/bookingService';
+import availabilityService from '../api/services/availabilityService';
 import { ChatInterface } from './ChatInterface';
 
 export function ProviderDashboard() {
-  const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+  const BASE_URL = ((import.meta as any).env?.VITE_API_URL as string) || 'http://localhost:3001/api';
   const STATIC_URL = 'http://localhost:3001/uploads';
-  const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'bookings' | 'earnings' | 'reviews'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'availability' | 'bookings' | 'earnings' | 'reviews'>('overview');
   const [showChat, setShowChat] = useState(false);
+  const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
   const { user, refreshUser } = useAuth();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const portfolioFileRef = useRef<HTMLInputElement | null>(null);
   const [editMode, setEditMode] = useState(false);
   const [packages, setPackages] = useState<any[]>([]);
   const [isLoadingPackages, setIsLoadingPackages] = useState(false);
+  const [providerBookings, setProviderBookings] = useState<any[]>([]);
+  const [isLoadingBookings, setIsLoadingBookings] = useState(false);
+  const [availabilitySlots, setAvailabilitySlots] = useState<any[]>([]);
+  const [isLoadingAvailability, setIsLoadingAvailability] = useState(false);
+  const [newSlotStart, setNewSlotStart] = useState('');
+  const [newSlotEnd, setNewSlotEnd] = useState('');
+  const [isSavingSlot, setIsSavingSlot] = useState(false);
   const [formState, setFormState] = useState<any>({
   name: user?.name || 'Sarah Johnson',
   title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
@@ -43,12 +53,31 @@ export function ProviderDashboard() {
     }
   }, [formState.profile_image, formState.portfolio_images]);
 
-  const stats = [
-    { label: 'Upcoming Bookings', value: '12', change: '+3%', icon: Calendar, color: 'purple' },
-    { label: 'Earnings (30d)', value: '$8,450', change: '+6%', icon: DollarSign, color: 'green' },
-    { label: 'Completed Bookings', value: '230', change: '+10%', icon: TrendingUp, color: 'blue' },
-    { label: 'Avg Rating', value: '4.9', change: '+1%', icon: Star, color: 'yellow' },
-  ];
+  // Calculate real stats from bookings
+  const stats = (() => {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const upcomingBookings = providerBookings.filter(b =>
+      ['pending', 'accepted', 'confirmed'].includes(b.status) &&
+      new Date(b.date) >= now
+    ).length;
+
+    const completedBookings = providerBookings.filter(b => b.status === 'completed').length;
+
+    const recentEarnings = providerBookings
+      .filter(b => b.status === 'completed' && new Date(b.date) >= thirtyDaysAgo)
+      .reduce((sum, b) => sum + (b.amount || 0), 0);
+
+    const pendingBookings = providerBookings.filter(b => b.status === 'pending').length;
+
+    return [
+      { label: 'Upcoming Bookings', value: String(upcomingBookings), change: `${pendingBookings} pending`, icon: Calendar, color: 'purple' },
+      { label: 'Earnings (30d)', value: `$${recentEarnings.toLocaleString()}`, change: 'Last 30 days', icon: DollarSign, color: 'green' },
+      { label: 'Completed Bookings', value: String(completedBookings), change: 'All time', icon: TrendingUp, color: 'blue' },
+      { label: 'Total Bookings', value: String(providerBookings.length), change: 'All statuses', icon: Star, color: 'yellow' },
+    ];
+  })();
 
   // Sync formState when user changes
 useEffect(() => {
@@ -164,12 +193,70 @@ useEffect(() => {
     }
   }, [editMode, user]);
 
+  useEffect(() => {
+    (async () => {
+      if (!user || (user.role !== 'provider' && user.role !== 'admin')) return;
+      setIsLoadingBookings(true);
+      try {
+        const data = await bookingService.getMyProviderBookings();
+        const mapped = (data || []).map((b: any) => {
+          const start = b.start_date ? new Date(b.start_date) : b.startDate ? new Date(b.startDate) : null;
+          const date = start ? start.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) : '';
+          const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
 
-  const bookingRequests = [
-    { id: 1, client: 'Emma Williams', service: 'Wedding Photography', date: '2025-12-20', time: '3:00 PM', amount: 2400, status: 'pending', image: 'https://images.unsplash.com/photo-1643968612613-fd411aecd1fd?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwaG90b2dyYXBoZXIlMjBjYW1lcmElMjBwcm9mZXNzaW9uYWx8ZW58MXx8fHwxNzY0NDAwNjc1fDA&ixlib=rb-4.1.0&q=80&w=1080' },
-    { id: 2, client: 'James Smith', service: 'Portrait Session', date: '2025-12-18', time: '10:00 AM', amount: 1200, status: 'pending', image: 'https://images.unsplash.com/photo-1643264623879-bb85ea39c62a?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMHBob3RvZ3JhcGhlciUyMHByb2Zlc3Npb25hbHxlbnwxfHx8fDE3NjQ0MDc5NTR8MA&ixlib=rb-4.1.0&q=80&w=1080' },
-    { id: 3, client: 'Sophia Brown', service: 'Engagement Photos', date: '2025-12-15', time: '2:00 PM', amount: 1800, status: 'confirmed', image: 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080' },
-  ];
+          // Handle client image URL
+          let clientImage = b.client_image;
+          if (clientImage && !clientImage.startsWith('http')) {
+            clientImage = `${STATIC_URL}/${clientImage}`;
+          }
+          if (!clientImage) {
+            clientImage = `https://ui-avatars.com/api/?name=${encodeURIComponent(b.client_name || 'Client')}&background=7c3aed&color=fff`;
+          }
+
+          return {
+            id: b.id,
+            client: b.client_name || b.client_email || 'Client',
+            clientEmail: b.client_email,
+            service: b.service_title || 'Service',
+            date,
+            time,
+            amount: Number(b.total_price || b.totalPrice || 0),
+            status: b.status,
+            image: clientImage,
+          };
+        });
+        setProviderBookings(mapped);
+      } catch (e) {
+        setProviderBookings([]);
+      } finally {
+        setIsLoadingBookings(false);
+      }
+    })();
+  }, [user]);
+
+  useEffect(() => {
+    (async () => {
+      if (!user || (user.role !== 'provider' && user.role !== 'admin')) return;
+      setIsLoadingAvailability(true);
+      try {
+        const from = new Date();
+        const to = new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000);
+        const data = await availabilityService.getProviderSlots({
+          providerId: user.id,
+          from: from.toISOString(),
+          to: to.toISOString(),
+        });
+        setAvailabilitySlots(data || []);
+      } catch (_e) {
+        setAvailabilitySlots([]);
+      } finally {
+        setIsLoadingAvailability(false);
+      }
+    })();
+  }, [user]);
+
+
+  const bookingRequests = providerBookings;
 
   const reviews = [
     { id: 1, client: 'Emma Williams', rating: 5, comment: 'Absolutely amazing work! Sarah captured every moment perfectly. Highly recommend!', date: '2025-11-20', service: 'Wedding Photography' },
@@ -192,6 +279,7 @@ useEffect(() => {
           {[
             { id: 'overview', label: 'Overview' },
             { id: 'profile', label: 'Profile' },
+            { id: 'availability', label: 'Availability' },
             { id: 'bookings', label: 'Bookings' },
             { id: 'earnings', label: 'Earnings' },
             { id: 'reviews', label: 'Reviews' },
@@ -240,7 +328,9 @@ useEffect(() => {
               </div>
 
               <div className="space-y-4">
-                {bookingRequests.map((booking) => (
+                {isLoadingBookings ? (
+                  <div className="text-gray-600">Loading bookings...</div>
+                ) : bookingRequests.map((booking) => (
                   <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
                     <div className="flex flex-col sm:flex-row gap-4">
                       <ImageWithFallback
@@ -269,16 +359,39 @@ useEffect(() => {
                         </div>
                         {booking.status === 'pending' ? (
                           <div className="flex flex-wrap gap-2">
-                            <button className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm flex items-center gap-2">
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await bookingService.updateBooking(String(booking.id), { status: 'accepted' } as any);
+                                  setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'accepted' } : b));
+                                } catch (e) {
+                                  console.error('Failed to accept booking', e);
+                                }
+                              }}
+                              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm flex items-center gap-2"
+                            >
                               <CheckCircle className="w-4 h-4" />
                               Accept
                             </button>
-                            <button className="px-4 py-2 border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm flex items-center gap-2">
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await bookingService.updateBooking(String(booking.id), { status: 'rejected' } as any);
+                                  setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'rejected' } : b));
+                                } catch (e) {
+                                  console.error('Failed to reject booking', e);
+                                }
+                              }}
+                              className="px-4 py-2 border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm flex items-center gap-2"
+                            >
                               <XCircle className="w-4 h-4" />
                               Decline
                             </button>
                             <button 
-                              onClick={() => setShowChat(true)}
+                              onClick={() => {
+                                setSelectedBookingId(booking.id);
+                                setShowChat(true);
+                              }}
                               className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
                             >
                               <MessageSquare className="w-4 h-4" />
@@ -291,7 +404,10 @@ useEffect(() => {
                               Confirmed
                             </span>
                             <button 
-                              onClick={() => setShowChat(true)}
+                              onClick={() => {
+                                setSelectedBookingId(booking.id);
+                                setShowChat(true);
+                              }}
                               className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
                             >
                               <MessageSquare className="w-4 h-4" />
@@ -303,6 +419,100 @@ useEffect(() => {
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'availability' && (
+          <div className="bg-white rounded-2xl p-6 shadow-sm">
+            <h2 className="text-gray-900 mb-6">Availability</h2>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="space-y-4">
+                <h3 className="text-gray-900">Add Slot</h3>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-sm text-gray-700 mb-2">Start</label>
+                    <input
+                      type="datetime-local"
+                      value={newSlotStart}
+                      onChange={(e) => setNewSlotStart(e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-700 mb-2">End</label>
+                    <input
+                      type="datetime-local"
+                      value={newSlotEnd}
+                      onChange={(e) => setNewSlotEnd(e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                    />
+                  </div>
+
+                  <button
+                    onClick={async () => {
+                      if (!newSlotStart || !newSlotEnd) return;
+                      setIsSavingSlot(true);
+                      try {
+                        const startIso = new Date(newSlotStart).toISOString();
+                        const endIso = new Date(newSlotEnd).toISOString();
+                        const created = await availabilityService.createSlot({
+                          start_time: startIso,
+                          end_time: endIso,
+                          is_bookable: true,
+                        });
+                        setAvailabilitySlots((prev) => [...prev, created].sort((a: any, b: any) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime()));
+                        setNewSlotStart('');
+                        setNewSlotEnd('');
+                      } catch (e) {
+                        console.error('Failed to create slot', e);
+                      } finally {
+                        setIsSavingSlot(false);
+                      }
+                    }}
+                    disabled={isSavingSlot}
+                    className="w-full py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isSavingSlot ? 'Saving...' : 'Add Availability'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <h3 className="text-gray-900">Upcoming Slots</h3>
+
+                {isLoadingAvailability ? (
+                  <div className="text-gray-600">Loading availability...</div>
+                ) : availabilitySlots.length === 0 ? (
+                  <div className="text-gray-600">No availability slots yet.</div>
+                ) : (
+                  <div className="space-y-3">
+                    {availabilitySlots.map((slot: any) => (
+                      <div key={slot.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
+                        <div>
+                          <div className="text-sm text-gray-900">{new Date(slot.start_time).toLocaleString()}</div>
+                          <div className="text-xs text-gray-500">to {new Date(slot.end_time).toLocaleString()}</div>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            try {
+                              await availabilityService.deleteSlot(slot.id);
+                              setAvailabilitySlots((prev) => prev.filter((s: any) => String(s.id) !== String(slot.id)));
+                            } catch (e) {
+                              console.error('Failed to delete slot', e);
+                            }
+                          }}
+                          className="px-3 py-2 border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -740,113 +950,220 @@ useEffect(() => {
         {activeTab === 'bookings' && (
           <div className="bg-white rounded-2xl p-6 shadow-sm">
             <h2 className="text-gray-900 mb-6">All Bookings</h2>
-            <div className="space-y-4">
-              {bookingRequests.map((booking) => (
-                <div key={booking.id} className="p-4 border border-gray-200 rounded-xl">
-                  <div className="flex flex-col sm:flex-row gap-4">
-                    <ImageWithFallback
-                      src={booking.image}
-                      alt={booking.client}
-                      className="w-full sm:w-20 h-20 object-cover rounded-lg"
-                    />
-                    <div className="flex-1">
-                      <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <h3 className="text-gray-900">{booking.client}</h3>
-                          <p className="text-sm text-gray-600">{booking.service}</p>
+            {isLoadingBookings ? (
+              <div className="text-center py-8 text-gray-600">Loading bookings...</div>
+            ) : bookingRequests.length === 0 ? (
+              <div className="text-center py-8 text-gray-600">No bookings yet.</div>
+            ) : (
+              <div className="space-y-4">
+                {bookingRequests.map((booking) => {
+                  const statusStyles: Record<string, string> = {
+                    pending: 'bg-yellow-100 text-yellow-700',
+                    accepted: 'bg-green-100 text-green-700',
+                    confirmed: 'bg-green-100 text-green-700',
+                    completed: 'bg-blue-100 text-blue-700',
+                    cancelled: 'bg-gray-100 text-gray-700',
+                    rejected: 'bg-red-100 text-red-700',
+                  };
+                  return (
+                    <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
+                      <div className="flex flex-col sm:flex-row gap-4">
+                        <ImageWithFallback
+                          src={booking.image}
+                          alt={booking.client}
+                          className="w-full sm:w-20 h-20 object-cover rounded-lg"
+                        />
+                        <div className="flex-1">
+                          <div className="flex items-start justify-between mb-2">
+                            <div>
+                              <h3 className="text-gray-900 font-medium">{booking.client}</h3>
+                              <p className="text-sm text-gray-600">{booking.service || 'Service'}</p>
+                            </div>
+                            <span className={`px-3 py-1 rounded-full text-sm capitalize ${statusStyles[booking.status] || 'bg-gray-100 text-gray-700'}`}>
+                              {booking.status}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600 mb-3">
+                            <div className="flex items-center gap-1">
+                              <Calendar className="w-4 h-4" />
+                              <span>{booking.date}</span>
+                            </div>
+                            <span>{booking.time}</span>
+                            <span className="text-purple-600 font-medium">${booking.amount?.toLocaleString()}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {booking.status === 'pending' && (
+                              <>
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      await bookingService.updateBooking(String(booking.id), { status: 'accepted' } as any);
+                                      setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'accepted' } : b));
+                                    } catch (e) {
+                                      console.error('Failed to accept booking', e);
+                                    }
+                                  }}
+                                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm flex items-center gap-2"
+                                >
+                                  <CheckCircle className="w-4 h-4" />
+                                  Accept
+                                </button>
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      await bookingService.updateBooking(String(booking.id), { status: 'rejected' } as any);
+                                      setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'rejected' } : b));
+                                    } catch (e) {
+                                      console.error('Failed to reject booking', e);
+                                    }
+                                  }}
+                                  className="px-4 py-2 border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm flex items-center gap-2"
+                                >
+                                  <XCircle className="w-4 h-4" />
+                                  Decline
+                                </button>
+                              </>
+                            )}
+                            {['accepted', 'confirmed'].includes(booking.status) && (
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await bookingService.updateBooking(String(booking.id), { status: 'completed' } as any);
+                                    setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'completed' } : b));
+                                  } catch (e) {
+                                    console.error('Failed to complete booking', e);
+                                  }
+                                }}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center gap-2"
+                              >
+                                <CheckCircle className="w-4 h-4" />
+                                Mark Complete
+                              </button>
+                            )}
+                            <button
+                              onClick={() => {
+                                setSelectedBookingId(booking.id);
+                                setShowChat(true);
+                              }}
+                              className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
+                            >
+                              <MessageSquare className="w-4 h-4" />
+                              Message
+                            </button>
+                          </div>
                         </div>
-                        <span className={`px-3 py-1 rounded-full text-sm ${
-                          booking.status === 'confirmed' 
-                            ? 'bg-green-100 text-green-700' 
-                            : 'bg-yellow-100 text-yellow-700'
-                        }`}>
-                          {booking.status}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-4 text-sm text-gray-600">
-                        <span>{booking.date}</span>
-                        <span>{booking.time}</span>
-                        <span className="text-purple-600">${booking.amount}</span>
                       </div>
                     </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
         {/* Earnings Tab */}
-        {activeTab === 'earnings' && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="bg-white rounded-2xl p-6 shadow-sm">
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
-                    <DollarSign className="w-6 h-6 text-green-600" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-600">Total Earnings</p>
-                    <p className="text-2xl text-gray-900">$45,230</p>
-                  </div>
-                </div>
-                <p className="text-sm text-green-600">+18% from last month</p>
-              </div>
+        {activeTab === 'earnings' && (() => {
+          const now = new Date();
+          const thisMonth = now.getMonth();
+          const thisYear = now.getFullYear();
 
-              <div className="bg-white rounded-2xl p-6 shadow-sm">
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
-                    <Calendar className="w-6 h-6 text-purple-600" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-600">This Month</p>
-                    <p className="text-2xl text-gray-900">$8,450</p>
-                  </div>
-                </div>
-                <p className="text-sm text-purple-600">12 completed bookings</p>
-              </div>
+          const totalEarnings = providerBookings
+            .filter(b => b.status === 'completed')
+            .reduce((sum, b) => sum + (b.amount || 0), 0);
 
-              <div className="bg-white rounded-2xl p-6 shadow-sm">
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
-                    <TrendingUp className="w-6 h-6 text-blue-600" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-600">Pending</p>
-                    <p className="text-2xl text-gray-900">$2,400</p>
-                  </div>
-                </div>
-                <p className="text-sm text-blue-600">2 pending payouts</p>
-              </div>
-            </div>
+          const thisMonthBookings = providerBookings.filter(b => {
+            const bookingDate = new Date(b.date);
+            return b.status === 'completed' &&
+              bookingDate.getMonth() === thisMonth &&
+              bookingDate.getFullYear() === thisYear;
+          });
 
-            <div className="bg-white rounded-2xl p-6 shadow-sm">
-              <h2 className="text-gray-900 mb-6">Recent Transactions</h2>
-              <div className="space-y-3">
-                {[
-                  { client: 'Emma Williams', amount: 2400, date: '2025-11-25', status: 'completed' },
-                  { client: 'James Smith', amount: 1200, date: '2025-11-20', status: 'completed' },
-                  { client: 'Sophia Brown', amount: 1800, date: '2025-11-18', status: 'pending' },
-                ].map((transaction, index) => (
-                  <div key={index} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
+          const thisMonthEarnings = thisMonthBookings.reduce((sum, b) => sum + (b.amount || 0), 0);
+
+          const pendingEarnings = providerBookings
+            .filter(b => ['pending', 'accepted', 'confirmed'].includes(b.status))
+            .reduce((sum, b) => sum + (b.amount || 0), 0);
+
+          const pendingCount = providerBookings.filter(b => ['pending', 'accepted', 'confirmed'].includes(b.status)).length;
+
+          const recentTransactions = providerBookings
+            .slice()
+            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+            .slice(0, 10);
+
+          return (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="bg-white rounded-2xl p-6 shadow-sm">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
+                      <DollarSign className="w-6 h-6 text-green-600" />
+                    </div>
                     <div>
-                      <p className="text-gray-900">{transaction.client}</p>
-                      <p className="text-sm text-gray-600">{transaction.date}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-gray-900">${transaction.amount}</p>
-                      <span className={`text-sm ${
-                        transaction.status === 'completed' ? 'text-green-600' : 'text-yellow-600'
-                      }`}>
-                        {transaction.status}
-                      </span>
+                      <p className="text-sm text-gray-600">Total Earnings</p>
+                      <p className="text-2xl text-gray-900">${totalEarnings.toLocaleString()}</p>
                     </div>
                   </div>
-                ))}
+                  <p className="text-sm text-green-600">{providerBookings.filter(b => b.status === 'completed').length} completed bookings</p>
+                </div>
+
+                <div className="bg-white rounded-2xl p-6 shadow-sm">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
+                      <Calendar className="w-6 h-6 text-purple-600" />
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">This Month</p>
+                      <p className="text-2xl text-gray-900">${thisMonthEarnings.toLocaleString()}</p>
+                    </div>
+                  </div>
+                  <p className="text-sm text-purple-600">{thisMonthBookings.length} completed this month</p>
+                </div>
+
+                <div className="bg-white rounded-2xl p-6 shadow-sm">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
+                      <TrendingUp className="w-6 h-6 text-blue-600" />
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Pending</p>
+                      <p className="text-2xl text-gray-900">${pendingEarnings.toLocaleString()}</p>
+                    </div>
+                  </div>
+                  <p className="text-sm text-blue-600">{pendingCount} pending bookings</p>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl p-6 shadow-sm">
+                <h2 className="text-gray-900 mb-6">Recent Transactions</h2>
+                {recentTransactions.length === 0 ? (
+                  <div className="text-center py-8 text-gray-600">No transactions yet.</div>
+                ) : (
+                  <div className="space-y-3">
+                    {recentTransactions.map((booking, index) => (
+                      <div key={index} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
+                        <div>
+                          <p className="text-gray-900">{booking.client}</p>
+                          <p className="text-sm text-gray-600">{booking.date} • {booking.service}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-gray-900 font-medium">${booking.amount?.toLocaleString()}</p>
+                          <span className={`text-sm capitalize ${
+                            booking.status === 'completed' ? 'text-green-600' :
+                            booking.status === 'cancelled' || booking.status === 'rejected' ? 'text-red-600' :
+                            'text-yellow-600'
+                          }`}>
+                            {booking.status}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Reviews Tab */}
         {activeTab === 'reviews' && (
@@ -892,6 +1209,7 @@ useEffect(() => {
       {showChat && (
         <ChatInterface
           provider={{ name: 'Emma Williams', service: 'Client', image: 'https://images.unsplash.com/photo-1643968612613-fd411aecd1fd?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwaG90b2dyYXBoZXIlMjBjYW1lcmElMjBwcm9mZXNzaW9uYWx8ZW58MXx8fHwxNzY0NDAwNjc1fDA&ixlib=rb-4.1.0&q=80&w=1080' }}
+          bookingId={selectedBookingId ?? undefined}
           onClose={() => setShowChat(false)}
         />
       )}

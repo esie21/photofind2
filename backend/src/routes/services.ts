@@ -196,6 +196,93 @@ router.get('/', async (req: Request, res: Response) => {
   }
 });
 
+// Get services by provider ID (public)
+router.get('/provider/:providerId', async (req: Request, res: Response) => {
+  try {
+    const { providerId } = req.params;
+
+    // First check if services table exists
+    const tableExists = await pool.query(`SELECT to_regclass('public.services') as exists`);
+    if (!tableExists.rows[0].exists) {
+      console.log('Services table does not exist, returning empty array');
+      return res.json([]);
+    }
+
+    // Check which columns exist in the services table
+    const columnCheck = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name = 'services'
+    `);
+    const existingColumns = columnCheck.rows.map((r: any) => r.column_name);
+
+    if (existingColumns.length === 0) {
+      console.log('No columns found in services table, returning empty array');
+      return res.json([]);
+    }
+
+    const hasCreatedAt = existingColumns.includes('created_at');
+    const orderBy = hasCreatedAt ? 'created_at DESC NULLS LAST' : 'id DESC';
+
+    // Determine if services.provider_id references users or providers table
+    let refTable: string | undefined = undefined;
+
+    try {
+      const tableCheck = await pool.query(`
+        SELECT ccu.table_name AS foreign_table_name
+        FROM information_schema.table_constraints AS tc
+        JOIN information_schema.key_column_usage AS kcu
+          ON tc.constraint_name = kcu.constraint_name
+        JOIN information_schema.constraint_column_usage AS ccu
+          ON ccu.constraint_name = tc.constraint_name
+        WHERE tc.table_name = 'services'
+          AND tc.constraint_type = 'FOREIGN KEY'
+          AND kcu.column_name = 'provider_id'
+        LIMIT 1
+      `);
+
+      refTable = tableCheck.rows[0]?.foreign_table_name;
+    } catch (checkError) {
+      // Ignore - will use fallback
+    }
+
+    let result;
+    if (refTable === 'providers') {
+      // Need to join with providers to match by user_id
+      result = await pool.query(`
+        SELECT s.*, p.user_id as provider_user_id
+        FROM services s
+        JOIN providers p ON s.provider_id = p.id
+        WHERE p.user_id = $1
+        ORDER BY s.${hasCreatedAt ? 'created_at DESC NULLS LAST' : 'id DESC'}
+      `, [providerId]);
+    } else {
+      // provider_id directly references users(id)
+      result = await pool.query(`
+        SELECT * FROM services
+        WHERE provider_id = $1
+        ORDER BY ${orderBy}
+      `, [providerId]);
+    }
+
+    // Transform results for frontend consistency
+    const transformed = result.rows.map((row: any) => ({
+      ...row,
+      providerId: row.provider_user_id || row.provider_id,
+      provider_id: row.provider_user_id || row.provider_id,
+    }));
+
+    return res.json(transformed);
+  } catch (error: any) {
+    console.error('Error fetching services by provider:', error);
+    // Return empty array for table/column not found errors
+    if (error?.code === '42P01' || error?.code === '42703') {
+      return res.json([]);
+    }
+    return res.status(500).json({ error: 'Failed to fetch services', detail: error?.message });
+  }
+});
+
 // Get service by ID (public)
 router.get('/:id', async (req: Request, res: Response) => {
   try {

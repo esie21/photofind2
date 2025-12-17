@@ -11,6 +11,7 @@ import { AdminDashboard } from './components/AdminDashboard';
 export default function App() {
   const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin'>('landing');
     const { user } = useAuth();
+  const [bookingContext, setBookingContext] = useState<{ providerId?: string; providerName?: string; providerImage?: string } | null>(null);
 
     useEffect(() => {
       if (user) {
@@ -54,16 +55,32 @@ export default function App() {
       
       <main>
         {currentView === 'landing' && <LandingPage onViewChange={handleViewChange} />}
-        {currentView === 'client' && <ClientDashboard onStartBooking={() => {
+        {currentView === 'client' && <ClientDashboard onStartBooking={(provider?: unknown) => {
             if (!user) {
               setAuthMode('login');
               setShowAuthModal(true);
               return;
             }
+            if (provider) {
+              setBookingContext({
+                providerId: String((provider as any).id),
+                providerName: (provider as any).name,
+                providerImage: (provider as any).profile_image || (provider as any).image,
+              });
+            } else {
+              setBookingContext(null);
+            }
             setCurrentView('booking');
           }} />}
         {currentView === 'provider' && <ProviderDashboard />}
-        {currentView === 'booking' && <BookingFlow onComplete={() => setCurrentView('client')} />}
+        {currentView === 'booking' && (
+          <BookingFlow
+            onComplete={() => setCurrentView('client')}
+            providerId={bookingContext?.providerId}
+            providerName={bookingContext?.providerName}
+            providerImage={bookingContext?.providerImage}
+          />
+        )}
         {currentView === 'admin' && <AdminDashboard />}
       </main>
 

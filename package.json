@@ -36,7 +36,7 @@
             "cors": "^2.8.5",
             "dotenv": "^17.2.3",
             "embla-carousel-react": "^8.6.0",
-            "express": "^5.1.0",
+            "express": "^5.2.1",
             "input-otp": "^1.4.2",
             "jsonwebtoken": "^9.0.2",
             "lucide-react": "^0.487.0",
@@ -48,6 +48,8 @@
             "react-hook-form": "^7.55.0",
             "react-resizable-panels": "^2.1.7",
             "recharts": "^2.15.2",
+            "socket.io": "^4.8.1",
+            "socket.io-client": "^4.8.1",
             "sonner": "^2.0.3",
             "tailwind-merge": "*",
             "vaul": "^1.1.2"

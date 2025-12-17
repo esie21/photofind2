@@ -4,9 +4,10 @@ import { ImageWithFallback } from './figma/ImageWithFallback';
 import { ChatInterface } from './ChatInterface';
 import { NotificationsPanel } from './NotificationsPanel';
 import userService from '../api/services/userService';
+import bookingService from '../api/services/bookingService';
 
 interface ClientDashboardProps {
-  onStartBooking: () => void;
+  onStartBooking: (provider?: any) => void;
 }
 
 export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
@@ -24,13 +25,12 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
   const [priceRange, setPriceRange] = useState([0, 1000]);
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [sortBy, setSortBy] = useState('recommended');
+  const [myBookings, setMyBookings] = useState<any[]>([]);
+  const [loadingBookings, setLoadingBookings] = useState(false);
 
   // The providers list is loaded from the backend using `userService.getAllProviders()`
 
-  const upcomingBookings = [
-    { id: 1, provider: 'Sarah Johnson', service: 'Wedding Photography', date: '2025-12-15', time: '2:00 PM', status: 'confirmed', image: 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080' },
-    { id: 2, provider: 'Michael Chen', service: 'Product Video', date: '2025-12-08', time: '10:00 AM', status: 'pending', image: 'https://images.unsplash.com/photo-1713392824135-a7c7db3d9465?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx2aWRlb2dyYXBoZXIlMjBmaWxtaW5nfGVufDF8fHx8MTc2NDQwNzk1M3ww&ixlib=rb-4.1.0&q=80&w=1080' },
-  ];
+  const upcomingBookings = myBookings;
 
   const handleViewProfile = (provider: any) => {
     setSelectedProvider(provider);
@@ -63,6 +63,34 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
       }
     })();
   }, [searchQuery, page, limit]);
+
+  useEffect(() => {
+    (async () => {
+      setLoadingBookings(true);
+      try {
+        const data = await bookingService.getMyBookings();
+        const mapped = (data || []).map((b: any) => {
+          const start = b.start_date ? new Date(b.start_date) : b.startDate ? new Date(b.startDate) : null;
+          const date = start ? start.toISOString().slice(0, 10) : '';
+          const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+          return {
+            id: b.id,
+            provider: b.provider_name || 'Provider',
+            service: b.service_title || 'Service',
+            date,
+            time,
+            status: b.status,
+            image: b.provider_image || b.image || '',
+          };
+        });
+        setMyBookings(mapped);
+      } catch (_e) {
+        setMyBookings([]);
+      } finally {
+        setLoadingBookings(false);
+      }
+    })();
+  }, []);
 
   const handleSendMessage = (provider: any) => {
     setSelectedProvider(provider);
@@ -207,7 +235,7 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
                             View Profile
                           </button>
                           <button 
-                            onClick={onStartBooking}
+                            onClick={() => onStartBooking(provider)}
                             className="px-4 py-2 border border-purple-600 text-purple-600 rounded-lg hover:bg-purple-50 transition-colors text-sm"
                           >
                             Book Now
@@ -369,7 +397,7 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
 
               <div className="flex gap-3">
                 <button 
-                  onClick={onStartBooking}
+                  onClick={() => onStartBooking(selectedProvider)}
                   className="flex-1 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors"
                 >
                   Book Now

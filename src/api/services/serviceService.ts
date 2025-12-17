@@ -4,11 +4,13 @@ import { API_CONFIG } from '../config';
 export interface Service {
   id: string;
   providerId: string;
+  provider_id: string;
   title: string;
   description: string;
   price: number;
   category: string;
   images: string[];
+  duration_minutes?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -24,6 +26,12 @@ export interface CreateServiceData {
 const serviceService = {
   async getAllServices(): Promise<Service[]> {
     return apiClient.get<Service[]>(API_CONFIG.ENDPOINTS.SERVICES.GET_ALL);
+  },
+
+  async getServicesByProvider(providerId: string | number): Promise<Service[]> {
+    return apiClient.get<Service[]>(
+      API_CONFIG.ENDPOINTS.SERVICES.GET_BY_PROVIDER(providerId)
+    );
   },
 
   async getServiceById(id: string): Promise<Service> {
