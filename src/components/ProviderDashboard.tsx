@@ -215,6 +215,7 @@ useEffect(() => {
 
           return {
             id: b.id,
+            client_id: b.client_user_id || b.client_id,
             client: b.client_name || b.client_email || 'Client',
             clientEmail: b.client_email,
             service: b.service_title || 'Service',
@@ -1206,13 +1207,21 @@ useEffect(() => {
       </div>
 
       {/* Chat Modal */}
-      {showChat && (
-        <ChatInterface
-          provider={{ name: 'Emma Williams', service: 'Client', image: 'https://images.unsplash.com/photo-1643968612613-fd411aecd1fd?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwaG90b2dyYXBoZXIlMjBjYW1lcmElMjBwcm9mZXNzaW9uYWx8ZW58MXx8fHwxNzY0NDAwNjc1fDA&ixlib=rb-4.1.0&q=80&w=1080' }}
-          bookingId={selectedBookingId ?? undefined}
-          onClose={() => setShowChat(false)}
-        />
-      )}
+      {showChat && selectedBookingId && (() => {
+        const selectedBooking = providerBookings.find(b => b.id === selectedBookingId);
+        return (
+          <ChatInterface
+            provider={{
+              id: selectedBooking?.client_id,
+              name: selectedBooking?.client || 'Client',
+              service: selectedBooking?.service || 'Service',
+              image: selectedBooking?.image || '',
+            }}
+            bookingId={selectedBookingId}
+            onClose={() => setShowChat(false)}
+          />
+        );
+      })()}
     </div>
   );
 }

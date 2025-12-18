@@ -310,7 +310,7 @@ router.get('/provider/my', verifyToken, async (req: Request & { userId?: string 
         // Both reference separate tables
         q = `
           SELECT b.*, s.title as service_title,
-                 cu.name as client_name, cu.email as client_email, cu.profile_image as client_image
+                 cu.id as client_user_id, cu.name as client_name, cu.email as client_email, cu.profile_image as client_image
           FROM bookings b
           LEFT JOIN services s ON s.id::text = b.service_id::text
           LEFT JOIN providers p ON p.id = b.provider_id
@@ -323,7 +323,7 @@ router.get('/provider/my', verifyToken, async (req: Request & { userId?: string 
         // provider_id references providers, but client_id references users directly
         q = `
           SELECT b.*, s.title as service_title,
-                 u.name as client_name, u.email as client_email, u.profile_image as client_image
+                 u.id as client_user_id, u.name as client_name, u.email as client_email, u.profile_image as client_image
           FROM bookings b
           LEFT JOIN services s ON s.id::text = b.service_id::text
           LEFT JOIN providers p ON p.id = b.provider_id
@@ -336,7 +336,7 @@ router.get('/provider/my', verifyToken, async (req: Request & { userId?: string 
       // provider_id references users table directly
       q = `
         SELECT b.*, s.title as service_title,
-               u.name as client_name, u.email as client_email, u.profile_image as client_image
+               u.id as client_user_id, u.name as client_name, u.email as client_email, u.profile_image as client_image
         FROM bookings b
         LEFT JOIN services s ON s.id::text = b.service_id::text
         LEFT JOIN users u ON u.id::text = b.client_id::text
@@ -368,43 +368,83 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
     const hasProvidersTable = existingTables.includes('providers');
     const hasClientsTable = existingTables.includes('clients');
 
+    // Check FK constraints to determine actual references
+    let clientRefTable = 'users';
+    let providerRefTable = 'users';
+
+    try {
+      const fkCheck = await pool.query(`
+        SELECT kcu.column_name, ccu.table_name AS foreign_table_name
+        FROM information_schema.table_constraints AS tc
+        JOIN information_schema.key_column_usage AS kcu
+          ON tc.constraint_name = kcu.constraint_name
+        JOIN information_schema.constraint_column_usage AS ccu
+          ON ccu.constraint_name = tc.constraint_name
+        WHERE tc.table_name = 'bookings'
+          AND tc.constraint_type = 'FOREIGN KEY'
+          AND kcu.column_name IN ('provider_id', 'client_id')
+      `);
+
+      for (const row of fkCheck.rows) {
+        if (row.column_name === 'provider_id') providerRefTable = row.foreign_table_name;
+        if (row.column_name === 'client_id') clientRefTable = row.foreign_table_name;
+      }
+    } catch (e) {
+      // Ignore errors, use defaults
+    }
+
     let q: string;
-    if (hasClientsTable && hasProvidersTable) {
-      // Both tables exist, join through them
-      q = `
-        SELECT b.*, s.title as service_title,
-               pu.name as provider_name, pu.email as provider_email, pu.profile_image as provider_image
-        FROM bookings b
-        LEFT JOIN services s ON s.id::text = b.service_id::text
-        LEFT JOIN clients c ON c.id = b.client_id
-        LEFT JOIN providers p ON p.id = b.provider_id
-        LEFT JOIN users pu ON pu.id = p.user_id
-        WHERE c.user_id::text = $1
-        ORDER BY b.created_at DESC
-      `;
-    } else if (hasClientsTable) {
-      // Only clients table exists
-      q = `
-        SELECT b.*, s.title as service_title,
-               u.name as provider_name, u.email as provider_email, u.profile_image as provider_image
-        FROM bookings b
-        LEFT JOIN services s ON s.id::text = b.service_id::text
-        LEFT JOIN clients c ON c.id = b.client_id
-        LEFT JOIN users u ON u.id::text = b.provider_id::text
-        WHERE c.user_id::text = $1
-        ORDER BY b.created_at DESC
-      `;
+    if (clientRefTable === 'clients' && hasClientsTable) {
+      if (providerRefTable === 'providers' && hasProvidersTable) {
+        // Both reference separate tables
+        q = `
+          SELECT b.*, s.title as service_title,
+                 pu.id as provider_user_id, pu.name as provider_name, pu.email as provider_email, pu.profile_image as provider_image
+          FROM bookings b
+          LEFT JOIN services s ON s.id::text = b.service_id::text
+          LEFT JOIN clients c ON c.id = b.client_id
+          LEFT JOIN providers p ON p.id = b.provider_id
+          LEFT JOIN users pu ON pu.id = p.user_id
+          WHERE c.user_id::text = $1
+          ORDER BY b.created_at DESC
+        `;
+      } else {
+        // client_id references clients, but provider_id references users directly
+        q = `
+          SELECT b.*, s.title as service_title,
+                 u.id as provider_user_id, u.name as provider_name, u.email as provider_email, u.profile_image as provider_image
+          FROM bookings b
+          LEFT JOIN services s ON s.id::text = b.service_id::text
+          LEFT JOIN clients c ON c.id = b.client_id
+          LEFT JOIN users u ON u.id::text = b.provider_id::text
+          WHERE c.user_id::text = $1
+          ORDER BY b.created_at DESC
+        `;
+      }
     } else {
-      // No separate clients table, client_id references users directly
-      q = `
-        SELECT b.*, s.title as service_title,
-               u.name as provider_name, u.email as provider_email, u.profile_image as provider_image
-        FROM bookings b
-        LEFT JOIN services s ON s.id::text = b.service_id::text
-        LEFT JOIN users u ON u.id::text = b.provider_id::text
-        WHERE b.client_id::text = $1
-        ORDER BY b.created_at DESC
-      `;
+      // client_id references users table directly
+      if (providerRefTable === 'providers' && hasProvidersTable) {
+        q = `
+          SELECT b.*, s.title as service_title,
+                 pu.id as provider_user_id, pu.name as provider_name, pu.email as provider_email, pu.profile_image as provider_image
+          FROM bookings b
+          LEFT JOIN services s ON s.id::text = b.service_id::text
+          LEFT JOIN providers p ON p.id = b.provider_id
+          LEFT JOIN users pu ON pu.id = p.user_id
+          WHERE b.client_id::text = $1
+          ORDER BY b.created_at DESC
+        `;
+      } else {
+        q = `
+          SELECT b.*, s.title as service_title,
+                 u.id as provider_user_id, u.name as provider_name, u.email as provider_email, u.profile_image as provider_image
+          FROM bookings b
+          LEFT JOIN services s ON s.id::text = b.service_id::text
+          LEFT JOIN users u ON u.id::text = b.provider_id::text
+          WHERE b.client_id::text = $1
+          ORDER BY b.created_at DESC
+        `;
+      }
     }
 
     const { rows } = await pool.query(q, [clientId]);
@@ -448,7 +488,7 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('SELECT pg_advisory_xact_lock($1)', [existing.provider_id]);
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [existing.provider_id]);
 
       if (role === 'admin') {
         await client.query('DELETE FROM bookings WHERE id::text = $1', [bookingId]);
@@ -610,7 +650,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('SELECT pg_advisory_xact_lock($1)', [existing.provider_id]);
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [existing.provider_id]);
 
       if (isAccept) {
         const conflictRes = await client.query(

@@ -27,6 +27,7 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
   const [sortBy, setSortBy] = useState('recommended');
   const [myBookings, setMyBookings] = useState<any[]>([]);
   const [loadingBookings, setLoadingBookings] = useState(false);
+  const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
 
   // The providers list is loaded from the backend using `userService.getAllProviders()`
 
@@ -64,32 +65,36 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
     })();
   }, [searchQuery, page, limit]);
 
+  const fetchMyBookings = async () => {
+    setLoadingBookings(true);
+    try {
+      const data = await bookingService.getMyBookings();
+      const mapped = (data || []).map((b: any) => {
+        const start = b.start_date ? new Date(b.start_date) : b.startDate ? new Date(b.startDate) : null;
+        const date = start ? start.toISOString().slice(0, 10) : '';
+        const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+        return {
+          id: b.id,
+          provider_id: b.provider_user_id || b.provider_id,
+          provider: b.provider_name || 'Provider',
+          service: b.service_title || 'Service',
+          date,
+          time,
+          status: b.status,
+          image: b.provider_image || b.image || '',
+        };
+      });
+      setMyBookings(mapped);
+    } catch (err) {
+      console.error('Failed to fetch bookings:', err);
+      setMyBookings([]);
+    } finally {
+      setLoadingBookings(false);
+    }
+  };
+
   useEffect(() => {
-    (async () => {
-      setLoadingBookings(true);
-      try {
-        const data = await bookingService.getMyBookings();
-        const mapped = (data || []).map((b: any) => {
-          const start = b.start_date ? new Date(b.start_date) : b.startDate ? new Date(b.startDate) : null;
-          const date = start ? start.toISOString().slice(0, 10) : '';
-          const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
-          return {
-            id: b.id,
-            provider: b.provider_name || 'Provider',
-            service: b.service_title || 'Service',
-            date,
-            time,
-            status: b.status,
-            image: b.provider_image || b.image || '',
-          };
-        });
-        setMyBookings(mapped);
-      } catch (_e) {
-        setMyBookings([]);
-      } finally {
-        setLoadingBookings(false);
-      }
-    })();
+    fetchMyBookings();
   }, []);
 
   const handleSendMessage = (provider: any) => {
@@ -284,36 +289,62 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
               </div>
 
               <div className="space-y-3">
-                {upcomingBookings.map((booking) => (
-                  <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
-                    <div className="flex gap-3">
-                      <ImageWithFallback
-                        src={booking.image}
-                        alt={booking.provider}
-                        className="w-12 h-12 object-cover rounded-lg"
-                      />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-gray-900 truncate">{booking.provider}</p>
-                        <p className="text-xs text-gray-600 truncate">{booking.service}</p>
-                        <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
-                          <Calendar className="w-3 h-3" />
-                          <span>{booking.date}</span>
-                          <Clock className="w-3 h-3 ml-1" />
-                          <span>{booking.time}</span>
-                        </div>
-                        <div className="mt-2">
-                          <span className={`inline-block px-2 py-1 text-xs rounded-full ${
-                            booking.status === 'confirmed' 
-                              ? 'bg-green-100 text-green-700' 
-                              : 'bg-yellow-100 text-yellow-700'
-                          }`}>
-                            {booking.status}
-                          </span>
+                {loadingBookings ? (
+                  <p className="text-sm text-gray-500">Loading bookings...</p>
+                ) : upcomingBookings.length === 0 ? (
+                  <p className="text-sm text-gray-500">No bookings yet. Book a service to get started!</p>
+                ) : (
+                  upcomingBookings.map((booking) => (
+                    <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
+                      <div className="flex gap-3">
+                        <ImageWithFallback
+                          src={booking.image}
+                          alt={booking.provider}
+                          className="w-12 h-12 object-cover rounded-lg"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-gray-900 truncate">{booking.provider}</p>
+                          <p className="text-xs text-gray-600 truncate">{booking.service}</p>
+                          <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
+                            <Calendar className="w-3 h-3" />
+                            <span>{booking.date}</span>
+                            <Clock className="w-3 h-3 ml-1" />
+                            <span>{booking.time}</span>
+                          </div>
+                          <div className="mt-2 flex items-center gap-2">
+                            <span className={`inline-block px-2 py-1 text-xs rounded-full ${
+                              booking.status === 'confirmed' || booking.status === 'accepted'
+                                ? 'bg-green-100 text-green-700'
+                                : booking.status === 'completed'
+                                ? 'bg-blue-100 text-blue-700'
+                                : booking.status === 'cancelled' || booking.status === 'rejected'
+                                ? 'bg-red-100 text-red-700'
+                                : 'bg-yellow-100 text-yellow-700'
+                            }`}>
+                              {booking.status}
+                            </span>
+                            <button
+                              onClick={() => {
+                                setSelectedBookingId(booking.id);
+                                setSelectedProvider({
+                                  id: booking.provider_id,
+                                  name: booking.provider,
+                                  service: booking.service,
+                                  image: booking.image,
+                                });
+                                setShowChat(true);
+                              }}
+                              className="px-2 py-1 text-xs text-purple-600 hover:bg-purple-50 rounded-lg flex items-center gap-1"
+                            >
+                              <MessageSquare className="w-3 h-3" />
+                              Message
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))
+                )}
               </div>
             </div>
 
@@ -338,7 +369,11 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
       {showChat && selectedProvider && (
         <ChatInterface
           provider={selectedProvider}
-          onClose={() => setShowChat(false)}
+          bookingId={selectedBookingId ?? undefined}
+          onClose={() => {
+            setShowChat(false);
+            setSelectedBookingId(null);
+          }}
         />
       )}
 

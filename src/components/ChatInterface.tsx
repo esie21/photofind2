@@ -126,7 +126,7 @@ const participantId = useMemo(() => {
               const incoming = payload?.message as BookingChatMessage;
               if (!incoming?.id) return;
               setMessages((prev) => {
-                if (prev.some((m: any) => Number(m.id) === Number(incoming.id))) return prev;
+                if (prev.some((m: any) => String(m.id) === String(incoming.id))) return prev;
                 return [...prev, incoming];
               });
               const mine = String(incoming.sender_id ?? '') === String(user.id);
@@ -206,7 +206,7 @@ const participantId = useMemo(() => {
       try {
         const res = await chatService.sendMessage({ bookingId, content: trimmed });
         setMessages((prev) => {
-          if (prev.some((m: any) => Number(m.id) === Number(res.data.id))) return prev;
+          if (prev.some((m: any) => String(m.id) === String(res.data.id))) return prev;
           return [...prev, res.data];
         });
         setMessage('');
@@ -231,7 +231,7 @@ const participantId = useMemo(() => {
     try {
       const res = await chatService.sendMessage({ bookingId, file });
       setMessages((prev) => {
-        if (prev.some((m: any) => Number(m.id) === Number(res.data.id))) return prev;
+        if (prev.some((m: any) => String(m.id) === String(res.data.id))) return prev;
         return [...prev, res.data];
       });
     } catch (err: any) {
