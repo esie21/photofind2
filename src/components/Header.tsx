@@ -1,5 +1,6 @@
-import { Bell, Menu, User, LogOut } from 'lucide-react';
+import { Menu, User, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { NotificationsPanel } from './NotificationsPanel';
 
 interface HeaderProps {
   onViewChange: (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin') => void;
@@ -75,10 +76,7 @@ export function Header({ onViewChange, currentView, onAuthClick }: HeaderProps) 
               </>
             ) : (
               <>
-                <button className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg relative">
-                  <Bell className="w-5 h-5" />
-                  <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
-                </button>
+                <NotificationsPanel />
                 <div className="flex items-center gap-2">
                   <div className="w-9 h-9 bg-gradient-to-br from-purple-400 to-pink-400 rounded-full flex items-center justify-center">
                     <span className="text-white text-sm">{user?.name ? user.name.slice(0,1).toUpperCase() : 'U'}</span>

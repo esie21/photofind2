@@ -6,6 +6,7 @@ import serviceService, { Service } from '../api/services/serviceService';
 import { useAuth } from '../context/AuthContext';
 import availabilityService from '../api/services/availabilityService';
 import { Calendar } from './ui/calendar';
+import { PaymentSummary } from './PaymentSummary';
 
 interface BookingFlowProps {
   onComplete: () => void;
@@ -29,11 +30,13 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
   const [submittedStatus, setSubmittedStatus] = useState<string | null>(null);
   const [providerServices, setProviderServices] = useState<Service[]>([]);
   const [isLoadingServices, setIsLoadingServices] = useState(true);
+  const [createdBookingId, setCreatedBookingId] = useState<string | null>(null);
+  const [showPayment, setShowPayment] = useState(false);
 
   const steps = [
     { number: 1, name: 'Select Service', icon: Check },
     { number: 2, name: 'Date & Time', icon: CalendarIcon },
-    { number: 3, name: 'Payment', icon: CreditCard },
+    { number: 3, name: 'Confirm & Pay', icon: CreditCard },
   ];
 
   // Fetch provider services on mount
@@ -177,11 +180,10 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
       console.log('Submitting booking:', bookingData);
       const created = await bookingService.createBooking(bookingData);
       setSubmittedStatus((created as any)?.status || null);
-      
-      setSuccess(true);
-      setTimeout(() => {
-        onComplete();
-      }, 2000);
+      setCreatedBookingId((created as any)?.id || null);
+
+      // Show payment modal
+      setShowPayment(true);
     } catch (err: any) {
       console.error('Booking error:', err);
       const errorMsg = err?.message || 'Failed to create booking. Please try again.';
@@ -191,8 +193,41 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     }
   };
 
+  const handlePaymentSuccess = () => {
+    setShowPayment(false);
+    setSuccess(true);
+    setTimeout(() => {
+      onComplete();
+    }, 2000);
+  };
+
+  const handlePaymentFailed = (errorMsg: string) => {
+    setError(`Payment failed: ${errorMsg}. Your booking has been saved. You can pay later from your dashboard.`);
+  };
+
+  const handlePaymentCancel = () => {
+    setShowPayment(false);
+    // Booking is already created, inform user they can pay later
+    setError('Payment cancelled. Your booking has been saved but requires payment to confirm. You can complete payment from your dashboard.');
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 py-8">
+      {/* Payment Modal */}
+      {showPayment && createdBookingId && selectedServiceData && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <PaymentSummary
+            bookingId={createdBookingId}
+            serviceName={selectedServiceData.name}
+            providerName={providerName}
+            totalAmount={total}
+            onPaymentSuccess={handlePaymentSuccess}
+            onPaymentFailed={handlePaymentFailed}
+            onCancel={handlePaymentCancel}
+          />
+        </div>
+      )}
+
       <div className="max-w-4xl mx-auto px-4">
         {/* Error Alert */}
         {error && (
@@ -354,7 +389,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
 
               {/* Step 2: Date & Time */}
               {currentStep === 2 && (
-                <div>
+                <div >
                   <h2 className="text-gray-900 mb-2">Select Date & Time</h2>
                   <p className="text-gray-600 mb-6">Choose when you'd like your session</p>
 
@@ -478,56 +513,87 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                 </div>
               )}
 
-              {/* Step 3: Payment */}
+              {/* Step 3: Review & Confirm */}
               {currentStep === 3 && (
                 <div>
-                  <h2 className="text-gray-900 mb-2">Payment Information</h2>
-                  <p className="text-gray-600 mb-6">Complete your booking with secure payment</p>
+                  <h2 className="text-gray-900 mb-2">Review & Confirm</h2>
+                  <p className="text-gray-600 mb-6">Review your booking details before proceeding to payment</p>
 
                   <div className="space-y-6">
-                    <div>
-                      <label className="block text-sm text-gray-700 mb-2">Card Number</label>
-                      <input
-                        type="text"
-                        placeholder="1234 5678 9012 3456"
-                        className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-sm text-gray-700 mb-2">Expiry Date</label>
-                        <input
-                          type="text"
-                          placeholder="MM/YY"
-                          className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                    {/* Booking Details Summary */}
+                    <div className="bg-gray-50 rounded-2xl p-6 space-y-4">
+                      <div className="flex items-center gap-4">
+                        <ImageWithFallback
+                          src={providerImage}
+                          alt={providerName}
+                          className="w-16 h-16 object-cover rounded-xl"
                         />
+                        <div>
+                          <p className="font-medium text-gray-900">{providerName}</p>
+                          <p className="text-sm text-gray-600">Service Provider</p>
+                        </div>
                       </div>
-                      <div>
-                        <label className="block text-sm text-gray-700 mb-2">CVV</label>
-                        <input
-                          type="text"
-                          placeholder="123"
-                          className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
-                        />
-                      </div>
-                    </div>
 
-                    <div>
-                      <label className="block text-sm text-gray-700 mb-2">Cardholder Name</label>
-                      <input
-                        type="text"
-                        placeholder="John Doe"
-                        className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
-                      />
+                      <div className="border-t border-gray-200 pt-4 space-y-3">
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Service</span>
+                          <span className="font-medium text-gray-900">{selectedServiceData?.name}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Date</span>
+                          <span className="font-medium text-gray-900">
+                            {selectedDay?.toLocaleDateString('en-US', {
+                              weekday: 'short',
+                              month: 'short',
+                              day: 'numeric',
+                              year: 'numeric'
+                            })}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Time</span>
+                          <span className="font-medium text-gray-900">{selectedTimeLabel}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Booking Mode</span>
+                          <span className="font-medium text-gray-900">
+                            {bookingMode === 'instant' ? 'Instant Booking' : 'Request Approval'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="border-t border-gray-200 pt-4 space-y-2">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-gray-600">Service Fee</span>
+                          <span className="text-gray-900">PHP {servicePrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-gray-600">Platform Fee (15%)</span>
+                          <span className="text-gray-900">PHP {platformFee.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                        </div>
+                        <div className="flex justify-between font-semibold text-lg pt-2 border-t border-gray-200">
+                          <span className="text-gray-900">Total</span>
+                          <span className="text-purple-600">PHP {total.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                        </div>
+                      </div>
                     </div>
 
                     <div className="bg-green-50 border border-green-200 rounded-xl p-4">
                       <div className="flex items-start gap-3">
                         <Check className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
                         <div className="text-sm text-green-800">
-                          <p className="mb-1"><strong>Secure Payment</strong></p>
-                          <p>Your payment information is encrypted and secure. You won't be charged until the provider confirms your booking.</p>
+                          <p className="mb-1"><strong>Secure Payment via PayMongo</strong></p>
+                          <p>After confirming, you'll be prompted to enter your payment details securely. Your card information is encrypted and never stored on our servers.</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                      <div className="flex items-start gap-3">
+                        <CreditCard className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                        <div className="text-sm text-blue-800">
+                          <p className="mb-1"><strong>Payment Methods Accepted</strong></p>
+                          <p>Credit/Debit Cards (Visa, Mastercard), GCash, PayMaya, and more.</p>
                         </div>
                       </div>
                     </div>
@@ -623,7 +689,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                   </>
                 ) : (
                   <>
-                    {currentStep === 3 ? 'Complete Booking' : 'Continue'}
+                    {currentStep === 3 ? 'Confirm & Pay' : 'Continue'}
                     {currentStep < 3 && <ChevronRight className="w-5 h-5" />}
                   </>
                 )}

@@ -4,6 +4,7 @@ import { pool } from '../config/database';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { notificationService } from '../services/notificationService';
 
 interface AuthedRequest extends Request {
   userId?: string;
@@ -271,6 +272,27 @@ router.post('/send', verifyToken, upload.single('file'), async (req: AuthedReque
         bookingId,
         message: sent,
       });
+    }
+
+    // Send notification to the other party
+    try {
+      const providerUserId = String(booking.provider_user_id || booking.provider_id || '');
+      const recipientId = String(currentUserId) === String(booking.client_id)
+        ? providerUserId
+        : String(booking.client_id);
+
+      // Get sender name
+      const senderInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [currentUserId]);
+      const senderName = senderInfo.rows[0]?.name || 'Someone';
+
+      await notificationService.notifyNewMessage(
+        recipientId,
+        bookingId,
+        senderName,
+        content?.substring(0, 100) || (file ? 'Sent an attachment' : 'New message')
+      );
+    } catch (notifError) {
+      console.error('Failed to send chat notification:', notifError);
     }
 
     return res.status(201).json({ data: sent });

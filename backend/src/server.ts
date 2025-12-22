@@ -13,6 +13,11 @@ import availabilityRoutes from './routes/availability';
 import servicesRoutes from './routes/services';
 import messagesRoutes from './routes/messages';
 import chatRoutes from './routes/chat';
+import paymentsRoutes from './routes/payments';
+import walletRoutes from './routes/wallet';
+import payoutsRoutes from './routes/payouts';
+import notificationsRoutes from './routes/notifications';
+import { notificationService } from './services/notificationService';
 import path from 'path';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
@@ -37,6 +42,10 @@ app.use('/api/availability', availabilityRoutes);
 app.use('/api/services', servicesRoutes);
 app.use('/api/messages', messagesRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/payments', paymentsRoutes);
+app.use('/api/wallet', walletRoutes);
+app.use('/api/payouts', payoutsRoutes);
+app.use('/api/notifications', notificationsRoutes);
 // Register debug routes only in non-production
 if (process.env.NODE_ENV !== 'production') {
   app.use('/api/debug', debugRoutes);
@@ -63,6 +72,9 @@ const io = new SocketIOServer(httpServer, {
 });
 
 app.set('io', io);
+
+// Set Socket.IO instance for notification service
+notificationService.setSocketIO(io);
 
 type PresenceMap = Map<string, Set<string>>;
 const bookingPresence: PresenceMap = new Map();
@@ -123,6 +135,12 @@ io.use((socket: Socket, next: (err?: Error) => void) => {
 io.on('connection', (socket: Socket) => {
   const userId = String((socket.data as any).userId || '');
   (socket.data as any).joinedBookings = new Set<string>();
+
+  // Join user's personal notification room
+  if (userId) {
+    socket.join(`user:${userId}`);
+    console.log(`User ${userId} connected and joined notification room`);
+  }
 
   socket.on('chat:join', async (payload: any) => {
     const bookingId = String(payload?.bookingId || '');

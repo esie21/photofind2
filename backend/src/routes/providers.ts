@@ -98,4 +98,69 @@ router.get('/', async (req: Request, res: Response) => {
   }
 });
 
+// Get category statistics (count of providers per category)
+router.get('/categories/stats', async (req: Request, res: Response) => {
+  try {
+    // Count providers by their category field in users table
+    const userCategoryResult = await pool.query(`
+      SELECT category, COUNT(*) as count
+      FROM users
+      WHERE role = 'provider' AND category IS NOT NULL AND category != ''
+      GROUP BY category
+      ORDER BY count DESC
+    `);
+
+    // Also count by service categories for a more complete picture
+    const serviceCategoryResult = await pool.query(`
+      SELECT s.category, COUNT(DISTINCT s.provider_id) as count
+      FROM services s
+      JOIN users u ON u.id = s.provider_id
+      WHERE u.role = 'provider' AND s.category IS NOT NULL AND s.category != ''
+      GROUP BY s.category
+      ORDER BY count DESC
+    `);
+
+    // Merge the counts (prioritize user category, add service categories that aren't in user categories)
+    const categoryMap = new Map<string, number>();
+
+    // Add user categories
+    for (const row of userCategoryResult.rows) {
+      categoryMap.set(row.category, parseInt(row.count));
+    }
+
+    // Add service categories (don't override existing)
+    for (const row of serviceCategoryResult.rows) {
+      if (!categoryMap.has(row.category)) {
+        categoryMap.set(row.category, parseInt(row.count));
+      } else {
+        // Take the max of user count or service count
+        const existing = categoryMap.get(row.category) || 0;
+        categoryMap.set(row.category, Math.max(existing, parseInt(row.count)));
+      }
+    }
+
+    // Get total provider count
+    const totalResult = await pool.query(`
+      SELECT COUNT(*) as total FROM users WHERE role = 'provider'
+    `);
+    const totalProviders = parseInt(totalResult.rows[0]?.total || '0');
+
+    // Convert to array and sort by count
+    const categories = Array.from(categoryMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+
+    res.json({
+      data: categories,
+      meta: {
+        total_providers: totalProviders,
+        total_categories: categories.length
+      }
+    });
+  } catch (error: any) {
+    console.error('Get category stats error:', error);
+    res.status(500).json({ error: 'Failed to retrieve category statistics' });
+  }
+});
+
 export default router;

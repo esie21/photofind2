@@ -34,6 +34,17 @@ class APIClient {
     return headers;
   }
 
+  private resolveUrl(url: string): string {
+    // If URL starts with http:// or https://, use as-is
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+    // Otherwise, prepend the base URL
+    const baseUrl = API_CONFIG.BASE_URL.replace(/\/$/, '');
+    const path = url.startsWith('/') ? url : `/${url}`;
+    return `${baseUrl}${path}`;
+  }
+
   async request<T>(
     url: string,
     options: RequestOptions = {}
@@ -49,7 +60,8 @@ class APIClient {
         delete headers['Content-Type'];
       }
 
-      const response = await fetch(url, {
+      const resolvedUrl = this.resolveUrl(url);
+      const response = await fetch(resolvedUrl, {
         ...options,
         headers,
       });
@@ -105,6 +117,13 @@ class APIClient {
 
   async delete<T>(url: string): Promise<T> {
     return this.request<T>(url, { method: 'DELETE' });
+  }
+
+  async patch<T>(url: string, data?: unknown): Promise<T> {
+    return this.request<T>(url, {
+      method: 'PATCH',
+      body: data ? JSON.stringify(data) : undefined,
+    });
   }
 }
 

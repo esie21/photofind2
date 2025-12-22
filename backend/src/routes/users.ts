@@ -33,7 +33,7 @@ const upload = multer({ storage });
 // Get all users - admin only
 router.get('/', verifyToken, checkRole('admin'), async (req: Request, res: Response) => {
   try {
-    const result = await pool.query('SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, created_at FROM users');
+    const result = await pool.query('SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, created_at FROM users');
     res.json(result.rows);
   } catch (error) {
     console.error('Get users error:', error);
@@ -50,7 +50,7 @@ router.get('/:id', verifyToken, async (req: any, res: Response) => {
       return res.status(403).json({ error: 'Insufficient permissions', debug: process.env.NODE_ENV !== 'production' ? { reqUserId: req.userId, targetId: userId, role: req.role } : undefined });
     }
 
-    const result = await pool.query('SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, created_at FROM users WHERE id = $1', [userId]);
+    const result = await pool.query('SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, created_at FROM users WHERE id = $1', [userId]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -70,8 +70,8 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
-    const { name, bio, years_experience, location, profile_image, portfolio_images } = req.body;
-    console.log('Update user payload', { reqUserId: req.userId, targetId: userId, payload: { name, bio, years_experience, location, profile_image, portfolio_images } });
+    const { name, bio, years_experience, location, category, profile_image, portfolio_images } = req.body;
+    console.log('Update user payload', { reqUserId: req.userId, targetId: userId, payload: { name, bio, years_experience, location, category, profile_image, portfolio_images } });
 
     // Build dynamic update
     const updates = [] as string[];
@@ -102,12 +102,16 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
       updates.push(`portfolio_images = $${idx++}`);
       values.push(portfolio_images);
     }
+    if (category !== undefined) {
+      updates.push(`category = $${idx++}`);
+      values.push(category);
+    }
 
     if (updates.length === 0) {
       return res.status(400).json({ error: 'No updates provided' });
     }
 
-    const sql = `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${idx} RETURNING id, email, name, role, profile_image, portfolio_images, bio, years_experience, location`;
+    const sql = `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${idx} RETURNING id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category`;
     values.push(userId);
 
     console.log('Executing SQL', { sql, values });
@@ -150,7 +154,7 @@ router.post('/:id/upload/profile', verifyToken, upload.single('profile'), async 
     );
 
     const result = await pool.query(
-      'SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location FROM users WHERE id = $1',
+      'SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category FROM users WHERE id = $1',
       [userId]
     );
 
@@ -179,7 +183,7 @@ router.post('/:id/upload/portfolio', verifyToken, upload.array('images', 24), as
 
     await pool.query('UPDATE users SET portfolio_images = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newArr, userId]);
 
-    const result = await pool.query('SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location FROM users WHERE id = $1', [userId]);
+    const result = await pool.query('SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category FROM users WHERE id = $1', [userId]);
 
     res.json(result.rows[0]);
   } catch (err) {

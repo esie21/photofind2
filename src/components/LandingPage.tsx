@@ -1,7 +1,59 @@
 import { useState, useEffect } from 'react';
-import { Search, Camera, Video, Palette, GraduationCap, Sparkles, Star, MapPin, ChevronRight, ChevronLeft } from 'lucide-react';
+import { Search, Camera, Video, Palette, Sparkles, Star, MapPin, ChevronRight, ChevronLeft, CalendarDays } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import userService from '../api/services/userService';
+
+// Category configuration with icons, colors, and images
+const CATEGORY_CONFIG: Record<string, { icon: any; color: string; image: string }> = {
+  'Photography': {
+    icon: Camera,
+    color: 'from-blue-500 to-cyan-500',
+    image: 'https://images.unsplash.com/photo-1643968612613-fd411aecd1fd?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+  },
+  'Videography': {
+    icon: Video,
+    color: 'from-purple-500 to-pink-500',
+    image: 'https://images.unsplash.com/photo-1713392824135-a7c7db3d9465?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+  },
+  'Makeup Artist': {
+    icon: Sparkles,
+    color: 'from-pink-500 to-rose-500',
+    image: 'https://images.unsplash.com/photo-1698181842119-a5283dea1440?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+  },
+  'Design': {
+    icon: Palette,
+    color: 'from-orange-500 to-yellow-500',
+    image: 'https://images.unsplash.com/photo-1609921212029-bb5a28e60960?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+  },
+  'Event Organizer': {
+    icon: CalendarDays,
+    color: 'from-green-500 to-emerald-500',
+    image: 'https://images.unsplash.com/photo-1511795409834-ef04bbd61622?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+  },
+  'Wedding Photography': {
+    icon: Camera,
+    color: 'from-rose-400 to-pink-500',
+    image: 'https://images.unsplash.com/photo-1606216794074-735e91aa2c92?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+  },
+  'Portrait Photography': {
+    icon: Camera,
+    color: 'from-indigo-500 to-purple-500',
+    image: 'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+  },
+  'Event Photography': {
+    icon: Camera,
+    color: 'from-teal-500 to-cyan-500',
+    image: 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+  },
+  'Commercial Photography': {
+    icon: Camera,
+    color: 'from-amber-500 to-orange-500',
+    image: 'https://images.unsplash.com/photo-1542038784456-1ea8e935640e?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+  },
+};
+
+// Main categories to display (order matters)
+const MAIN_CATEGORIES = ['Photography', 'Videography', 'Makeup Artist', 'Design', 'Event Organizer'];
 
 interface LandingPageProps {
   onViewChange: (view: 'client' | 'provider') => void;
@@ -9,48 +61,77 @@ interface LandingPageProps {
 
 export function LandingPage({ onViewChange }: LandingPageProps) {
   const [currentSlide, setCurrentSlide] = useState(0);
-  const categories = [
-    { icon: Camera, name: 'Photography', count: '1,234 professionals', color: 'from-blue-500 to-cyan-500', image: 'https://images.unsplash.com/photo-1643968612613-fd411aecd1fd?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwaG90b2dyYXBoZXIlMjBjYW1lcmElMjBwcm9mZXNzaW9uYWx8ZW58MXx8fHwxNzY0NDAwNjc1fDA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
-    { icon: Video, name: 'Videography', count: '856 professionals', color: 'from-purple-500 to-pink-500', image: 'https://images.unsplash.com/photo-1713392824135-a7c7db3d9465?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx2aWRlb2dyYXBoZXIlMjBmaWxtaW5nfGVufDF8fHx8MTc2NDQwNzk1M3ww&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
-    { icon: Sparkles, name: 'Makeup Artist', count: '567 professionals', color: 'from-pink-500 to-rose-500', image: 'https://images.unsplash.com/photo-1698181842119-a5283dea1440?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxtYWtldXAlMjBhcnRpc3QlMjBiZWF1dHl8ZW58MXx8fHwxNzY0MzU4MjcwfDA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
-    { icon: Palette, name: 'Design', count: '923 professionals', color: 'from-orange-500 to-yellow-500', image: 'https://images.unsplash.com/photo-1609921212029-bb5a28e60960?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxncmFwaGljJTIwZGVzaWduZXIlMjB3b3Jrc3BhY2V8ZW58MXx8fHwxNzY0MzY0NzEyfDA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
-    { icon: GraduationCap, name: 'Tutors', count: '1,567 professionals', color: 'from-green-500 to-emerald-500', image: 'https://images.unsplash.com/photo-1629360021730-3d258452c425?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx0dXRvciUyMHRlYWNoaW5nJTIwc3R1ZGVudHxlbnwxfHx8fDE3NjQzNDAxNTl8MA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
-  ];
+  const [categoryStats, setCategoryStats] = useState<{ name: string; count: number }[]>([]);
+  const [totalProviders, setTotalProviders] = useState(0);
+  const [loadingCategories, setLoadingCategories] = useState(true);
 
-  const featuredProviders = [
-    { name: 'Sarah Johnson', service: 'Wedding Photographer', rating: 4.9, reviews: 127, price: '$300/hr', location: 'New York, NY', image: 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
-    { name: 'Michael Chen', service: 'Commercial Videographer', rating: 5.0, reviews: 89, price: '$450/hr', location: 'Los Angeles, CA', image: 'https://images.unsplash.com/photo-1713392824135-a7c7db3d9465?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx2aWRlb2dyYXBoZXIlMjBmaWxtaW5nfGVufDF8fHx8MTc2NDQwNzk1M3ww&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
-    { name: 'Emily Rodriguez', service: 'Portrait Photographer', rating: 4.8, reviews: 234, price: '$200/hr', location: 'Chicago, IL', image: 'https://images.unsplash.com/photo-1643264623879-bb85ea39c62a?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMHBob3RvZ3JhcGhlciUyMHByb2Zlc3Npb25hbHxlbnwxfHx8fDE3NjQ0MDc5NTR8MA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
-    { name: 'David Park', service: 'Brand Designer', rating: 4.9, reviews: 156, price: '$250/hr', location: 'San Francisco, CA', image: 'https://images.unsplash.com/photo-1760780567530-389d8a3fba75?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxjcmVhdGl2ZSUyMHByb2Zlc3Npb25hbCUyMHN0dWRpb3xlbnwxfHx8fDE3NjQzNzkwODF8MA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral' },
-  ];
+  // Fetch category stats on mount
+  useEffect(() => {
+    (async () => {
+      setLoadingCategories(true);
+      try {
+        const res = await userService.getCategoryStats();
+        setCategoryStats(res.data || []);
+        setTotalProviders(res.meta?.total_providers || 0);
+      } catch (err) {
+        console.error('Failed to load category stats', err);
+        setCategoryStats([]);
+        setTotalProviders(0);
+      } finally {
+        setLoadingCategories(false);
+      }
+    })();
+  }, []);
 
-  const [remoteProviders, setRemoteProviders] = useState<any[] | null>(null);
-  const [loadingProviders, setLoadingProviders] = useState(false);
+  // Build categories array with real counts - only show categories that have providers
+  const categories = MAIN_CATEGORIES
+    .map((name) => {
+      const stats = categoryStats.find((c) => c.name === name);
+      const config = CATEGORY_CONFIG[name] || {
+        icon: Camera,
+        color: 'from-gray-500 to-gray-600',
+        image: 'https://images.unsplash.com/photo-1643968612613-fd411aecd1fd?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=1080'
+      };
+      const count = stats?.count || 0;
+      return {
+        icon: config.icon,
+        name,
+        count,
+        countText: `${count} professional${count !== 1 ? 's' : ''}`,
+        color: config.color,
+        image: config.image,
+      };
+    })
+    .filter((cat) => cat.count > 0); // Only show categories with providers
+
+  const [providers, setProviders] = useState<any[]>([]);
+  const [loadingProviders, setLoadingProviders] = useState(true);
 
   useEffect(() => {
     (async () => {
       setLoadingProviders(true);
       try {
         const res = await userService.getAllProviders({ page: 1, limit: 6 });
-        // userService maps `profile_image` -> `image` so UI can use `image`
-        setRemoteProviders(res.data || []);
+        setProviders(res.data || []);
       } catch (err) {
-        console.error('Failed to load remote providers for landing page', err);
-        setRemoteProviders([]);
+        console.error('Failed to load providers for landing page', err);
+        setProviders([]);
       } finally {
         setLoadingProviders(false);
       }
     })();
   }, []);
 
-  const providersToShow = (remoteProviders && remoteProviders.length > 0) ? remoteProviders : featuredProviders;
-
   const nextSlide = () => {
-    setCurrentSlide((prev) => (prev + 1) % providersToShow.length);
+    if (providers.length > 0) {
+      setCurrentSlide((prev) => (prev + 1) % providers.length);
+    }
   };
 
   const prevSlide = () => {
-    setCurrentSlide((prev) => (prev - 1 + providersToShow.length) % providersToShow.length);
+    if (providers.length > 0) {
+      setCurrentSlide((prev) => (prev - 1 + providers.length) % providers.length);
+    }
   };
 
   return (
@@ -123,44 +204,58 @@ export function LandingPage({ onViewChange }: LandingPageProps) {
         </div>
 
         <div className="relative">
-          {/* Navigation Buttons */}
-          <button
-            onClick={prevSlide}
-            className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-4 z-10 w-12 h-12 bg-white rounded-full shadow-lg flex items-center justify-center hover:bg-gray-50 transition-colors"
-          >
-            <ChevronLeft className="w-6 h-6 text-gray-700" />
-          </button>
-          <button
-            onClick={nextSlide}
-            className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-4 z-10 w-12 h-12 bg-white rounded-full shadow-lg flex items-center justify-center hover:bg-gray-50 transition-colors"
-          >
-            <ChevronRight className="w-6 h-6 text-gray-700" />
-          </button>
+          {loadingProviders ? (
+            // Loading skeleton
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {Array.from({ length: 3 }).map((_, idx) => (
+                <div key={`skeleton-${idx}`} className="bg-white rounded-2xl overflow-hidden shadow-md p-4">
+                  <div className="h-44 bg-gray-200 animate-pulse rounded-lg mb-4" />
+                  <div className="h-4 bg-gray-200 animate-pulse rounded w-3/4 mb-2" />
+                  <div className="h-3 bg-gray-200 animate-pulse rounded w-1/2" />
+                </div>
+              ))}
+            </div>
+          ) : providers.length === 0 ? (
+            // Empty state
+            <div className="text-center py-16 bg-gray-50 rounded-2xl">
+              <Camera className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+              <h3 className="text-xl text-gray-600 mb-2">No providers yet</h3>
+              <p className="text-gray-500 mb-6">Be the first to join our platform!</p>
+              <button
+                onClick={() => onViewChange('provider')}
+                className="px-6 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors"
+              >
+                Become a Provider
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* Navigation Buttons */}
+              <button
+                onClick={prevSlide}
+                className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-4 z-10 w-12 h-12 bg-white rounded-full shadow-lg flex items-center justify-center hover:bg-gray-50 transition-colors"
+              >
+                <ChevronLeft className="w-6 h-6 text-gray-700" />
+              </button>
+              <button
+                onClick={nextSlide}
+                className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-4 z-10 w-12 h-12 bg-white rounded-full shadow-lg flex items-center justify-center hover:bg-gray-50 transition-colors"
+              >
+                <ChevronRight className="w-6 h-6 text-gray-700" />
+              </button>
 
-          {/* Carousel */}
-          <div className="overflow-hidden">
-            <div 
-              className="flex transition-transform duration-500 ease-out"
-              style={{ transform: `translateX(-${currentSlide * (100 / Math.min(3, providersToShow.length || 3))}%)` }}
-            >
-              {loadingProviders ? (
-                // show 3 skeleton cards while loading
-                Array.from({ length: Math.min(3, 3) }).map((_, idx) => (
-                  <div key={`skeleton-${idx}`} className="flex-shrink-0 px-3" style={{ width: `${100 / Math.min(3, providersToShow.length || 3)}%` }}>
-                    <div className="bg-white rounded-2xl overflow-hidden shadow-md p-4">
-                      <div className="h-44 bg-gray-200 animate-pulse rounded-lg mb-4" />
-                      <div className="h-4 bg-gray-200 animate-pulse rounded w-3/4 mb-2" />
-                      <div className="h-3 bg-gray-200 animate-pulse rounded w-1/2" />
-                    </div>
-                  </div>
-                ))
-              ) : (
-                providersToShow.map((provider, index) => (
+              {/* Carousel */}
+              <div className="overflow-hidden">
+                <div
+                  className="flex transition-transform duration-500 ease-out"
+                  style={{ transform: `translateX(-${currentSlide * (100 / Math.min(3, providers.length))}%)` }}
+                >
+                  {providers.map((provider, index) => (
                   <button
                     key={index}
                     onClick={() => onViewChange('client')}
                     className="flex-shrink-0 px-3 text-left"
-                    style={{ width: `${100 / Math.min(3, providersToShow.length || 3)}%` }}
+                    style={{ width: `${100 / Math.min(3, providers.length || 3)}%` }}
                   >
                     <div className="bg-white rounded-2xl overflow-hidden shadow-md hover:shadow-xl transition-shadow">
                     <div className="relative h-64">
@@ -190,88 +285,89 @@ export function LandingPage({ onViewChange }: LandingPageProps) {
                     </div>
                   </div>
                   </button>
-                ))
-              )}
-            </div>
-          </div>
+                ))}
+                </div>
+              </div>
 
-          {/* Dots Navigation */}
-          <div className="flex justify-center gap-2 mt-6">
-            {providersToShow.map((_, index) => (
-              <button
-                key={index}
-                onClick={() => setCurrentSlide(index)}
-                className={`w-2 h-2 rounded-full transition-all ${
-                  currentSlide === index ? 'bg-purple-600 w-8' : 'bg-gray-300'
-                }`}
-              />
-            ))}
-          </div>
+              {/* Dots Navigation */}
+              <div className="flex justify-center gap-2 mt-6">
+                {providers.map((_, index) => (
+                  <button
+                    key={index}
+                    onClick={() => setCurrentSlide(index)}
+                    className={`w-2 h-2 rounded-full transition-all ${
+                      currentSlide === index ? 'bg-purple-600 w-8' : 'bg-gray-300'
+                    }`}
+                  />
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </section>
 
-      {/* Categories Section */}
-      <section className="py-16 px-4 bg-white">
-        <div className="max-w-7xl mx-auto">
-          <div className="text-center mb-12">
-            <h2 className="text-gray-900 mb-2">Browse by Category</h2>
-            <p className="text-gray-600">Explore our diverse range of creative services</p>
-          </div>
+      {/* Categories Section - Only show if there are categories with providers */}
+      {categories.length > 0 && (
+        <section className="py-16 px-4 bg-white">
+          <div className="max-w-7xl mx-auto">
+            <div className="text-center mb-12">
+              <h2 className="text-gray-900 mb-2">Browse by Category</h2>
+              <p className="text-gray-600">Explore our diverse range of creative services</p>
+            </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6">
-            {categories.map((category, index) => {
-              const Icon = category.icon;
-              return (
-                <button 
-                  key={index}
-                  onClick={() => onViewChange('client')}
-                  className="group relative overflow-hidden rounded-2xl bg-gray-50 hover:shadow-xl transition-all duration-300"
-                >
-                  <div className="relative h-48 overflow-hidden">
-                    <ImageWithFallback
-                      src={category.image}
-                      alt={category.name}
-                      className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
-                    />
-                    <div className={`absolute inset-0 bg-gradient-to-t ${category.color} opacity-60`}></div>
-                  </div>
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-white">
-                    <div className="w-14 h-14 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center mb-3">
-                      <Icon className="w-7 h-7" />
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6">
+              {categories.map((category, index) => {
+                const Icon = category.icon;
+                return (
+                  <button
+                    key={index}
+                    onClick={() => onViewChange('client')}
+                    className="group relative overflow-hidden rounded-2xl bg-gray-50 hover:shadow-xl transition-all duration-300"
+                  >
+                    <div className="relative h-48 overflow-hidden">
+                      <ImageWithFallback
+                        src={category.image}
+                        alt={category.name}
+                        className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
+                      />
+                      <div className={`absolute inset-0 bg-gradient-to-t ${category.color} opacity-60`}></div>
                     </div>
-                    <h3 className="text-white mb-1">{category.name}</h3>
-                    <p className="text-sm text-white/90">{category.count}</p>
-                  </div>
-                </button>
-              );
-            })}
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-white">
+                      <div className="w-14 h-14 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center mb-3">
+                        <Icon className="w-7 h-7" />
+                      </div>
+                      <h3 className="text-white mb-1">{category.name}</h3>
+                      <p className="text-sm text-white/90">{category.countText}</p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
-      {/* Stats Section */}
-      <section className="py-16 px-4 bg-gradient-to-br from-purple-600 to-pink-600">
-        <div className="max-w-7xl mx-auto">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-8 text-center text-white">
-            <div>
-              <div className="text-4xl mb-2">5,000+</div>
-              <div className="text-purple-100">Active Professionals</div>
-            </div>
-            <div>
-              <div className="text-4xl mb-2">50,000+</div>
-              <div className="text-purple-100">Bookings Completed</div>
-            </div>
-            <div>
-              <div className="text-4xl mb-2">4.8</div>
-              <div className="text-purple-100">Average Rating</div>
-            </div>
-            <div>
-              <div className="text-4xl mb-2">24/7</div>
-              <div className="text-purple-100">Customer Support</div>
+      {/* Stats Section - Only show if there are providers */}
+      {totalProviders > 0 && (
+        <section className="py-16 px-4 bg-gradient-to-br from-purple-600 to-pink-600">
+          <div className="max-w-7xl mx-auto">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-8 text-center text-white">
+              <div>
+                <div className="text-4xl mb-2">{totalProviders.toLocaleString()}</div>
+                <div className="text-purple-100">Active Professionals</div>
+              </div>
+              <div>
+                <div className="text-4xl mb-2">{categories.length}</div>
+                <div className="text-purple-100">Categories</div>
+              </div>
+              <div>
+                <div className="text-4xl mb-2">24/7</div>
+                <div className="text-purple-100">Customer Support</div>
+              </div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* How It Works */}
       <section className="py-16 px-4">

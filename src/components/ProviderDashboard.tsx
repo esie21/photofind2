@@ -1,5 +1,19 @@
 import { useState, useRef, useEffect } from 'react';
-import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2 } from 'lucide-react';
+import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag } from 'lucide-react';
+
+// Category options for providers and services
+const CATEGORY_OPTIONS = [
+  'Photography',
+  'Videography',
+  'Makeup Artist',
+  'Design',
+  'Event Organizer',
+  'Wedding Photography',
+  'Portrait Photography',
+  'Event Photography',
+  'Commercial Photography',
+  'Other',
+];
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { useAuth } from '../context/AuthContext';
 import userService from '../api/services/userService';
@@ -7,11 +21,12 @@ import serviceService from '../api/services/serviceService';
 import bookingService from '../api/services/bookingService';
 import availabilityService from '../api/services/availabilityService';
 import { ChatInterface } from './ChatInterface';
+import { WalletDashboard } from './WalletDashboard';
 
 export function ProviderDashboard() {
   const BASE_URL = ((import.meta as any).env?.VITE_API_URL as string) || 'http://localhost:3001/api';
   const STATIC_URL = 'http://localhost:3001/uploads';
-  const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'availability' | 'bookings' | 'earnings' | 'reviews'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews'>('overview');
   const [showChat, setShowChat] = useState(false);
   const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
   const { user, refreshUser } = useAuth();
@@ -32,6 +47,7 @@ export function ProviderDashboard() {
   title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
   bio: user?.bio || '',
   location: user?.location || '',
+  category: user?.category || 'Photography',
   years_experience: user?.years_experience || 10,
   profile_image: user?.profile_image
     ? user.profile_image.startsWith('http')
@@ -88,6 +104,7 @@ useEffect(() => {
     title: user.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
     bio: user.bio || '',
     location: user.location || '',
+    category: user.category || 'Photography',
     years_experience: user.years_experience || 10,
     profile_image: user.profile_image
       ? user.profile_image.startsWith('http')
@@ -282,7 +299,7 @@ useEffect(() => {
             { id: 'profile', label: 'Profile' },
             { id: 'availability', label: 'Availability' },
             { id: 'bookings', label: 'Bookings' },
-            { id: 'earnings', label: 'Earnings' },
+            { id: 'wallet', label: 'Wallet' },
             { id: 'reviews', label: 'Reviews' },
           ].map((tab) => (
             <button
@@ -546,6 +563,7 @@ useEffect(() => {
                             bio: formState.bio,
                             years_experience: formState.years_experience,
                             location: formState.location,
+                            category: formState.category,
                             profile_image: formState.profile_image,
                             portfolio_images: formState.portfolio_images,
                           };
@@ -615,6 +633,7 @@ useEffect(() => {
                           bio: (user as any)?.bio || s.bio,
                           years_experience: (user as any)?.years_experience || s.years_experience,
                           location: (user as any)?.location || s.location,
+                          category: (user as any)?.category || s.category,
                           profile_image: (user as any)?.profile_image || s.profile_image,
                           portfolio_images: (user as any)?.portfolio_images || s.portfolio_images,
                         }));
@@ -736,6 +755,31 @@ useEffect(() => {
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                     />
                   </div>
+                </div>
+
+                {/* Category Selection */}
+                <div>
+                  <label htmlFor="profile-category" className="block text-sm text-gray-700 mb-2">
+                    <Tag className="w-4 h-4 inline mr-1" />
+                    Primary Category
+                  </label>
+                  {editMode ? (
+                    <select
+                      id="profile-category"
+                      name="category"
+                      value={formState.category}
+                      onChange={(e) => setFormState((s: any) => ({ ...s, category: e.target.value }))}
+                      className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none bg-white"
+                    >
+                      {CATEGORY_OPTIONS.map((cat) => (
+                        <option key={cat} value={cat}>{cat}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="w-full px-4 py-3 border border-gray-200 rounded-xl bg-gray-50 text-gray-700">
+                      {formState.category || 'Not selected'}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -917,6 +961,32 @@ useEffect(() => {
                       ) : (
                         <p className="text-sm text-gray-600 whitespace-pre-wrap">{pkg.description}</p>
                       )}
+                      {/* Service Category */}
+                      {editMode ? (
+                        <div className="mt-3">
+                          <label className="block text-xs text-gray-500 mb-1">Service Category</label>
+                          <select
+                            value={pkg.category || 'Photography'}
+                            onChange={(e) => {
+                              const updated = [...packages];
+                              updated[index].category = e.target.value;
+                              setPackages(updated);
+                            }}
+                            className="w-full sm:w-48 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none bg-white"
+                          >
+                            {CATEGORY_OPTIONS.map((cat) => (
+                              <option key={cat} value={cat}>{cat}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : pkg.category && (
+                        <div className="mt-2">
+                          <span className="inline-flex items-center px-2 py-1 text-xs bg-purple-100 text-purple-700 rounded-full">
+                            <Tag className="w-3 h-3 mr-1" />
+                            {pkg.category}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   ))}
                   {packages.length === 0 && !isLoadingPackages && (
@@ -1062,109 +1132,10 @@ useEffect(() => {
           </div>
         )}
 
-        {/* Earnings Tab */}
-        {activeTab === 'earnings' && (() => {
-          const now = new Date();
-          const thisMonth = now.getMonth();
-          const thisYear = now.getFullYear();
-
-          const totalEarnings = providerBookings
-            .filter(b => b.status === 'completed')
-            .reduce((sum, b) => sum + (b.amount || 0), 0);
-
-          const thisMonthBookings = providerBookings.filter(b => {
-            const bookingDate = new Date(b.date);
-            return b.status === 'completed' &&
-              bookingDate.getMonth() === thisMonth &&
-              bookingDate.getFullYear() === thisYear;
-          });
-
-          const thisMonthEarnings = thisMonthBookings.reduce((sum, b) => sum + (b.amount || 0), 0);
-
-          const pendingEarnings = providerBookings
-            .filter(b => ['pending', 'accepted', 'confirmed'].includes(b.status))
-            .reduce((sum, b) => sum + (b.amount || 0), 0);
-
-          const pendingCount = providerBookings.filter(b => ['pending', 'accepted', 'confirmed'].includes(b.status)).length;
-
-          const recentTransactions = providerBookings
-            .slice()
-            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-            .slice(0, 10);
-
-          return (
-            <div className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="bg-white rounded-2xl p-6 shadow-sm">
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
-                      <DollarSign className="w-6 h-6 text-green-600" />
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600">Total Earnings</p>
-                      <p className="text-2xl text-gray-900">${totalEarnings.toLocaleString()}</p>
-                    </div>
-                  </div>
-                  <p className="text-sm text-green-600">{providerBookings.filter(b => b.status === 'completed').length} completed bookings</p>
-                </div>
-
-                <div className="bg-white rounded-2xl p-6 shadow-sm">
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
-                      <Calendar className="w-6 h-6 text-purple-600" />
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600">This Month</p>
-                      <p className="text-2xl text-gray-900">${thisMonthEarnings.toLocaleString()}</p>
-                    </div>
-                  </div>
-                  <p className="text-sm text-purple-600">{thisMonthBookings.length} completed this month</p>
-                </div>
-
-                <div className="bg-white rounded-2xl p-6 shadow-sm">
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
-                      <TrendingUp className="w-6 h-6 text-blue-600" />
-                    </div>
-                    <div>
-                      <p className="text-sm text-gray-600">Pending</p>
-                      <p className="text-2xl text-gray-900">${pendingEarnings.toLocaleString()}</p>
-                    </div>
-                  </div>
-                  <p className="text-sm text-blue-600">{pendingCount} pending bookings</p>
-                </div>
-              </div>
-
-              <div className="bg-white rounded-2xl p-6 shadow-sm">
-                <h2 className="text-gray-900 mb-6">Recent Transactions</h2>
-                {recentTransactions.length === 0 ? (
-                  <div className="text-center py-8 text-gray-600">No transactions yet.</div>
-                ) : (
-                  <div className="space-y-3">
-                    {recentTransactions.map((booking, index) => (
-                      <div key={index} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
-                        <div>
-                          <p className="text-gray-900">{booking.client}</p>
-                          <p className="text-sm text-gray-600">{booking.date} • {booking.service}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-gray-900 font-medium">${booking.amount?.toLocaleString()}</p>
-                          <span className={`text-sm capitalize ${
-                            booking.status === 'completed' ? 'text-green-600' :
-                            booking.status === 'cancelled' || booking.status === 'rejected' ? 'text-red-600' :
-                            'text-yellow-600'
-                          }`}>
-                            {booking.status}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })()}
+        {/* Wallet Tab */}
+        {activeTab === 'wallet' && (
+          <WalletDashboard />
+        )}
 
         {/* Reviews Tab */}
         {activeTab === 'reviews' && (

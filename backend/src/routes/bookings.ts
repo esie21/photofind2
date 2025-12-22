@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
+import { notificationService } from '../services/notificationService';
 
 
 const router = express.Router();
@@ -225,6 +226,38 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       const booking = result.rows[0];
 
       await client.query('COMMIT');
+
+      // Send notification about new booking
+      try {
+        // Get client, provider and service info for notification
+        const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [clientUserIdStr]);
+        const providerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserIdStr]);
+        const serviceInfo = await pool.query('SELECT title FROM services WHERE id::text = $1', [serviceIdStr]);
+        const clientName = clientInfo.rows[0]?.name || 'A client';
+        const providerName = providerInfo.rows[0]?.name || 'Provider';
+        const serviceTitle = serviceInfo.rows[0]?.title || 'a service';
+
+        if (mode === 'instant') {
+          // Instant booking - notify client that booking is confirmed
+          await notificationService.notifyBookingAccepted(
+            clientUserIdStr,
+            providerName,
+            String(booking.id)
+          );
+        } else {
+          // Request booking - notify provider of new request
+          await notificationService.notifyBookingRequest(
+            providerUserIdStr,
+            clientName,
+            String(booking.id),
+            serviceTitle
+          );
+        }
+      } catch (notifError) {
+        console.error('Failed to send booking notification:', notifError);
+        // Don't fail the booking creation if notification fails
+      }
+
       return res.status(201).json({ data: booking, status: initialStatus });
     } catch (e) {
       try {
@@ -508,6 +541,25 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
         [bookingId]
       );
       await client.query('COMMIT');
+
+      // Send cancellation notification to the other party
+      try {
+        const isClient = String(existing.client_id) === String(currentUserId);
+        const otherPartyId = isClient ? String(existing.provider_id) : String(existing.client_id);
+        const cancellerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [currentUserId]);
+        const serviceInfo = await pool.query('SELECT title FROM services WHERE id::text = $1', [String(updatedRes.rows[0].service_id)]);
+        const cancellerName = cancellerInfo.rows[0]?.name || (isClient ? 'Client' : 'Provider');
+        const serviceTitle = serviceInfo.rows[0]?.title || 'service';
+
+        await notificationService.notifyBookingCancelled(
+          otherPartyId,
+          cancellerName,
+          bookingId
+        );
+      } catch (notifError) {
+        console.error('Failed to send cancellation notification:', notifError);
+      }
+
       return res.json({ data: updatedRes.rows[0] });
     } catch (e) {
       try {
@@ -698,7 +750,53 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       const updated = updateRes.rows[0];
       await client.query('COMMIT');
 
+      // Send notifications based on status change
       if (String(existing.status) !== String(nextStatus)) {
+        try {
+          // Get names for notifications
+          const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [clientUserId]);
+          const providerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]);
+          const serviceInfo = await pool.query('SELECT title FROM services WHERE id::text = $1', [String(updated.service_id)]);
+          const clientName = clientInfo.rows[0]?.name || 'Client';
+          const providerName = providerInfo.rows[0]?.name || 'Provider';
+          const serviceTitle = serviceInfo.rows[0]?.title || 'service';
+
+          if (isAccept) {
+            // Notify client that their booking was accepted
+            await notificationService.notifyBookingAccepted(
+              clientUserId,
+              providerName,
+              bookingId
+            );
+          } else if (isReject) {
+            // Notify client that their booking was rejected
+            await notificationService.notifyBookingRejected(
+              clientUserId,
+              providerName,
+              bookingId
+            );
+          } else if (isCancel) {
+            // Notify the other party about cancellation
+            const notifyUserId = isClient ? providerUserId : clientUserId;
+            const cancellerName = isClient ? clientName : providerName;
+            await notificationService.notifyBookingCancelled(
+              notifyUserId,
+              cancellerName,
+              bookingId
+            );
+          } else if (isComplete) {
+            // Notify client that booking is completed
+            await notificationService.notifyBookingCompleted(
+              clientUserId,
+              bookingId,
+              serviceTitle
+            );
+          }
+        } catch (notifError) {
+          console.error('Failed to send status update notification:', notifError);
+          // Don't fail the update if notification fails
+        }
+
         const chatId = await ensureBookingChatExists(String(bookingId), String(existing.client_id), String(existing.provider_id));
 
         const inserted = await pool.query(

@@ -58,6 +58,13 @@ const userService = {
   async deleteUser(id: string): Promise<void> {
     return apiClient.delete<void>(API_CONFIG.ENDPOINTS.USERS.DELETE(id));
   },
+
+  async getCategoryStats(): Promise<{
+    data: { name: string; count: number }[];
+    meta: { total_providers: number; total_categories: number };
+  }> {
+    return apiClient.get('/providers/categories/stats');
+  },
 };
 
 export default userService;
