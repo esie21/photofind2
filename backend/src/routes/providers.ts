@@ -39,7 +39,7 @@ router.get('/', async (req: Request, res: Response) => {
     console.debug('serviceSelectParts:', serviceSelectParts, 'orderByService:', orderByService);
 
     // Use LATERAL join to fetch featured service
-    const sql = `SELECT u.id, u.email, u.name, u.role, u.profile_image, u.portfolio_images, u.bio, u.years_experience, u.location,
+    const sql = `SELECT u.id, u.email, u.name, u.role, u.profile_image, u.portfolio_images, u.bio, u.years_experience, u.location, u.rating, u.review_count,
       ${serviceSelect}
       FROM users u
       LEFT JOIN LATERAL (
@@ -78,6 +78,8 @@ router.get('/', async (req: Request, res: Response) => {
       bio: r.bio,
       years_experience: r.years_experience,
       location: r.location,
+      rating: parseFloat(r.rating) || 0,
+      review_count: parseInt(r.review_count) || 0,
       featured_service: r.service_id ? {
         id: r.service_id,
         title: r.service_title,

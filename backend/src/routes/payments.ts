@@ -439,6 +439,7 @@ router.post('/confirm', verifyToken, async (req: Request & { userId?: string }, 
 
         await notificationService.notifyPaymentReceived(
           String(payment.provider_id),
+          String(payment.client_id),
           parseFloat(payment.net_provider_amount),
           clientName,
           String(payment.booking_id)
@@ -471,6 +472,7 @@ router.post('/confirm', verifyToken, async (req: Request & { userId?: string }, 
 
         await notificationService.notifyPaymentFailed(
           String(payment.client_id),
+          String(payment.provider_id),
           String(payment.booking_id),
           paymentIntent.attributes.last_payment_error?.message || 'Payment could not be processed'
         );
@@ -602,6 +604,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
 
           await notificationService.notifyPaymentReceived(
             String(payment.provider_id),
+            String(payment.client_id),
             parseFloat(payment.net_provider_amount),
             clientName,
             String(payment.booking_id)
@@ -642,6 +645,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
 
           await notificationService.notifyPaymentFailed(
             String(payment.client_id),
+            String(payment.provider_id),
             String(payment.booking_id),
             eventData?.attributes?.last_payment_error?.message || 'Payment could not be processed'
           );

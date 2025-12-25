@@ -69,6 +69,8 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS years_experience INTEGER DEFAULT 0;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS category VARCHAR(100);`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS rating DECIMAL(3,2) DEFAULT 0;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS review_count INTEGER DEFAULT 0;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
 
     // Create services table (only if not exists)
@@ -533,6 +535,17 @@ export async function initializeTables() {
       }
     }
 
+    // Add missing columns to payouts table
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS payout_method VARCHAR(50);`);
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS payout_details JSONB;`);
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS rejection_reason TEXT;`);
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS admin_notes TEXT;`);
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS processed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+
     // Add foreign key for payout_id in transactions after payouts table exists
     try {
       if (usesUUID) {
@@ -773,17 +786,33 @@ export async function initializeTables() {
     }
 
     // Add missing columns to reviews table
+    await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS reviewer_id ${refType};`);
+    await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS reviewee_id ${refType};`);
     await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS is_visible BOOLEAN DEFAULT TRUE;`);
     await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS moderation_status VARCHAR(50) DEFAULT 'approved';`);
     await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS moderation_reason TEXT;`);
     await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS moderated_by ${refType};`);
     await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS moderated_at TIMESTAMP;`);
     await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+    await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
 
-    // Reviews indexes
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_reviewee ON reviews (reviewee_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_reviewer ON reviews (reviewer_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_booking ON reviews (booking_id);`);
+    // Reviews indexes - only create if columns exist
+    const reviewColsCheck = await client.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'reviews' AND column_name IN ('reviewee_id', 'reviewer_id', 'booking_id')
+    `);
+    const existingCols = reviewColsCheck.rows.map((r: any) => r.column_name);
+
+    if (existingCols.includes('reviewee_id')) {
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_reviewee ON reviews (reviewee_id);`);
+    }
+    if (existingCols.includes('reviewer_id')) {
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_reviewer ON reviews (reviewer_id);`);
+    }
+    if (existingCols.includes('booking_id')) {
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_booking ON reviews (booking_id);`);
+    }
     await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_moderation ON reviews (moderation_status);`);
 
     // ==================== DISPUTES TABLE ====================

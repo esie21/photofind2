@@ -16,10 +16,15 @@ const CATEGORY_OPTIONS = [
 ];
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
+import { BookingCardSkeleton, ServiceCardSkeleton, StatsCardSkeleton } from './ui/skeleton';
+import { EmptyState } from './EmptyState';
+import { ErrorState, InlineError } from './ErrorState';
 import userService from '../api/services/userService';
 import serviceService from '../api/services/serviceService';
 import bookingService from '../api/services/bookingService';
 import availabilityService from '../api/services/availabilityService';
+import reviewService, { Review, ReviewStats } from '../api/services/reviewService';
 import { ChatInterface } from './ChatInterface';
 import { WalletDashboard } from './WalletDashboard';
 
@@ -30,18 +35,26 @@ export function ProviderDashboard() {
   const [showChat, setShowChat] = useState(false);
   const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
   const { user, refreshUser } = useAuth();
+  const toast = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const portfolioFileRef = useRef<HTMLInputElement | null>(null);
   const [editMode, setEditMode] = useState(false);
   const [packages, setPackages] = useState<any[]>([]);
   const [isLoadingPackages, setIsLoadingPackages] = useState(false);
+  const [packagesError, setPackagesError] = useState<string | null>(null);
   const [providerBookings, setProviderBookings] = useState<any[]>([]);
   const [isLoadingBookings, setIsLoadingBookings] = useState(false);
-  const [availabilitySlots, setAvailabilitySlots] = useState<any[]>([]);
+  const [bookingsError, setBookingsError] = useState<string | null>(null);
+  const [blockedDates, setBlockedDates] = useState<any[]>([]);
   const [isLoadingAvailability, setIsLoadingAvailability] = useState(false);
-  const [newSlotStart, setNewSlotStart] = useState('');
-  const [newSlotEnd, setNewSlotEnd] = useState('');
-  const [isSavingSlot, setIsSavingSlot] = useState(false);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
+  const [newBlockDate, setNewBlockDate] = useState('');
+  const [newBlockReason, setNewBlockReason] = useState('');
+  const [isSavingBlock, setIsSavingBlock] = useState(false);
+  const [reviews, setReviews] = useState<Review[]>([]);
+  const [reviewStats, setReviewStats] = useState<ReviewStats>({ totalReviews: 0, averageRating: '0.0' });
+  const [isLoadingReviews, setIsLoadingReviews] = useState(false);
+  const [reviewsError, setReviewsError] = useState<string | null>(null);
   const [formState, setFormState] = useState<any>({
   name: user?.name || 'Sarah Johnson',
   title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
@@ -210,77 +223,97 @@ useEffect(() => {
     }
   }, [editMode, user]);
 
+  const fetchBookings = async () => {
+    if (!user || (user.role !== 'provider' && user.role !== 'admin')) return;
+    setIsLoadingBookings(true);
+    setBookingsError(null);
+    try {
+      const data = await bookingService.getMyProviderBookings();
+      const mapped = (data || []).map((b: any) => {
+        const start = b.start_date ? new Date(b.start_date) : b.startDate ? new Date(b.startDate) : null;
+        const date = start ? start.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) : '';
+        const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+
+        // Handle client image URL
+        let clientImage = b.client_image;
+        if (clientImage && !clientImage.startsWith('http')) {
+          clientImage = `${STATIC_URL}/${clientImage}`;
+        }
+        if (!clientImage) {
+          clientImage = `https://ui-avatars.com/api/?name=${encodeURIComponent(b.client_name || 'Client')}&background=7c3aed&color=fff`;
+        }
+
+        return {
+          id: b.id,
+          client_id: b.client_user_id || b.client_id,
+          client: b.client_name || b.client_email || 'Client',
+          clientEmail: b.client_email,
+          service: b.service_title || 'Service',
+          date,
+          time,
+          amount: Number(b.total_price || b.totalPrice || 0),
+          status: b.status,
+          image: clientImage,
+        };
+      });
+      setProviderBookings(mapped);
+    } catch (e: any) {
+      setBookingsError(e?.message || 'Failed to load bookings');
+      setProviderBookings([]);
+    } finally {
+      setIsLoadingBookings(false);
+    }
+  };
+
+  const fetchAvailability = async () => {
+    if (!user || (user.role !== 'provider' && user.role !== 'admin')) return;
+    setIsLoadingAvailability(true);
+    setAvailabilityError(null);
+    try {
+      // Fetch blocked dates (overrides where is_available = false)
+      const from = new Date().toISOString().split('T')[0];
+      const to = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const data = await availabilityService.getOverrides(String(user.id), from, to);
+      // Filter only blocked dates
+      const blocked = (data || []).filter((o: any) => !o.is_available);
+      setBlockedDates(blocked);
+    } catch (e: any) {
+      setAvailabilityError(e?.message || 'Failed to load availability');
+      setBlockedDates([]);
+    } finally {
+      setIsLoadingAvailability(false);
+    }
+  };
+
   useEffect(() => {
-    (async () => {
-      if (!user || (user.role !== 'provider' && user.role !== 'admin')) return;
-      setIsLoadingBookings(true);
-      try {
-        const data = await bookingService.getMyProviderBookings();
-        const mapped = (data || []).map((b: any) => {
-          const start = b.start_date ? new Date(b.start_date) : b.startDate ? new Date(b.startDate) : null;
-          const date = start ? start.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) : '';
-          const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
-
-          // Handle client image URL
-          let clientImage = b.client_image;
-          if (clientImage && !clientImage.startsWith('http')) {
-            clientImage = `${STATIC_URL}/${clientImage}`;
-          }
-          if (!clientImage) {
-            clientImage = `https://ui-avatars.com/api/?name=${encodeURIComponent(b.client_name || 'Client')}&background=7c3aed&color=fff`;
-          }
-
-          return {
-            id: b.id,
-            client_id: b.client_user_id || b.client_id,
-            client: b.client_name || b.client_email || 'Client',
-            clientEmail: b.client_email,
-            service: b.service_title || 'Service',
-            date,
-            time,
-            amount: Number(b.total_price || b.totalPrice || 0),
-            status: b.status,
-            image: clientImage,
-          };
-        });
-        setProviderBookings(mapped);
-      } catch (e) {
-        setProviderBookings([]);
-      } finally {
-        setIsLoadingBookings(false);
-      }
-    })();
+    fetchBookings();
   }, [user]);
 
   useEffect(() => {
-    (async () => {
-      if (!user || (user.role !== 'provider' && user.role !== 'admin')) return;
-      setIsLoadingAvailability(true);
-      try {
-        const from = new Date();
-        const to = new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000);
-        const data = await availabilityService.getProviderSlots({
-          providerId: user.id,
-          from: from.toISOString(),
-          to: to.toISOString(),
-        });
-        setAvailabilitySlots(data || []);
-      } catch (_e) {
-        setAvailabilitySlots([]);
-      } finally {
-        setIsLoadingAvailability(false);
-      }
-    })();
+    fetchAvailability();
   }, [user]);
 
+  const fetchReviews = async () => {
+    if (!user || (user.role !== 'provider' && user.role !== 'admin')) return;
+    setIsLoadingReviews(true);
+    setReviewsError(null);
+    try {
+      const data = await reviewService.getReceivedReviews();
+      setReviews(data.reviews || []);
+      setReviewStats(data.stats || { totalReviews: 0, averageRating: '0.0' });
+    } catch (e: any) {
+      setReviewsError(e?.message || 'Failed to load reviews');
+      setReviews([]);
+    } finally {
+      setIsLoadingReviews(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchReviews();
+  }, [user]);
 
   const bookingRequests = providerBookings;
-
-  const reviews = [
-    { id: 1, client: 'Emma Williams', rating: 5, comment: 'Absolutely amazing work! Sarah captured every moment perfectly. Highly recommend!', date: '2025-11-20', service: 'Wedding Photography' },
-    { id: 2, client: 'Michael Johnson', rating: 5, comment: 'Professional, creative, and a pleasure to work with. The photos exceeded our expectations!', date: '2025-11-15', service: 'Corporate Event' },
-    { id: 3, client: 'Lisa Chen', rating: 4, comment: 'Great experience overall. Very talented photographer with excellent communication.', date: '2025-11-10', service: 'Portrait Session' },
-  ];
 
   const portfolioImages = [
     'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080',
@@ -347,7 +380,23 @@ useEffect(() => {
 
               <div className="space-y-4">
                 {isLoadingBookings ? (
-                  <div className="text-gray-600">Loading bookings...</div>
+                  <>
+                    {Array.from({ length: 2 }).map((_, i) => (
+                      <BookingCardSkeleton key={i} />
+                    ))}
+                  </>
+                ) : bookingsError ? (
+                  <InlineError
+                    message={bookingsError}
+                    onRetry={fetchBookings}
+                    retrying={isLoadingBookings}
+                  />
+                ) : bookingRequests.length === 0 ? (
+                  <EmptyState
+                    type="bookings"
+                    title="No booking requests"
+                    description="New booking requests from clients will appear here."
+                  />
                 ) : bookingRequests.map((booking) => (
                   <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
                     <div className="flex flex-col sm:flex-row gap-4">
@@ -382,8 +431,10 @@ useEffect(() => {
                                 try {
                                   await bookingService.updateBooking(String(booking.id), { status: 'accepted' } as any);
                                   setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'accepted' } : b));
+                                  toast.success('Booking accepted', `Booking with ${booking.client} has been confirmed.`);
                                 } catch (e) {
                                   console.error('Failed to accept booking', e);
+                                  toast.error('Failed to accept', 'Please try again.');
                                 }
                               }}
                               className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm flex items-center gap-2"
@@ -396,8 +447,10 @@ useEffect(() => {
                                 try {
                                   await bookingService.updateBooking(String(booking.id), { status: 'rejected' } as any);
                                   setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'rejected' } : b));
+                                  toast.info('Booking declined', 'The client has been notified.');
                                 } catch (e) {
                                   console.error('Failed to reject booking', e);
+                                  toast.error('Failed to decline', 'Please try again.');
                                 }
                               }}
                               className="px-4 py-2 border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm flex items-center gap-2"
@@ -443,95 +496,196 @@ useEffect(() => {
         )}
 
         {activeTab === 'availability' && (
-          <div className="bg-white rounded-2xl p-6 shadow-sm">
-            <h2 className="text-gray-900 mb-6">Availability</h2>
+          <div className="space-y-6">
+            {/* Info Banner */}
+            <div className="bg-blue-50 border border-blue-200 rounded-2xl p-6">
+              <h3 className="text-blue-900 font-medium mb-2">How Booking Works</h3>
+              <p className="text-blue-700 text-sm">
+                Clients can request bookings for any date and time. You'll receive a notification to accept or decline each request.
+                Use this page to block dates when you're not available (vacations, holidays, etc.).
+              </p>
+            </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <div className="space-y-4">
-                <h3 className="text-gray-900">Add Slot</h3>
+              {/* Block Date Form */}
+              <div className="bg-white rounded-2xl p-6 shadow-sm">
+                <h3 className="text-gray-900 font-medium mb-4">Block a Date</h3>
+                <p className="text-sm text-gray-600 mb-4">
+                  Block dates when you're unavailable. Clients won't be able to book on these dates.
+                </p>
 
-                <div className="space-y-3">
+                <div className="space-y-4">
                   <div>
-                    <label className="block text-sm text-gray-700 mb-2">Start</label>
+                    <label className="block text-sm text-gray-700 mb-2">Date to Block</label>
                     <input
-                      type="datetime-local"
-                      value={newSlotStart}
-                      onChange={(e) => setNewSlotStart(e.target.value)}
+                      type="date"
+                      value={newBlockDate}
+                      onChange={(e) => setNewBlockDate(e.target.value)}
+                      min={new Date().toISOString().split('T')[0]}
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm text-gray-700 mb-2">End</label>
+                    <label className="block text-sm text-gray-700 mb-2">Reason (optional)</label>
                     <input
-                      type="datetime-local"
-                      value={newSlotEnd}
-                      onChange={(e) => setNewSlotEnd(e.target.value)}
+                      type="text"
+                      value={newBlockReason}
+                      onChange={(e) => setNewBlockReason(e.target.value)}
+                      placeholder="e.g., Vacation, Personal day..."
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                     />
                   </div>
 
                   <button
                     onClick={async () => {
-                      if (!newSlotStart || !newSlotEnd) return;
-                      setIsSavingSlot(true);
+                      if (!newBlockDate) {
+                        toast.error('Please select a date', 'Choose a date to block.');
+                        return;
+                      }
+                      setIsSavingBlock(true);
                       try {
-                        const startIso = new Date(newSlotStart).toISOString();
-                        const endIso = new Date(newSlotEnd).toISOString();
-                        const created = await availabilityService.createSlot({
-                          start_time: startIso,
-                          end_time: endIso,
-                          is_bookable: true,
+                        const created = await availabilityService.saveOverride({
+                          override_date: newBlockDate,
+                          is_available: false,
+                          reason: newBlockReason || undefined,
                         });
-                        setAvailabilitySlots((prev) => [...prev, created].sort((a: any, b: any) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime()));
-                        setNewSlotStart('');
-                        setNewSlotEnd('');
-                      } catch (e) {
-                        console.error('Failed to create slot', e);
+                        setBlockedDates((prev) => [...prev, created].sort((a: any, b: any) =>
+                          new Date(a.override_date).getTime() - new Date(b.override_date).getTime()
+                        ));
+                        setNewBlockDate('');
+                        setNewBlockReason('');
+                        toast.success('Date blocked', `${new Date(newBlockDate).toLocaleDateString()} has been blocked.`);
+                      } catch (e: any) {
+                        console.error('Failed to block date', e);
+                        toast.error('Failed to block date', e?.message || 'Please try again.');
                       } finally {
-                        setIsSavingSlot(false);
+                        setIsSavingBlock(false);
                       }
                     }}
-                    disabled={isSavingSlot}
-                    className="w-full py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={isSavingBlock || !newBlockDate}
+                    className="w-full py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
-                    {isSavingSlot ? 'Saving...' : 'Add Availability'}
+                    <XCircle className="w-4 h-4" />
+                    {isSavingBlock ? 'Blocking...' : 'Block This Date'}
                   </button>
                 </div>
               </div>
 
-              <div className="space-y-4">
-                <h3 className="text-gray-900">Upcoming Slots</h3>
+              {/* Blocked Dates List */}
+              <div className="bg-white rounded-2xl p-6 shadow-sm">
+                <h3 className="text-gray-900 font-medium mb-4">Blocked Dates</h3>
 
                 {isLoadingAvailability ? (
-                  <div className="text-gray-600">Loading availability...</div>
-                ) : availabilitySlots.length === 0 ? (
-                  <div className="text-gray-600">No availability slots yet.</div>
-                ) : (
                   <div className="space-y-3">
-                    {availabilitySlots.map((slot: any) => (
-                      <div key={slot.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
+                    {Array.from({ length: 3 }).map((_, i) => (
+                      <div key={i} className="flex items-center justify-between p-4 border border-gray-100 rounded-xl">
+                        <div className="space-y-2">
+                          <div className="h-4 bg-gray-200 animate-pulse rounded w-32" />
+                          <div className="h-3 bg-gray-200 animate-pulse rounded w-24" />
+                        </div>
+                        <div className="h-9 bg-gray-200 animate-pulse rounded-lg w-20" />
+                      </div>
+                    ))}
+                  </div>
+                ) : availabilityError ? (
+                  <InlineError
+                    message={availabilityError}
+                    onRetry={fetchAvailability}
+                    retrying={isLoadingAvailability}
+                  />
+                ) : blockedDates.length === 0 ? (
+                  <EmptyState
+                    type="generic"
+                    title="No blocked dates"
+                    description="You haven't blocked any dates. Block dates when you're not available."
+                  />
+                ) : (
+                  <div className="space-y-3 max-h-[400px] overflow-y-auto">
+                    {blockedDates.map((block: any) => (
+                      <div key={block.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl hover:border-red-200 transition-colors">
                         <div>
-                          <div className="text-sm text-gray-900">{new Date(slot.start_time).toLocaleString()}</div>
-                          <div className="text-xs text-gray-500">to {new Date(slot.end_time).toLocaleString()}</div>
+                          <div className="text-sm text-gray-900 font-medium">
+                            {new Date(block.override_date + 'T00:00:00').toLocaleDateString('en-US', {
+                              weekday: 'long',
+                              month: 'long',
+                              day: 'numeric',
+                              year: 'numeric'
+                            })}
+                          </div>
+                          {block.reason && (
+                            <div className="text-xs text-gray-500 mt-1">{block.reason}</div>
+                          )}
                         </div>
                         <button
                           onClick={async () => {
                             try {
-                              await availabilityService.deleteSlot(slot.id);
-                              setAvailabilitySlots((prev) => prev.filter((s: any) => String(s.id) !== String(slot.id)));
+                              await availabilityService.deleteOverride(block.id);
+                              setBlockedDates((prev) => prev.filter((b: any) => String(b.id) !== String(block.id)));
+                              toast.success('Date unblocked', 'Clients can now book on this date.');
                             } catch (e) {
-                              console.error('Failed to delete slot', e);
+                              console.error('Failed to unblock date', e);
+                              toast.error('Failed to unblock', 'Please try again.');
                             }
                           }}
-                          className="px-3 py-2 border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm"
+                          className="px-3 py-2 border border-green-600 text-green-600 rounded-lg hover:bg-green-50 transition-colors text-sm flex items-center gap-1"
                         >
-                          Remove
+                          <CheckCircle className="w-4 h-4" />
+                          Unblock
                         </button>
                       </div>
                     ))}
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Upcoming Bookings Reference */}
+            <div className="bg-white rounded-2xl p-6 shadow-sm">
+              <h3 className="text-gray-900 font-medium mb-4">Upcoming Bookings</h3>
+              <p className="text-sm text-gray-600 mb-4">
+                These dates already have confirmed bookings.
+              </p>
+
+              {isLoadingBookings ? (
+                <div className="space-y-2">
+                  {Array.from({ length: 2 }).map((_, i) => (
+                    <div key={i} className="h-10 bg-gray-100 animate-pulse rounded-lg" />
+                  ))}
+                </div>
+              ) : (() => {
+                const upcomingBookings = providerBookings.filter(b =>
+                  ['accepted', 'confirmed', 'pending'].includes(b.status) &&
+                  new Date(b.date) >= new Date()
+                );
+
+                if (upcomingBookings.length === 0) {
+                  return (
+                    <p className="text-sm text-gray-500 italic">No upcoming bookings</p>
+                  );
+                }
+
+                return (
+                  <div className="flex flex-wrap gap-2">
+                    {upcomingBookings.slice(0, 10).map((booking) => (
+                      <span
+                        key={booking.id}
+                        className={`px-3 py-2 rounded-lg text-sm ${
+                          booking.status === 'pending'
+                            ? 'bg-yellow-100 text-yellow-700'
+                            : 'bg-purple-100 text-purple-700'
+                        }`}
+                      >
+                        {booking.date} - {booking.client}
+                      </span>
+                    ))}
+                    {upcomingBookings.length > 10 && (
+                      <span className="px-3 py-2 bg-gray-100 text-gray-600 rounded-lg text-sm">
+                        +{upcomingBookings.length - 10} more
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         )}
@@ -882,7 +1036,11 @@ useEffect(() => {
                 )}
               </div>
               {isLoadingPackages ? (
-                <div className="text-center py-8 text-gray-500">Loading packages...</div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <ServiceCardSkeleton key={i} />
+                  ))}
+                </div>
               ) : (
                 <div className="space-y-4">
                   {packages.map((pkg, index) => (
@@ -990,9 +1148,11 @@ useEffect(() => {
                     </div>
                   ))}
                   {packages.length === 0 && !isLoadingPackages && (
-                    <div className="text-center py-8 text-gray-500">
-                      <p className="mb-4">No packages added yet.</p>
-                      {editMode && (
+                    <EmptyState
+                      type="services"
+                      title="No packages yet"
+                      description="Create service packages to showcase your offerings and start receiving bookings."
+                      action={editMode ? (
                         <button
                           onClick={() => {
                             setPackages([{
@@ -1003,13 +1163,13 @@ useEffect(() => {
                               category: 'Photography'
                             }]);
                           }}
-                          className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2 mx-auto"
+                          className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2"
                         >
                           <Plus className="w-4 h-4" />
                           Add Your First Package
                         </button>
-                      )}
-                    </div>
+                      ) : undefined}
+                    />
                   )}
                 </div>
               )}
@@ -1022,9 +1182,25 @@ useEffect(() => {
           <div className="bg-white rounded-2xl p-6 shadow-sm">
             <h2 className="text-gray-900 mb-6">All Bookings</h2>
             {isLoadingBookings ? (
-              <div className="text-center py-8 text-gray-600">Loading bookings...</div>
+              <div className="space-y-4">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <BookingCardSkeleton key={i} />
+                ))}
+              </div>
+            ) : bookingsError ? (
+              <ErrorState
+                type="network"
+                title="Failed to load bookings"
+                message={bookingsError}
+                onRetry={fetchBookings}
+                retrying={isLoadingBookings}
+              />
             ) : bookingRequests.length === 0 ? (
-              <div className="text-center py-8 text-gray-600">No bookings yet.</div>
+              <EmptyState
+                type="bookings"
+                title="No bookings yet"
+                description="When clients book your services, they'll appear here."
+              />
             ) : (
               <div className="space-y-4">
                 {bookingRequests.map((booking) => {
@@ -1070,8 +1246,10 @@ useEffect(() => {
                                     try {
                                       await bookingService.updateBooking(String(booking.id), { status: 'accepted' } as any);
                                       setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'accepted' } : b));
+                                      toast.success('Booking accepted', `Booking with ${booking.client} has been confirmed.`);
                                     } catch (e) {
                                       console.error('Failed to accept booking', e);
+                                      toast.error('Failed to accept', 'Please try again.');
                                     }
                                   }}
                                   className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm flex items-center gap-2"
@@ -1084,8 +1262,10 @@ useEffect(() => {
                                     try {
                                       await bookingService.updateBooking(String(booking.id), { status: 'rejected' } as any);
                                       setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'rejected' } : b));
+                                      toast.info('Booking declined', 'The client has been notified.');
                                     } catch (e) {
                                       console.error('Failed to reject booking', e);
+                                      toast.error('Failed to decline', 'Please try again.');
                                     }
                                   }}
                                   className="px-4 py-2 border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm flex items-center gap-2"
@@ -1101,8 +1281,10 @@ useEffect(() => {
                                   try {
                                     await bookingService.updateBooking(String(booking.id), { status: 'completed' } as any);
                                     setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'completed' } : b));
+                                    toast.success('Booking completed', 'Great job! The booking has been marked as complete.');
                                   } catch (e) {
                                     console.error('Failed to complete booking', e);
+                                    toast.error('Failed to complete', 'Please try again.');
                                   }
                                 }}
                                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center gap-2"
@@ -1144,35 +1326,95 @@ useEffect(() => {
               <h2 className="text-gray-900">Client Reviews</h2>
               <div className="flex items-center gap-2">
                 <Star className="w-6 h-6 fill-yellow-400 text-yellow-400" />
-                <span className="text-2xl text-gray-900">4.9</span>
-                <span className="text-gray-600">(127 reviews)</span>
+                <span className="text-2xl text-gray-900">{reviewStats.averageRating}</span>
+                <span className="text-gray-600">({reviewStats.totalReviews} {reviewStats.totalReviews === 1 ? 'review' : 'reviews'})</span>
               </div>
             </div>
 
-            <div className="space-y-4">
-              {reviews.map((review) => (
-                <div key={review.id} className="p-6 border border-gray-200 rounded-xl">
-                  <div className="flex items-start justify-between mb-3">
-                    <div>
-                      <h3 className="text-gray-900">{review.client}</h3>
-                      <p className="text-sm text-gray-600">{review.service}</p>
+            {isLoadingReviews ? (
+              <div className="space-y-4">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div key={i} className="p-6 border border-gray-100 rounded-xl">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="space-y-2">
+                        <div className="h-5 bg-gray-200 animate-pulse rounded w-32" />
+                        <div className="h-4 bg-gray-200 animate-pulse rounded w-24" />
+                      </div>
+                      <div className="flex gap-1">
+                        {Array.from({ length: 5 }).map((_, j) => (
+                          <div key={j} className="w-4 h-4 bg-gray-200 animate-pulse rounded" />
+                        ))}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1">
-                      {[...Array(review.rating)].map((_, i) => (
-                        <Star key={i} className="w-4 h-4 fill-yellow-400 text-yellow-400" />
-                      ))}
+                    <div className="h-16 bg-gray-200 animate-pulse rounded mb-3" />
+                    <div className="h-4 bg-gray-200 animate-pulse rounded w-20" />
+                  </div>
+                ))}
+              </div>
+            ) : reviewsError ? (
+              <ErrorState
+                type="network"
+                title="Failed to load reviews"
+                message={reviewsError}
+                onRetry={fetchReviews}
+                retrying={isLoadingReviews}
+              />
+            ) : reviews.length === 0 ? (
+              <EmptyState
+                type="reviews"
+                title="No reviews yet"
+                description="Reviews from your clients will appear here after they complete bookings with you."
+              />
+            ) : (
+              <div className="space-y-4">
+                {reviews.map((review) => (
+                  <div key={review.id} className="p-6 border border-gray-200 rounded-xl">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex items-center gap-3">
+                        {review.reviewer_image ? (
+                          <ImageWithFallback
+                            src={review.reviewer_image.startsWith('http') ? review.reviewer_image : `${STATIC_URL}/${review.reviewer_image}`}
+                            alt={review.reviewer_name || 'Reviewer'}
+                            className="w-10 h-10 rounded-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center">
+                            <span className="text-purple-600 font-medium">
+                              {(review.reviewer_name || 'A').charAt(0).toUpperCase()}
+                            </span>
+                          </div>
+                        )}
+                        <div>
+                          <h3 className="text-gray-900 font-medium">{review.reviewer_name || 'Anonymous'}</h3>
+                          <p className="text-sm text-gray-600">{review.service_title || 'Service'}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {[...Array(5)].map((_, i) => (
+                          <Star
+                            key={i}
+                            className={`w-4 h-4 ${i < review.rating ? 'fill-yellow-400 text-yellow-400' : 'text-gray-200'}`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    {review.comment && (
+                      <p className="text-gray-700 mb-3">{review.comment}</p>
+                    )}
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-gray-500">
+                        {reviewService.formatReviewDate(review.created_at)}
+                      </p>
+                      {review.moderation_status === 'approved' && (
+                        <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs">
+                          Verified
+                        </span>
+                      )}
                     </div>
                   </div>
-                  <p className="text-gray-700 mb-3">{review.comment}</p>
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm text-gray-500">{review.date}</p>
-                    <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs">
-                      AI Verified
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

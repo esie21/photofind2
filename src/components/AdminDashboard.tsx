@@ -433,16 +433,16 @@ export function AdminDashboard() {
       {/* Users Table */}
       <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className="w-full min-w-[800px]">
             <thead className="bg-gray-50">
               <tr>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">User</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">Role</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">Status</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">Bookings</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">Rating</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">Joined</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">Actions</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">User</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Role</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Status</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Bookings</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Rating</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Joined</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -816,14 +816,14 @@ export function AdminDashboard() {
     <div className="space-y-4">
       <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className="w-full min-w-[700px]">
             <thead className="bg-gray-50">
               <tr>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">Timestamp</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">User</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">Action</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">Entity</th>
-                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase">IP Address</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Timestamp</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">User</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Action</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Entity</th>
+                <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">IP Address</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">

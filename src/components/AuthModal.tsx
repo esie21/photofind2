@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { X, Mail, Chrome, Loader } from 'lucide-react';
+import { X, Mail, Chrome, Loader, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
 
 interface AuthModalProps {
   mode: 'login' | 'signup';
@@ -8,8 +9,36 @@ interface AuthModalProps {
   onSuccess: (role: 'client' | 'provider') => void;
 }
 
+interface FieldErrors {
+  email?: string;
+  password?: string;
+  name?: string;
+}
+
+const validateEmail = (email: string): string | undefined => {
+  if (!email) return 'Email is required';
+  // Basic check: must contain @ with something before and after
+  if (!email.includes('@') || email.indexOf('@') === 0 || email.indexOf('@') === email.length - 1) {
+    return 'Please enter a valid email address';
+  }
+  return undefined;
+};
+
+const validatePassword = (password: string): string | undefined => {
+  if (!password) return 'Password is required';
+  if (password.length < 6) return 'Password must be at least 6 characters';
+  return undefined;
+};
+
+const validateName = (name: string): string | undefined => {
+  if (!name) return 'Name is required';
+  if (name.length < 2) return 'Name must be at least 2 characters';
+  return undefined;
+};
+
 export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
   const { login, signup } = useAuth();
+  const toast = useToast();
   const [authStep, setAuthStep] = useState<'method' | 'role'>('method');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -17,28 +46,63 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
   const [selectedRole, setSelectedRole] = useState<'client' | 'provider' | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+
+  const validateForm = (): boolean => {
+    const errors: FieldErrors = {};
+
+    const emailError = validateEmail(email);
+    if (emailError) errors.email = emailError;
+
+    const passwordError = validatePassword(password);
+    if (passwordError) errors.password = passwordError;
+
+    if (mode === 'signup') {
+      const nameError = validateName(name);
+      if (nameError) errors.name = nameError;
+    }
+
+    setFieldErrors(errors);
+    setTouched({ email: true, password: true, name: true });
+
+    return Object.keys(errors).length === 0;
+  };
+
+  const handleBlur = (field: string) => {
+    setTouched(prev => ({ ...prev, [field]: true }));
+
+    // Validate the specific field
+    let error: string | undefined;
+    if (field === 'email') error = validateEmail(email);
+    else if (field === 'password') error = validatePassword(password);
+    else if (field === 'name') error = validateName(name);
+
+    setFieldErrors(prev => ({ ...prev, [field]: error }));
+  };
 
   const handleEmailSubmit = async () => {
     setError(null);
+
+    if (!validateForm()) {
+      return;
+    }
+
     setLoading(true);
 
     try {
       if (mode === 'login') {
-        if (!email || !password) {
-          setError('Please enter email and password');
-          setLoading(false);
-          return;
-        }
         const response = await login(email, password);
+        toast.success('Welcome back!', `Signed in as ${response.name || email}`);
         onSuccess(response.role as 'client' | 'provider');
         onClose();
       } else {
-        if (mode === 'signup') {
-          setAuthStep('role');
-        }
+        setAuthStep('role');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Authentication failed');
+      const message = err instanceof Error ? err.message : 'Authentication failed';
+      setError(message);
+      toast.error('Login failed', message);
     } finally {
       setLoading(false);
     }
@@ -50,22 +114,19 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
     setLoading(true);
 
     try {
-      if (!email || !password || !name) {
-        setError('Please fill in all fields');
-        setLoading(false);
-        return;
-      }
-
       const response = await signup({
         email,
         password,
         name,
         role,
       });
+      toast.success('Account created!', `Welcome to PhotoFind, ${name}!`);
       onSuccess(role);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Signup failed');
+      const message = err instanceof Error ? err.message : 'Signup failed';
+      setError(message);
+      toast.error('Signup failed', message);
     } finally {
       setLoading(false);
     }
@@ -115,11 +176,25 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
                     <input
                       type="email"
                       value={email}
-                      onChange={(e) => setEmail(e.target.value)}
+                      onChange={(e) => {
+                        setEmail(e.target.value);
+                        if (touched.email) {
+                          setFieldErrors(prev => ({ ...prev, email: validateEmail(e.target.value) }));
+                        }
+                      }}
+                      onBlur={() => handleBlur('email')}
                       placeholder="your@email.com"
-                      className="w-full pl-11 pr-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                      className={`w-full pl-11 pr-4 py-3 border rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none ${
+                        touched.email && fieldErrors.email ? 'border-red-500 bg-red-50' : 'border-gray-300'
+                      }`}
                     />
                   </div>
+                  {touched.email && fieldErrors.email && (
+                    <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
+                      <AlertCircle className="w-3.5 h-3.5" />
+                      {fieldErrors.email}
+                    </p>
+                  )}
                 </div>
                 {mode === 'login' && (
                   <div>
@@ -127,10 +202,24 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
                     <input
                       type="password"
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        if (touched.password) {
+                          setFieldErrors(prev => ({ ...prev, password: validatePassword(e.target.value) }));
+                        }
+                      }}
+                      onBlur={() => handleBlur('password')}
                       placeholder="••••••••"
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                      className={`w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none ${
+                        touched.password && fieldErrors.password ? 'border-red-500 bg-red-50' : 'border-gray-300'
+                      }`}
                     />
+                    {touched.password && fieldErrors.password && (
+                      <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        {fieldErrors.password}
+                      </p>
+                    )}
                   </div>
                 )}
                 {mode === 'signup' && authStep === 'method' && (
@@ -139,10 +228,24 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
                     <input
                       type="text"
                       value={name}
-                      onChange={(e) => setName(e.target.value)}
+                      onChange={(e) => {
+                        setName(e.target.value);
+                        if (touched.name) {
+                          setFieldErrors(prev => ({ ...prev, name: validateName(e.target.value) }));
+                        }
+                      }}
+                      onBlur={() => handleBlur('name')}
                       placeholder="Your name"
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                      className={`w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none ${
+                        touched.name && fieldErrors.name ? 'border-red-500 bg-red-50' : 'border-gray-300'
+                      }`}
                     />
+                    {touched.name && fieldErrors.name && (
+                      <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        {fieldErrors.name}
+                      </p>
+                    )}
                   </div>
                 )}
                 {mode === 'signup' && authStep === 'method' && (
@@ -151,10 +254,25 @@ export function AuthModal({ mode, onClose, onSuccess }: AuthModalProps) {
                     <input
                       type="password"
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        if (touched.password) {
+                          setFieldErrors(prev => ({ ...prev, password: validatePassword(e.target.value) }));
+                        }
+                      }}
+                      onBlur={() => handleBlur('password')}
                       placeholder="••••••••"
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                      className={`w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none ${
+                        touched.password && fieldErrors.password ? 'border-red-500 bg-red-50' : 'border-gray-300'
+                      }`}
                     />
+                    {touched.password && fieldErrors.password && (
+                      <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        {fieldErrors.password}
+                      </p>
+                    )}
+                    <p className="mt-1 text-xs text-gray-500">Must be at least 6 characters</p>
                   </div>
                 )}
                 {error && <p className="text-red-500 text-sm">{error}</p>}

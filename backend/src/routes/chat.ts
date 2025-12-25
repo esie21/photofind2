@@ -287,8 +287,9 @@ router.post('/send', verifyToken, upload.single('file'), async (req: AuthedReque
 
       await notificationService.notifyNewMessage(
         recipientId,
-        bookingId,
+        String(currentUserId),
         senderName,
+        String(chat.id),
         content?.substring(0, 100) || (file ? 'Sent an attachment' : 'New message')
       );
     } catch (notifError) {

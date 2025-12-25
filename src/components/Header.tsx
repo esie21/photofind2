@@ -1,15 +1,20 @@
+import { useState } from 'react';
 import { Menu, User, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { NotificationsPanel } from './NotificationsPanel';
+import { MobileNav } from './MobileNav';
+import { Notification } from '../api/services/notificationService';
 
 interface HeaderProps {
   onViewChange: (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin') => void;
   currentView: string;
   onAuthClick: (mode: 'login' | 'signup') => void;
+  onNotificationNavigate?: (notification: Notification) => void;
 }
 
-export function Header({ onViewChange, currentView, onAuthClick }: HeaderProps) {
+export function Header({ onViewChange, currentView, onAuthClick, onNotificationNavigate }: HeaderProps) {
   const { user, logout } = useAuth();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const isLoggedIn = !!user;
 
   return (
@@ -76,7 +81,7 @@ export function Header({ onViewChange, currentView, onAuthClick }: HeaderProps) 
               </>
             ) : (
               <>
-                <NotificationsPanel />
+                <NotificationsPanel onNavigate={onNotificationNavigate} />
                 <div className="flex items-center gap-2">
                   <div className="w-9 h-9 bg-gradient-to-br from-purple-400 to-pink-400 rounded-full flex items-center justify-center">
                     <span className="text-white text-sm">{user?.name ? user.name.slice(0,1).toUpperCase() : 'U'}</span>
@@ -93,7 +98,10 @@ export function Header({ onViewChange, currentView, onAuthClick }: HeaderProps) 
                     <LogOut className="w-5 h-5" />
                   </button>
                 </div>
-                <button className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg md:hidden">
+                <button
+                  onClick={() => setMobileNavOpen(true)}
+                  className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg md:hidden"
+                >
                   <Menu className="w-5 h-5" />
                 </button>
               </>
@@ -101,6 +109,14 @@ export function Header({ onViewChange, currentView, onAuthClick }: HeaderProps) 
           </div>
         </div>
       </div>
+
+      {/* Mobile Navigation Drawer */}
+      <MobileNav
+        isOpen={mobileNavOpen}
+        onClose={() => setMobileNavOpen(false)}
+        onViewChange={onViewChange}
+        currentView={currentView}
+      />
     </header>
   );
 }

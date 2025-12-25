@@ -184,8 +184,23 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     try {
       await client.query('BEGIN');
 
-      // Skip availability check since we're using default slots
-      // Just check for conflicts with existing bookings
+      // Check if the provider has blocked this date
+      const bookingDate = start.toISOString().split('T')[0]; // YYYY-MM-DD
+      const blockedCheck = await client.query(
+        `SELECT id, reason FROM availability_overrides
+         WHERE provider_id::text = $1
+           AND override_date = $2::date
+           AND is_available = FALSE`,
+        [providerUserIdStr, bookingDate]
+      );
+
+      if (blockedCheck.rows[0]) {
+        await client.query('ROLLBACK');
+        const reason = blockedCheck.rows[0].reason || 'Provider is not available on this date';
+        return res.status(409).json({ error: reason });
+      }
+
+      // Check for conflicts with existing bookings
       const conflictRes = await client.query(
         `
           SELECT id
@@ -201,7 +216,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
 
       if (conflictRes.rows[0]) {
         await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Time slot already booked' });
+        return res.status(409).json({ error: 'This time slot conflicts with another booking' });
       }
 
       const insertQuery = `
@@ -241,6 +256,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
           // Instant booking - notify client that booking is confirmed
           await notificationService.notifyBookingAccepted(
             clientUserIdStr,
+            providerUserIdStr,
             providerName,
             String(booking.id)
           );
@@ -248,6 +264,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
           // Request booking - notify provider of new request
           await notificationService.notifyBookingRequest(
             providerUserIdStr,
+            clientUserIdStr,
             clientName,
             String(booking.id),
             serviceTitle
@@ -553,6 +570,7 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
 
         await notificationService.notifyBookingCancelled(
           otherPartyId,
+          currentUserId,
           cancellerName,
           bookingId
         );
@@ -765,6 +783,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
             // Notify client that their booking was accepted
             await notificationService.notifyBookingAccepted(
               clientUserId,
+              providerUserId,
               providerName,
               bookingId
             );
@@ -772,15 +791,18 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
             // Notify client that their booking was rejected
             await notificationService.notifyBookingRejected(
               clientUserId,
+              providerUserId,
               providerName,
               bookingId
             );
           } else if (isCancel) {
             // Notify the other party about cancellation
             const notifyUserId = isClient ? providerUserId : clientUserId;
+            const cancellerUserId = isClient ? clientUserId : providerUserId;
             const cancellerName = isClient ? clientName : providerName;
             await notificationService.notifyBookingCancelled(
               notifyUserId,
+              cancellerUserId,
               cancellerName,
               bookingId
             );
@@ -788,6 +810,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
             // Notify client that booking is completed
             await notificationService.notifyBookingCompleted(
               clientUserId,
+              providerUserId,
               bookingId,
               serviceTitle
             );

@@ -175,11 +175,19 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
     }
   };
 
-  // Handle notification click (navigate to relevant page)
+  // Handle notification click - navigate directly to the relevant page
   const handleNotificationClick = (notification: Notification) => {
+    // Mark as read first
+    if (!notification.read_at) {
+      handleMarkAsRead(notification.id);
+    }
+
+    // Navigate to the relevant page
     if (onNavigate) {
       onNavigate(notification);
     }
+
+    // Close the panel
     setIsOpen(false);
   };
 
@@ -282,6 +290,7 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
           </div>
         </div>
       )}
+
     </div>
   );
 }

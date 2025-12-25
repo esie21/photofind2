@@ -17,6 +17,7 @@ import paymentsRoutes from './routes/payments';
 import walletRoutes from './routes/wallet';
 import payoutsRoutes from './routes/payouts';
 import notificationsRoutes from './routes/notifications';
+import reviewsRoutes from './routes/reviews';
 import { notificationService } from './services/notificationService';
 import path from 'path';
 import http from 'http';
@@ -46,6 +47,7 @@ app.use('/api/payments', paymentsRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/payouts', payoutsRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/reviews', reviewsRoutes);
 // Register debug routes only in non-production
 if (process.env.NODE_ENV !== 'production') {
   app.use('/api/debug', debugRoutes);

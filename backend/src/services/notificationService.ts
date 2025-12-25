@@ -79,6 +79,7 @@ class NotificationService {
 
   async notifyBookingRequest(
     providerId: string | number,
+    clientId: string | number,
     clientName: string,
     bookingId: string | number,
     serviceName: string
@@ -88,12 +89,13 @@ class NotificationService {
       type: 'booking_request',
       title: 'New Booking Request',
       message: `${clientName} requested to book "${serviceName}"`,
-      data: { booking_id: bookingId, client_name: clientName }
+      data: { booking_id: bookingId, client_id: clientId, client_name: clientName }
     });
   }
 
   async notifyBookingAccepted(
     clientId: string | number,
+    providerId: string | number,
     providerName: string,
     bookingId: string | number
   ) {
@@ -102,12 +104,13 @@ class NotificationService {
       type: 'booking_accepted',
       title: 'Booking Accepted',
       message: `${providerName} accepted your booking request`,
-      data: { booking_id: bookingId, provider_name: providerName }
+      data: { booking_id: bookingId, provider_id: providerId, provider_name: providerName }
     });
   }
 
   async notifyBookingRejected(
     clientId: string | number,
+    providerId: string | number,
     providerName: string,
     bookingId: string | number,
     reason?: string
@@ -117,12 +120,13 @@ class NotificationService {
       type: 'booking_rejected',
       title: 'Booking Declined',
       message: `${providerName} declined your booking request${reason ? `: ${reason}` : ''}`,
-      data: { booking_id: bookingId, provider_name: providerName, reason }
+      data: { booking_id: bookingId, provider_id: providerId, provider_name: providerName, reason }
     });
   }
 
   async notifyBookingCancelled(
     userId: string | number,
+    otherPartyId: string | number,
     cancelledBy: string,
     bookingId: string | number
   ) {
@@ -131,12 +135,13 @@ class NotificationService {
       type: 'booking_cancelled',
       title: 'Booking Cancelled',
       message: `Booking was cancelled by ${cancelledBy}`,
-      data: { booking_id: bookingId, cancelled_by: cancelledBy }
+      data: { booking_id: bookingId, other_party_id: otherPartyId, cancelled_by: cancelledBy }
     });
   }
 
   async notifyBookingCompleted(
     userId: string | number,
+    otherPartyId: string | number,
     bookingId: string | number,
     serviceName: string
   ) {
@@ -145,12 +150,13 @@ class NotificationService {
       type: 'booking_completed',
       title: 'Booking Completed',
       message: `Your booking for "${serviceName}" has been completed`,
-      data: { booking_id: bookingId }
+      data: { booking_id: bookingId, other_party_id: otherPartyId }
     });
   }
 
   async notifyPaymentReceived(
     providerId: string | number,
+    clientId: string | number,
     amount: number,
     clientName: string,
     bookingId: string | number
@@ -160,12 +166,13 @@ class NotificationService {
       type: 'payment_received',
       title: 'Payment Received',
       message: `You received PHP ${amount.toLocaleString()} from ${clientName}`,
-      data: { booking_id: bookingId, amount, client_name: clientName }
+      data: { booking_id: bookingId, client_id: clientId, amount, client_name: clientName }
     });
   }
 
   async notifyPaymentFailed(
     clientId: string | number,
+    providerId: string | number,
     bookingId: string | number,
     reason?: string
   ) {
@@ -174,7 +181,7 @@ class NotificationService {
       type: 'payment_failed',
       title: 'Payment Failed',
       message: `Your payment could not be processed${reason ? `: ${reason}` : ''}`,
-      data: { booking_id: bookingId, reason }
+      data: { booking_id: bookingId, provider_id: providerId, reason }
     });
   }
 
@@ -223,6 +230,7 @@ class NotificationService {
 
   async notifyNewMessage(
     userId: string | number,
+    senderId: string | number,
     senderName: string,
     chatId: string | number,
     messagePreview: string
@@ -232,12 +240,13 @@ class NotificationService {
       type: 'new_message',
       title: 'New Message',
       message: `${senderName}: ${messagePreview.substring(0, 50)}${messagePreview.length > 50 ? '...' : ''}`,
-      data: { chat_id: chatId, sender_name: senderName }
+      data: { chat_id: chatId, sender_id: senderId, sender_name: senderName }
     });
   }
 
   async notifyNewReview(
     providerId: string | number,
+    clientId: string | number,
     clientName: string,
     rating: number,
     bookingId: string | number
@@ -247,7 +256,7 @@ class NotificationService {
       type: 'new_review',
       title: 'New Review',
       message: `${clientName} left you a ${rating}-star review`,
-      data: { booking_id: bookingId, rating, client_name: clientName }
+      data: { booking_id: bookingId, client_id: clientId, rating, client_name: clientName }
     });
   }
 

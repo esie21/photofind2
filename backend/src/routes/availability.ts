@@ -898,4 +898,36 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
   }
 });
 
+// Delete a specific slot (legacy endpoint)
+router.delete('/:slotId', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  try {
+    const userId = req.userId;
+    const role = (req as any).role;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (role !== 'provider' && role !== 'admin') return res.status(403).json({ error: 'Access denied' });
+
+    const slotId = parseId(req.params.slotId);
+    if (!slotId) return res.status(400).json({ error: 'Invalid slot ID' });
+
+    // Only allow deleting available slots that belong to this provider
+    const result = await pool.query(
+      `DELETE FROM time_slots
+       WHERE id::text = $1
+         AND provider_id::text = $2
+         AND status = 'available'
+       RETURNING id`,
+      [slotId, userId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Slot not found or cannot be deleted' });
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting slot:', error);
+    return res.status(500).json({ error: 'Failed to delete slot' });
+  }
+});
+
 export default router;

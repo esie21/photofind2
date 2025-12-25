@@ -1,4 +1,4 @@
-import { Calendar, CreditCard, MessageSquare, CheckCircle, XCircle, DollarSign, Star, Bell, Trash2 } from 'lucide-react';
+import { Calendar, CreditCard, MessageSquare, CheckCircle, XCircle, DollarSign, Star, Bell, Trash2, User } from 'lucide-react';
 import { Notification, NotificationType } from '../api/services/notificationService';
 
 interface NotificationItemProps {
@@ -8,21 +8,30 @@ interface NotificationItemProps {
   onClick?: (notification: Notification) => void;
 }
 
-const typeConfig: Record<NotificationType, { icon: any; color: string; bgColor: string }> = {
-  booking_request: { icon: Calendar, color: 'text-blue-600', bgColor: 'bg-blue-100' },
-  booking_accepted: { icon: CheckCircle, color: 'text-green-600', bgColor: 'bg-green-100' },
-  booking_rejected: { icon: XCircle, color: 'text-red-600', bgColor: 'bg-red-100' },
-  booking_cancelled: { icon: XCircle, color: 'text-gray-600', bgColor: 'bg-gray-100' },
-  booking_completed: { icon: CheckCircle, color: 'text-purple-600', bgColor: 'bg-purple-100' },
-  payment_received: { icon: DollarSign, color: 'text-green-600', bgColor: 'bg-green-100' },
-  payment_failed: { icon: CreditCard, color: 'text-red-600', bgColor: 'bg-red-100' },
-  payout_approved: { icon: DollarSign, color: 'text-blue-600', bgColor: 'bg-blue-100' },
-  payout_completed: { icon: DollarSign, color: 'text-green-600', bgColor: 'bg-green-100' },
-  payout_rejected: { icon: XCircle, color: 'text-red-600', bgColor: 'bg-red-100' },
-  new_message: { icon: MessageSquare, color: 'text-purple-600', bgColor: 'bg-purple-100' },
-  new_review: { icon: Star, color: 'text-yellow-600', bgColor: 'bg-yellow-100' },
-  system: { icon: Bell, color: 'text-gray-600', bgColor: 'bg-gray-100' },
+const typeConfig: Record<NotificationType, { icon: any; color: string; bgColor: string; label: string }> = {
+  booking_request: { icon: Calendar, color: 'text-blue-600', bgColor: 'bg-blue-100', label: 'Booking Request' },
+  booking_accepted: { icon: CheckCircle, color: 'text-green-600', bgColor: 'bg-green-100', label: 'Booking Accepted' },
+  booking_rejected: { icon: XCircle, color: 'text-red-600', bgColor: 'bg-red-100', label: 'Booking Declined' },
+  booking_cancelled: { icon: XCircle, color: 'text-gray-600', bgColor: 'bg-gray-100', label: 'Booking Cancelled' },
+  booking_completed: { icon: CheckCircle, color: 'text-purple-600', bgColor: 'bg-purple-100', label: 'Completed' },
+  payment_received: { icon: DollarSign, color: 'text-green-600', bgColor: 'bg-green-100', label: 'Payment' },
+  payment_failed: { icon: CreditCard, color: 'text-red-600', bgColor: 'bg-red-100', label: 'Payment Failed' },
+  payout_approved: { icon: DollarSign, color: 'text-blue-600', bgColor: 'bg-blue-100', label: 'Payout Approved' },
+  payout_completed: { icon: DollarSign, color: 'text-green-600', bgColor: 'bg-green-100', label: 'Payout Sent' },
+  payout_rejected: { icon: XCircle, color: 'text-red-600', bgColor: 'bg-red-100', label: 'Payout Rejected' },
+  new_message: { icon: MessageSquare, color: 'text-purple-600', bgColor: 'bg-purple-100', label: 'Message' },
+  new_review: { icon: Star, color: 'text-yellow-600', bgColor: 'bg-yellow-100', label: 'Review' },
+  system: { icon: Bell, color: 'text-gray-600', bgColor: 'bg-gray-100', label: 'System' },
 };
+
+// Extract the sender/relevant name from notification data
+function getSenderName(notification: Notification): string | null {
+  const data = notification.data;
+  if (!data) return null;
+
+  // Check various name fields in order of priority
+  return data.sender_name || data.client_name || data.provider_name || data.cancelled_by || null;
+}
 
 function formatTimeAgo(dateString: string): string {
   const date = new Date(dateString);
@@ -44,6 +53,7 @@ export function NotificationItem({ notification, onMarkAsRead, onDelete, onClick
   const config = typeConfig[notification.type] || typeConfig.system;
   const Icon = config.icon;
   const isUnread = !notification.read_at;
+  const senderName = getSenderName(notification);
 
   const handleClick = () => {
     if (isUnread && onMarkAsRead) {
@@ -67,14 +77,21 @@ export function NotificationItem({ notification, onMarkAsRead, onDelete, onClick
 
       <div className="flex-1 min-w-0">
         <div className="flex items-start justify-between gap-2">
-          <h4 className={`text-sm ${isUnread ? 'font-semibold text-gray-900' : 'font-medium text-gray-700'}`}>
-            {notification.title}
-          </h4>
+          <div className="flex items-center gap-2">
+            {senderName && (
+              <span className={`text-sm ${isUnread ? 'font-semibold text-gray-900' : 'font-medium text-gray-700'}`}>
+                {senderName}
+              </span>
+            )}
+            <span className={`text-xs px-1.5 py-0.5 rounded ${config.bgColor} ${config.color}`}>
+              {config.label}
+            </span>
+          </div>
           {isUnread && (
             <span className="w-2 h-2 rounded-full bg-purple-600 flex-shrink-0 mt-1.5" />
           )}
         </div>
-        <p className="text-sm text-gray-600 line-clamp-2 mt-0.5">
+        <p className="text-sm text-gray-600 line-clamp-2 mt-1">
           {notification.message}
         </p>
         <span className="text-xs text-gray-400 mt-1 block">

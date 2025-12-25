@@ -4,9 +4,17 @@ import { ImageWithFallback } from './figma/ImageWithFallback';
 import bookingService from '../api/services/bookingService';
 import serviceService, { Service } from '../api/services/serviceService';
 import { useAuth } from '../context/AuthContext';
-import availabilityService from '../api/services/availabilityService';
+import { useToast } from '../context/ToastContext';
 import { Calendar } from './ui/calendar';
 import { PaymentSummary } from './PaymentSummary';
+
+// Available time options for booking
+const TIME_OPTIONS = [
+  '08:00', '08:30', '09:00', '09:30', '10:00', '10:30',
+  '11:00', '11:30', '12:00', '12:30', '13:00', '13:30',
+  '14:00', '14:30', '15:00', '15:30', '16:00', '16:30',
+  '17:00', '17:30', '18:00', '18:30', '19:00', '19:30', '20:00'
+];
 
 interface BookingFlowProps {
   onComplete: () => void;
@@ -17,13 +25,12 @@ interface BookingFlowProps {
 
 export function BookingFlow({ onComplete, providerId, providerName = 'Service Provider', providerImage = 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080' }: BookingFlowProps) {
   const { user } = useAuth();
+  const toast = useToast();
   const [currentStep, setCurrentStep] = useState(1);
   const [selectedService, setSelectedService] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<Date | undefined>(undefined);
-  const [selectedTimeIso, setSelectedTimeIso] = useState<string>('');
+  const [selectedTime, setSelectedTime] = useState<string>('10:00'); // Simple time string HH:MM
   const [bookingMode, setBookingMode] = useState<'request' | 'instant'>('request');
-  const [isLoadingTimes, setIsLoadingTimes] = useState(false);
-  const [availableTimeSlots, setAvailableTimeSlots] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -32,6 +39,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
   const [isLoadingServices, setIsLoadingServices] = useState(true);
   const [createdBookingId, setCreatedBookingId] = useState<string | null>(null);
   const [showPayment, setShowPayment] = useState(false);
+  const [stepError, setStepError] = useState<string | null>(null);
 
   const steps = [
     { number: 1, name: 'Select Service', icon: Check },
@@ -95,53 +103,63 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     return `${yyyy}-${mm}-${dd}`;
   }, [selectedDay]);
 
+  // Format time for display (e.g., "10:00" -> "10:00 AM")
   const selectedTimeLabel = useMemo(() => {
-    if (!selectedTimeIso) return '';
-    try {
-      const d = new Date(selectedTimeIso);
-      return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    } catch (_e) {
-      return '';
-    }
-  }, [selectedTimeIso]);
+    if (!selectedTime) return '';
+    const [hours, minutes] = selectedTime.split(':').map(Number);
+    const period = hours >= 12 ? 'PM' : 'AM';
+    const displayHours = hours % 12 || 12;
+    return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`;
+  }, [selectedTime]);
 
-  useEffect(() => {
-    (async () => {
-      setError(null);
-      setAvailableTimeSlots([]);
-      setSelectedTimeIso('');
-
-      if (!providerId) return;
-      if (!selectedDateString) return;
-      if (!selectedService) return;
-
-      setIsLoadingTimes(true);
-      try {
-        const data = await availabilityService.getProviderTimeslots({
-          providerId: providerId,
-          date: selectedDateString,
-          service_id: selectedService,
-        });
-        setAvailableTimeSlots(data.time_slots || []);
-      } catch (e: any) {
-        setAvailableTimeSlots([]);
-        setError(e?.message || 'Failed to load availability');
-      } finally {
-        setIsLoadingTimes(false);
-      }
-    })();
-  }, [providerId, selectedDateString, selectedService]);
+  // Combine date and time into ISO string for booking
+  const selectedDateTimeIso = useMemo(() => {
+    if (!selectedDay || !selectedTime) return '';
+    const [hours, minutes] = selectedTime.split(':').map(Number);
+    const dateTime = new Date(selectedDay);
+    dateTime.setHours(hours, minutes, 0, 0);
+    return dateTime.toISOString();
+  }, [selectedDay, selectedTime]);
 
   const canProceed = () => {
     if (currentStep === 1) return selectedService !== null;
-    if (currentStep === 2) return selectedDateString && selectedTimeIso;
+    if (currentStep === 2) return selectedDateString && selectedTime;
+    return true;
+  };
+
+  const validateStep = (): boolean => {
+    setStepError(null);
+
+    if (currentStep === 1) {
+      if (!selectedService) {
+        setStepError('Please select a service package to continue');
+        return false;
+      }
+    }
+
+    if (currentStep === 2) {
+      if (!selectedDateString) {
+        setStepError('Please select a date for your booking');
+        return false;
+      }
+      if (!selectedTime) {
+        setStepError('Please select a time for your booking');
+        return false;
+      }
+    }
+
     return true;
   };
 
   const handleNext = async () => {
+    if (!validateStep()) {
+      return;
+    }
+
     if (currentStep < 3) {
       setCurrentStep(currentStep + 1);
       setError(null);
+      setStepError(null);
     } else {
       await submitBooking();
     }
@@ -158,8 +176,8 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
       return;
     }
 
-    if (!selectedTimeIso) {
-      setError('Please select a time slot.');
+    if (!selectedDateTimeIso) {
+      setError('Please select a date and time.');
       return;
     }
 
@@ -167,12 +185,10 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     setError(null);
 
     try {
-      const startDate = selectedTimeIso;
-
       const bookingData = {
         provider_id: providerId,
         service_id: selectedService,
-        start_date: startDate,
+        start_date: selectedDateTimeIso,
         total_price: Number(total.toFixed(2)),
         booking_mode: bookingMode,
       };
@@ -196,6 +212,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
   const handlePaymentSuccess = () => {
     setShowPayment(false);
     setSuccess(true);
+    toast.success('Booking confirmed!', `Your booking with ${providerName} has been confirmed.`);
     setTimeout(() => {
       onComplete();
     }, 2000);
@@ -203,12 +220,14 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
 
   const handlePaymentFailed = (errorMsg: string) => {
     setError(`Payment failed: ${errorMsg}. Your booking has been saved. You can pay later from your dashboard.`);
+    toast.error('Payment failed', errorMsg);
   };
 
   const handlePaymentCancel = () => {
     setShowPayment(false);
     // Booking is already created, inform user they can pay later
     setError('Payment cancelled. Your booking has been saved but requires payment to confirm. You can complete payment from your dashboard.');
+    toast.warning('Payment cancelled', 'You can complete payment from your dashboard.');
   };
 
   return (
@@ -236,6 +255,17 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
             <div>
               <p className="text-sm font-medium text-red-900">Booking Error</p>
               <p className="text-sm text-red-700 mt-1">{error}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Step Validation Error */}
+        {stepError && (
+          <div className="mb-6 bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-amber-900">Please complete this step</p>
+              <p className="text-sm text-amber-700 mt-1">{stepError}</p>
             </div>
           </div>
         )}
@@ -352,7 +382,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       {services.map((service) => (
                         <button
                           key={service.id}
-                          onClick={() => setSelectedService(service.id)}
+                          onClick={() => { setSelectedService(service.id); setStepError(null); }}
                           className={`w-full p-6 border-2 rounded-2xl text-left transition-all ${
                             selectedService === service.id
                               ? 'border-purple-600 bg-purple-50'
@@ -420,7 +450,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                         <Calendar
                           mode="single"
                           selected={selectedDay}
-                          onSelect={(d: Date | undefined) => setSelectedDay(d)}
+                          onSelect={(d: Date | undefined) => { setSelectedDay(d); setStepError(null); }}
                           disabled={(date: Date) => date < new Date(new Date().toDateString())}
                           className="rounded-xl"
                         />
@@ -462,51 +492,53 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       </div>
                     </div>
 
-                    {/* Time Selection */}
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
+                    {/* Time Selection - Simple time picker */}
+                    <div className="bg-gray-50 rounded-2xl p-4">
+                      <div className="flex items-center gap-2 mb-4">
                         <Clock className="w-5 h-5 text-purple-600" />
                         <label className="text-sm font-medium text-gray-900">Select Time</label>
                       </div>
-                      {isLoadingTimes ? (
-                        <div className="flex items-center justify-center py-8 bg-gray-50 rounded-xl">
-                          <Loader className="w-6 h-6 animate-spin text-purple-600 mr-2" />
-                          <span className="text-sm text-gray-600">Loading available times...</span>
-                        </div>
-                      ) : !selectedDateString ? (
-                        <div className="text-center py-8 bg-gray-50 rounded-xl">
-                          <CalendarIcon className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-                          <p className="text-sm text-gray-600">Select a date to see available times</p>
-                        </div>
-                      ) : availableTimeSlots.length === 0 ? (
-                        <div className="text-center py-8 bg-yellow-50 rounded-xl border border-yellow-200">
-                          <AlertCircle className="w-8 h-8 text-yellow-500 mx-auto mb-2" />
-                          <p className="text-sm text-yellow-700">No available time slots for this date</p>
-                          <p className="text-xs text-yellow-600 mt-1">Try selecting a different date</p>
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-                          {availableTimeSlots.map((iso) => (
-                            <button
-                              type="button"
-                              key={iso}
-                              onClick={() => setSelectedTimeIso(iso)}
-                              className={`px-3 py-3 border-2 rounded-xl text-sm font-medium transition-all ${
-                                selectedTimeIso === iso
-                                  ? 'border-purple-600 bg-purple-600 text-white'
-                                  : 'border-gray-200 hover:border-purple-300 text-gray-700 hover:bg-gray-50'
-                              }`}
-                            >
-                              {new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                            </button>
-                          ))}
+
+                      {/* Selected time display */}
+                      {selectedTime && (
+                        <div className="mb-4 p-3 bg-purple-50 border border-purple-200 rounded-xl">
+                          <div className="text-purple-600 font-semibold">
+                            {selectedTimeLabel}
+                          </div>
                         </div>
                       )}
+
+                      {/* Time grid */}
+                      <div className="grid grid-cols-4 sm:grid-cols-5 gap-2">
+                        {TIME_OPTIONS.map((time) => {
+                          const [hours, minutes] = time.split(':').map(Number);
+                          const period = hours >= 12 ? 'PM' : 'AM';
+                          const displayHours = hours % 12 || 12;
+                          const label = `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`;
+
+                          return (
+                            <button
+                              type="button"
+                              key={time}
+                              onClick={() => { setSelectedTime(time); setStepError(null); }}
+                              className={`px-2 py-2.5 border-2 rounded-xl text-xs sm:text-sm font-medium transition-all ${
+                                selectedTime === time
+                                  ? 'border-purple-600 bg-purple-600 text-white'
+                                  : 'border-gray-200 hover:border-purple-300 text-gray-700 hover:bg-white bg-white'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
 
                     <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
                       <p className="text-sm text-blue-800">
-                        <strong>Note:</strong> {bookingMode === 'instant' ? 'Instant bookings are accepted immediately if the slot is still available.' : 'Your booking request will be sent to the service provider for confirmation.'}
+                        <strong>How it works:</strong> {bookingMode === 'instant'
+                          ? 'Your booking will be confirmed immediately and sent to the provider.'
+                          : 'Your booking request will be sent to the provider. They will confirm if they are available.'}
                       </p>
                     </div>
                   </div>
@@ -633,7 +665,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                 )}
 
                 {/* Date & Time */}
-                {selectedDateString && selectedTimeIso && (
+                {selectedDateString && selectedTime && (
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 text-sm">
                       <CalendarIcon className="w-4 h-4 text-gray-400" />
