@@ -1,4 +1,5 @@
-const API_URL = (((import.meta as any).env?.VITE_API_URL as string) || 'http://localhost:3001/api');
+// Use environment variable or fallback to localhost for development
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
 export const API_CONFIG = {
   BASE_URL: API_URL,

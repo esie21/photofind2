@@ -63,8 +63,20 @@ router.get('/', verifyToken, async (req: any, res: Response) => {
     const countResult = await pool.query(countSql, [userId]);
     const total = parseInt(countResult.rows[0].total);
 
+    // Parse data field if it's a string (backwards compatibility for old notifications)
+    const notifications = result.rows.map((row: any) => {
+      if (row.data && typeof row.data === 'string') {
+        try {
+          row.data = JSON.parse(row.data);
+        } catch (e) {
+          // Keep as-is if parsing fails
+        }
+      }
+      return row;
+    });
+
     res.json({
-      data: result.rows,
+      data: notifications,
       meta: { limit, offset, total }
     });
   } catch (error) {

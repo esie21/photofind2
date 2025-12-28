@@ -1,7 +1,10 @@
 {
-      "name": "PhotoFind UI Design",
-      "version": "0.1.0",
+      "name": "photofind",
+      "version": "1.0.0",
       "private": true,
+      "engines": {
+            "node": ">=18.0.0"
+      },
       "dependencies": {
             "@radix-ui/react-accordion": "^1.2.3",
             "@radix-ui/react-alert-dialog": "^1.1.6",
@@ -68,6 +71,8 @@
       },
       "scripts": {
             "dev": "vite",
-            "build": "vite build"
+            "build": "vite build",
+            "preview": "vite preview",
+            "typecheck": "tsc --noEmit"
       }
 }

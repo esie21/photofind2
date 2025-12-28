@@ -14,9 +14,21 @@ export interface Booking {
   rejected_at?: string | null;
   cancelled_at?: string | null;
   completed_at?: string | null;
+  rescheduled_at?: string | null;
+  rescheduled_by?: string | null;
+  reschedule_reason?: string | null;
+  original_start_date?: string | null;
+  original_end_date?: string | null;
+  reschedule_count?: number;
   totalPrice: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RescheduleBookingData {
+  start_date: string;
+  end_date: string;
+  reason?: string;
 }
 
 export interface CreateBookingData {
@@ -63,6 +75,13 @@ const bookingService = {
 
   async deleteBooking(id: string): Promise<void> {
     return apiClient.delete<void>(API_CONFIG.ENDPOINTS.BOOKINGS.DELETE(id));
+  },
+
+  async rescheduleBooking(id: string, data: RescheduleBookingData): Promise<{ data: Booking; message: string }> {
+    return apiClient.put<{ data: Booking; message: string }>(
+      `/bookings/${id}/reschedule`,
+      data
+    );
   },
 };
 

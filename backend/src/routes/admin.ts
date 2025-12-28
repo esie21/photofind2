@@ -3,6 +3,7 @@ import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { auditService } from '../services/auditService';
 import { notificationService } from '../services/notificationService';
+import { getSecurityEvents } from '../middleware/security';
 
 const router = express.Router();
 
@@ -890,5 +891,73 @@ router.get('/payments', async (req: Request & { userId?: string }, res: Response
     return res.status(500).json({ error: 'Failed to fetch payments' });
   }
 });
+
+// ==================== SECURITY MONITORING ====================
+
+// Get security events
+router.get('/security/events', async (req: Request & { userId?: string }, res: Response) => {
+  try {
+    const { limit = '100' } = req.query;
+    const events = getSecurityEvents(parseInt(limit as string));
+
+    return res.json({
+      data: events,
+      meta: { count: events.length },
+    });
+  } catch (error) {
+    console.error('Error fetching security events:', error);
+    return res.status(500).json({ error: 'Failed to fetch security events' });
+  }
+});
+
+// Get security metrics
+router.get('/security/metrics', async (req: Request & { userId?: string }, res: Response) => {
+  try {
+    const events = getSecurityEvents(1000);
+
+    // Aggregate events by type
+    const eventsByType: Record<string, number> = {};
+    const eventsByHour: Record<string, number> = {};
+
+    events.forEach((event) => {
+      // Count by type
+      eventsByType[event.type] = (eventsByType[event.type] || 0) + 1;
+
+      // Count by hour
+      const hour = new Date(event.timestamp).toISOString().slice(0, 13);
+      eventsByHour[hour] = (eventsByHour[hour] || 0) + 1;
+    });
+
+    // Get rate limit stats from the last hour
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const recentEvents = events.filter((e) => new Date(e.timestamp) >= oneHourAgo);
+
+    return res.json({
+      data: {
+        totalEvents: events.length,
+        recentEvents: recentEvents.length,
+        eventsByType,
+        eventsByHour,
+        topIPs: getTopIPs(events, 10),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching security metrics:', error);
+    return res.status(500).json({ error: 'Failed to fetch security metrics' });
+  }
+});
+
+// Helper to get top IPs with most security events
+function getTopIPs(events: any[], limit: number): { ip: string; count: number }[] {
+  const ipCounts: Record<string, number> = {};
+  events.forEach((event) => {
+    ipCounts[event.ip] = (ipCounts[event.ip] || 0) + 1;
+  });
+
+  return Object.entries(ipCounts)
+    .map(([ip, count]) => ({ ip, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit);
+}
 
 export default router;

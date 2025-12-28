@@ -1,5 +1,6 @@
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import { testConnection, initializeTables } from './config/database';
 import { pool } from './config/database';
@@ -25,29 +26,103 @@ import { Server as SocketIOServer } from 'socket.io';
 import type { Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 
+// Security middleware imports
+import {
+  helmetMiddleware,
+  generalLimiter,
+  authSecurityStack,
+  paymentSecurityStack,
+  chatSecurityStack,
+  adminSecurityStack,
+  xssSanitizer,
+  csrfTokenSetter,
+} from './middleware/security';
+
 dotenv.config();
 
 const app: Express = express();
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// ==============================================
+// SECURITY MIDDLEWARE (Applied First)
+// ==============================================
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/admin', adminRoutes);
+// Helmet security headers
+app.use(helmetMiddleware);
+
+// Cookie parser for CSRF tokens
+app.use(cookieParser());
+
+// CORS with credentials support - allow multiple frontend origins
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+  process.env.FRONTEND_URL,
+].filter(Boolean) as string[];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      // In development, allow all localhost origins
+      if (process.env.NODE_ENV !== 'production' && origin.includes('localhost')) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token'],
+}));
+
+// Body parser with size limits
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// XSS sanitization for all requests
+app.use(xssSanitizer);
+
+// CSRF token setter for GET requests
+app.use(csrfTokenSetter);
+
+// General rate limiting for all routes
+app.use('/api', generalLimiter);
+
+// ==============================================
+// ROUTES WITH SECURITY MIDDLEWARE
+// ==============================================
+
+// Auth routes - strict rate limiting
+app.use('/api/auth', authSecurityStack, authRoutes);
+
+// Admin routes - admin-specific security
+app.use('/api/admin', adminSecurityStack, adminRoutes);
+
+// Payment routes - payment-specific security
+app.use('/api/payments', paymentSecurityStack, paymentsRoutes);
+app.use('/api/wallet', paymentSecurityStack, walletRoutes);
+app.use('/api/payouts', paymentSecurityStack, payoutsRoutes);
+
+// Chat routes - chat-specific rate limiting
+app.use('/api/chat', chatSecurityStack, chatRoutes);
+app.use('/api/messages', chatSecurityStack, messagesRoutes);
+
+// Standard protected routes
 app.use('/api/users', usersRoutes);
 app.use('/api/providers', providersRoutes);
 app.use('/api/bookings', bookingsRoutes);
 app.use('/api/availability', availabilityRoutes);
 app.use('/api/services', servicesRoutes);
-app.use('/api/messages', messagesRoutes);
-app.use('/api/chat', chatRoutes);
-app.use('/api/payments', paymentsRoutes);
-app.use('/api/wallet', walletRoutes);
-app.use('/api/payouts', payoutsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/reviews', reviewsRoutes);
+
 // Register debug routes only in non-production
 if (process.env.NODE_ENV !== 'production') {
   app.use('/api/debug', debugRoutes);

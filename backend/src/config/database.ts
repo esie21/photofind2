@@ -4,13 +4,21 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-export const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME || 'photofind',
-});
+// Support both DATABASE_URL (Railway/Heroku style) and individual variables
+const poolConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    }
+  : {
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || '5432'),
+      user: process.env.DB_USER || 'postgres',
+      password: process.env.DB_PASSWORD,
+      database: process.env.DB_NAME || 'photofind',
+    };
+
+export const pool = new Pool(poolConfig);
 
 // Test the connection
 pool.on('error', (err: Error) => {
@@ -125,6 +133,14 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+
+    // Reschedule tracking columns
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rescheduled_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rescheduled_by UUID;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_reason TEXT;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS original_start_date TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS original_end_date TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_count INTEGER DEFAULT 0;`);
 
     // Migrate old booking_date to start_date/end_date if needed
     try {
@@ -895,13 +911,27 @@ export async function initializeTables() {
       }
     }
 
-    // Disputes indexes
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_booking ON disputes (booking_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_raised_by ON disputes (raised_by);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes (status);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_priority ON disputes (priority);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_assigned ON disputes (assigned_to);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_dispute_comments_dispute ON dispute_comments (dispute_id);`);
+    // Disputes indexes - only create if disputes table exists
+    const disputesTableExists = await client.query(`SELECT to_regclass('public.disputes') as exists`);
+    if (disputesTableExists.rows[0].exists) {
+      try {
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_booking ON disputes (booking_id);`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_raised_by ON disputes (raised_by);`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes (status);`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_priority ON disputes (priority);`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_assigned ON disputes (assigned_to);`);
+      } catch (e) {
+        console.warn('Some dispute indexes could not be created:', e);
+      }
+    }
+    const disputeCommentsExists = await client.query(`SELECT to_regclass('public.dispute_comments') as exists`);
+    if (disputeCommentsExists.rows[0].exists) {
+      try {
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_dispute_comments_dispute ON dispute_comments (dispute_id);`);
+      } catch (e) {
+        console.warn('Dispute comments index could not be created:', e);
+      }
+    }
 
     // ==================== AUDIT LOGS TABLE ====================
     const auditLogsExist = await client.query(`SELECT to_regclass('public.audit_logs') as exists`);

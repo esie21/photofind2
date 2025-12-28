@@ -22,6 +22,12 @@ class APIClient {
     }
   }
 
+  // Get CSRF token from cookie
+  private getCsrfToken(): string | null {
+    const match = document.cookie.match(/csrf_token=([^;]+)/);
+    return match ? match[1] : null;
+  }
+
   private getHeaders(isForm = false): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -29,6 +35,12 @@ class APIClient {
 
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    // Add CSRF token for state-changing requests
+    const csrfToken = this.getCsrfToken();
+    if (csrfToken) {
+      headers['x-csrf-token'] = csrfToken;
     }
 
     return headers;
@@ -64,6 +76,7 @@ class APIClient {
       const response = await fetch(resolvedUrl, {
         ...options,
         headers,
+        credentials: 'include', // Include cookies for CSRF and auth
       });
 
       if (!response.ok) {

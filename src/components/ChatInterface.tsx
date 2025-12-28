@@ -46,11 +46,27 @@ const participantId = useMemo(() => {
 }, [provider]);
 
   const bookingId = useMemo(() => {
-    if (bookingIdProp) return bookingIdProp;
-    if (provider?.booking_id) return Number(provider.booking_id);
-    if (provider?.bookingId) return Number(provider.bookingId);
-    if (provider?.booking?.id) return Number(provider.booking.id);
-    return null;
+    // Helper to safely get a valid number
+    const toValidNumber = (val: any): number | null => {
+      if (val === null || val === undefined || val === '') return null;
+      const num = Number(val);
+      return isNaN(num) ? null : num;
+    };
+
+    const fromProp = toValidNumber(bookingIdProp);
+    const fromProviderBookingId = toValidNumber(provider?.booking_id);
+    const fromProviderBookingIdCamel = toValidNumber(provider?.bookingId);
+    const fromProviderBooking = toValidNumber(provider?.booking?.id);
+
+    const resolved = fromProp || fromProviderBookingId || fromProviderBookingIdCamel || fromProviderBooking || null;
+
+    console.log('ChatInterface bookingId resolved:', {
+      bookingIdProp,
+      fromProp,
+      providerBookingId: provider?.booking_id,
+      resolved
+    });
+    return resolved;
   }, [bookingIdProp, provider]);
 
   const staticUploadsBase = useMemo(() => {
@@ -99,6 +115,82 @@ const participantId = useMemo(() => {
         return;
       }
 
+      // Setup Socket.IO for real-time messaging
+      const setupSocket = (roomType: 'booking' | 'direct', roomId: string | number) => {
+        const token = localStorage.getItem('authToken');
+        if (!token) return;
+
+        const socket = createSocket(API_CONFIG.BASE_URL.replace(/\/api$/i, ''), {
+          transports: ['websocket'],
+          auth: { token },
+        });
+        socketRef.current = socket;
+
+        socket.on('connect', () => {
+          if (roomType === 'booking') {
+            socket.emit('chat:join', { bookingId: roomId });
+            socket.emit('chat:read', { bookingId: roomId });
+          }
+        });
+
+        socket.on('chat:message', (payload: any) => {
+          // Handle both booking and direct chat messages
+          const matchesBooking = roomType === 'booking' && String(payload?.bookingId ?? '') === String(roomId);
+          const matchesDirect = roomType === 'direct' && (payload?.isDirect || String(payload?.chatId ?? '') === String(roomId));
+
+          if (!matchesBooking && !matchesDirect) return;
+
+          const incoming = payload?.message as BookingChatMessage;
+          if (!incoming?.id) return;
+          setMessages((prev) => {
+            if (prev.some((m: any) => String(m.id) === String(incoming.id))) return prev;
+            return [...prev, incoming];
+          });
+          const mine = String(incoming.sender_id ?? '') === String(user.id);
+          if (!mine && roomType === 'booking') {
+            socket.emit('chat:read', { bookingId: roomId });
+          }
+        });
+
+        socket.on('chat:typing', (payload: any) => {
+          if (roomType === 'booking' && String(payload?.bookingId ?? '') !== String(roomId)) return;
+          const typingUserId = String(payload?.userId ?? '');
+          if (typingUserId === String(user.id)) return;
+          const next = Boolean(payload?.isTyping);
+          setIsTyping(next);
+          if (otherTypingTimeoutRef.current) {
+            window.clearTimeout(otherTypingTimeoutRef.current);
+          }
+          if (next) {
+            otherTypingTimeoutRef.current = window.setTimeout(() => setIsTyping(false), 2000);
+          }
+        });
+
+        socket.on('chat:read', (payload: any) => {
+          if (roomType === 'booking' && String(payload?.bookingId ?? '') !== String(roomId)) return;
+          const readAt = String(payload?.readAt || new Date().toISOString());
+          const readerId = String(payload?.readerId ?? '');
+          if (!readerId || readerId === String(user.id)) return;
+          setMessages((prev) =>
+            prev.map((m: any) => {
+              const senderId = m.sender_id;
+              const isFromMe = String(senderId ?? '') === String(user.id);
+              if (!isFromMe) return m;
+              if (m.read_at) return m;
+              return { ...m, read_at: readAt };
+            })
+          );
+        });
+
+        socket.on('chat:presence', (payload: any) => {
+          if (roomType === 'booking' && String(payload?.bookingId ?? '') !== String(roomId)) return;
+          const presenceUserId = String(payload?.userId ?? '');
+          if (!presenceUserId || presenceUserId === String(user.id)) return;
+          setIsOnline(Boolean(payload?.online));
+        });
+      };
+
+      // Booking-based chat
       if (bookingId) {
         setLoading(true);
         cleanupSocket();
@@ -107,70 +199,28 @@ const participantId = useMemo(() => {
           if (isCancelled) return;
           setConversation(null);
           setMessages(history.messages);
+          setupSocket('booking', bookingId);
+        } catch (err: any) {
+          if (!isCancelled) {
+            setError(err?.message || 'Unable to load chat.');
+          }
+        } finally {
+          if (!isCancelled) setLoading(false);
+        }
+        return;
+      }
 
-          const token = localStorage.getItem('authToken');
-          if (token) {
-            const socket = createSocket(API_CONFIG.BASE_URL.replace(/\/api$/i, ''), {
-              transports: ['websocket'],
-              auth: { token },
-            });
-            socketRef.current = socket;
-
-            socket.on('connect', () => {
-              socket.emit('chat:join', { bookingId });
-              socket.emit('chat:read', { bookingId });
-            });
-
-            socket.on('chat:message', (payload: any) => {
-              if (String(payload?.bookingId ?? '') !== String(bookingId)) return;
-              const incoming = payload?.message as BookingChatMessage;
-              if (!incoming?.id) return;
-              setMessages((prev) => {
-                if (prev.some((m: any) => String(m.id) === String(incoming.id))) return prev;
-                return [...prev, incoming];
-              });
-              const mine = String(incoming.sender_id ?? '') === String(user.id);
-              if (!mine) {
-                socket.emit('chat:read', { bookingId });
-              }
-            });
-
-            socket.on('chat:typing', (payload: any) => {
-              if (String(payload?.bookingId ?? '') !== String(bookingId)) return;
-              const typingUserId = String(payload?.userId ?? '');
-              if (typingUserId === String(user.id)) return;
-              const next = Boolean(payload?.isTyping);
-              setIsTyping(next);
-              if (otherTypingTimeoutRef.current) {
-                window.clearTimeout(otherTypingTimeoutRef.current);
-              }
-              if (next) {
-                otherTypingTimeoutRef.current = window.setTimeout(() => setIsTyping(false), 2000);
-              }
-            });
-
-            socket.on('chat:read', (payload: any) => {
-              if (String(payload?.bookingId ?? '') !== String(bookingId)) return;
-              const readAt = String(payload?.readAt || new Date().toISOString());
-              const readerId = String(payload?.readerId ?? '');
-              if (!readerId || readerId === String(user.id)) return;
-              setMessages((prev) =>
-                prev.map((m: any) => {
-                  const senderId = m.sender_id;
-                  const isFromMe = String(senderId ?? '') === String(user.id);
-                  if (!isFromMe) return m;
-                  if (m.read_at) return m;
-                  return { ...m, read_at: readAt };
-                })
-              );
-            });
-
-            socket.on('chat:presence', (payload: any) => {
-              if (String(payload?.bookingId ?? '') !== String(bookingId)) return;
-              const presenceUserId = String(payload?.userId ?? '');
-              if (!presenceUserId || presenceUserId === String(user.id)) return;
-              setIsOnline(Boolean(payload?.online));
-            });
+      // Direct messaging (no booking required)
+      if (participantId) {
+        setLoading(true);
+        cleanupSocket();
+        try {
+          const history = await chatService.getDirectHistory(String(participantId), 200);
+          if (isCancelled) return;
+          setConversation(null);
+          setMessages(history.messages);
+          if (history.chat) {
+            setupSocket('direct', history.chat.id);
           }
         } catch (err: any) {
           if (!isCancelled) {
@@ -179,12 +229,11 @@ const participantId = useMemo(() => {
         } finally {
           if (!isCancelled) setLoading(false);
         }
-
         return;
       }
 
       setLoading(false);
-      setError('This chat is only available for bookings.');
+      setError('Unable to start chat. Missing recipient information.');
     };
 
     bootstrap();
@@ -201,35 +250,47 @@ const participantId = useMemo(() => {
     const trimmed = message.trim();
     if (!trimmed) return;
 
-    if (bookingId) {
-      setSending(true);
-      try {
-        const res = await chatService.sendMessage({ bookingId, content: trimmed });
-        setMessages((prev) => {
-          if (prev.some((m: any) => String(m.id) === String(res.data.id))) return prev;
-          return [...prev, res.data];
-        });
-        setMessage('');
-      } catch (err: any) {
-        setError(err?.message || 'Failed to send message.');
-      } finally {
+    setSending(true);
+    try {
+      let res;
+      if (bookingId) {
+        res = await chatService.sendMessage({ bookingId, content: trimmed });
+      } else if (participantId) {
+        res = await chatService.sendDirectMessage({ recipientId: String(participantId), content: trimmed });
+      } else {
+        setError('Unable to send message. No recipient.');
         setSending(false);
+        return;
       }
-      return;
-    }
 
-    setError('This chat is only available for bookings.');
+      setMessages((prev) => {
+        if (prev.some((m: any) => String(m.id) === String(res.data.id))) return prev;
+        return [...prev, res.data];
+      });
+      setMessage('');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to send message.');
+    } finally {
+      setSending(false);
+    }
   };
 
   const handleUpload = async (file: File) => {
     if (!user || sending) return;
-    if (!bookingId) {
-      setError('Attachments are only available for booking chat.');
-      return;
-    }
+
     setSending(true);
     try {
-      const res = await chatService.sendMessage({ bookingId, file });
+      let res;
+      if (bookingId) {
+        res = await chatService.sendMessage({ bookingId, file });
+      } else if (participantId) {
+        res = await chatService.sendDirectMessage({ recipientId: String(participantId), file });
+      } else {
+        setError('Unable to upload. No recipient.');
+        setSending(false);
+        return;
+      }
+
       setMessages((prev) => {
         if (prev.some((m: any) => String(m.id) === String(res.data.id))) return prev;
         return [...prev, res.data];
@@ -241,9 +302,11 @@ const participantId = useMemo(() => {
     }
   };
 
+  const canSend = bookingId || participantId;
+
   const onTyping = (value: string) => {
     setMessage(value);
-    if (!bookingId) return;
+    if (!bookingId) return; // Typing indicator only for booking chats for now
     const socket = socketRef.current;
     if (!socket) return;
     socket.emit('chat:typing', { bookingId, isTyping: true });
@@ -388,7 +451,7 @@ const participantId = useMemo(() => {
             <button
               onClick={() => fileInputRef.current?.click()}
               className="p-2 hover:bg-gray-100 rounded-lg text-gray-600"
-              disabled={!bookingId || sending || loading}
+              disabled={!canSend || sending || loading}
             >
               <Paperclip className="w-5 h-5" />
             </button>
@@ -408,9 +471,9 @@ const participantId = useMemo(() => {
                 disabled={!user || sending || loading}
               />
             </div>
-            <button 
+            <button
               onClick={handleSend}
-              disabled={!user || sending || loading || !bookingId}
+              disabled={!user || sending || loading || !canSend}
               className="p-3 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white transition-colors"
             >
               {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}

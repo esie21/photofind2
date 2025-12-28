@@ -1,21 +1,22 @@
 import { useState, useEffect } from 'react';
-import { Search, SlidersHorizontal, Star, MapPin, Calendar, MessageSquare, Clock, ChevronRight, Filter, DollarSign } from 'lucide-react';
+import { Search, SlidersHorizontal, Star, MapPin, Calendar, MessageSquare, Clock, ChevronRight, Filter, DollarSign, RefreshCw } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { ChatInterface } from './ChatInterface';
-import { NotificationsPanel } from './NotificationsPanel';
 import { ProviderCardSkeleton, BookingCardSkeleton } from './ui/skeleton';
 import { EmptyState } from './EmptyState';
 import { ErrorState, InlineError } from './ErrorState';
 import { ReviewForm } from './ReviewForm';
+import { RescheduleModal } from './RescheduleModal';
 import userService from '../api/services/userService';
 import bookingService from '../api/services/bookingService';
 import reviewService from '../api/services/reviewService';
 
 interface ClientDashboardProps {
   onStartBooking: (provider?: any) => void;
+  onViewProvider?: (providerId: string) => void;
 }
 
-export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
+export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashboardProps) {
   const [showFilters, setShowFilters] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<any>(null);
@@ -37,6 +38,8 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
   const [showReviewForm, setShowReviewForm] = useState(false);
   const [reviewBooking, setReviewBooking] = useState<any>(null);
   const [reviewedBookingIds, setReviewedBookingIds] = useState<Set<string>>(new Set());
+  const [showRescheduleModal, setShowRescheduleModal] = useState(false);
+  const [rescheduleBooking, setRescheduleBooking] = useState<any>(null);
 
   const upcomingBookings = myBookings;
 
@@ -66,7 +69,11 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
   };
 
   const handleViewProfile = (provider: any) => {
-    setSelectedProvider(provider);
+    if (onViewProvider) {
+      onViewProvider(String(provider.id));
+    } else {
+      setSelectedProvider(provider);
+    }
   };
 
   useEffect(() => {
@@ -441,6 +448,24 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
                               <MessageSquare className="w-3 h-3" />
                               Message
                             </button>
+                            {['pending', 'accepted', 'confirmed'].includes(booking.status) && (
+                              <button
+                                onClick={() => {
+                                  setRescheduleBooking({
+                                    id: booking.id,
+                                    service: booking.service,
+                                    provider: booking.provider,
+                                    date: booking.date,
+                                    time: booking.time,
+                                  });
+                                  setShowRescheduleModal(true);
+                                }}
+                                className="px-2 py-1 text-xs text-orange-600 hover:bg-orange-50 rounded-lg flex items-center gap-1"
+                              >
+                                <RefreshCw className="w-3 h-3" />
+                                Reschedule
+                              </button>
+                            )}
                             {booking.status === 'completed' && !reviewedBookingIds.has(String(booking.id)) && (
                               <button
                                 onClick={() => handleLeaveReview(booking)}
@@ -476,8 +501,7 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
               </button>
             </div>
 
-            {/* Notifications Preview */}
-            <NotificationsPanel />
+            {/* Notifications are shown in the Header */}
           </div>
         </div>
       </div>
@@ -505,6 +529,22 @@ export function ClientDashboard({ onStartBooking }: ClientDashboardProps) {
             setReviewBooking(null);
           }}
           onSuccess={handleReviewSuccess}
+        />
+      )}
+
+      {/* Reschedule Modal */}
+      {showRescheduleModal && rescheduleBooking && (
+        <RescheduleModal
+          booking={rescheduleBooking}
+          onClose={() => {
+            setShowRescheduleModal(false);
+            setRescheduleBooking(null);
+          }}
+          onSuccess={() => {
+            setShowRescheduleModal(false);
+            setRescheduleBooking(null);
+            fetchMyBookings();
+          }}
         />
       )}
 

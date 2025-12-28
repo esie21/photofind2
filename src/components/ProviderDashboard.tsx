@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag } from 'lucide-react';
+import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw } from 'lucide-react';
 
 // Category options for providers and services
 const CATEGORY_OPTIONS = [
@@ -27,6 +27,7 @@ import availabilityService from '../api/services/availabilityService';
 import reviewService, { Review, ReviewStats } from '../api/services/reviewService';
 import { ChatInterface } from './ChatInterface';
 import { WalletDashboard } from './WalletDashboard';
+import { RescheduleModal } from './RescheduleModal';
 
 export function ProviderDashboard() {
   const BASE_URL = ((import.meta as any).env?.VITE_API_URL as string) || 'http://localhost:3001/api';
@@ -55,6 +56,8 @@ export function ProviderDashboard() {
   const [reviewStats, setReviewStats] = useState<ReviewStats>({ totalReviews: 0, averageRating: '0.0' });
   const [isLoadingReviews, setIsLoadingReviews] = useState(false);
   const [reviewsError, setReviewsError] = useState<string | null>(null);
+  const [showRescheduleModal, setShowRescheduleModal] = useState(false);
+  const [rescheduleBooking, setRescheduleBooking] = useState<any>(null);
   const [formState, setFormState] = useState<any>({
   name: user?.name || 'Sarah Johnson',
   title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
@@ -474,7 +477,23 @@ useEffect(() => {
                             <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm">
                               Confirmed
                             </span>
-                            <button 
+                            <button
+                              onClick={() => {
+                                setRescheduleBooking({
+                                  id: booking.id,
+                                  service: booking.service,
+                                  client: booking.client,
+                                  date: booking.date,
+                                  time: booking.time,
+                                });
+                                setShowRescheduleModal(true);
+                              }}
+                              className="px-4 py-2 border border-orange-500 text-orange-600 rounded-lg hover:bg-orange-50 transition-colors text-sm flex items-center gap-2"
+                            >
+                              <RefreshCw className="w-4 h-4" />
+                              Reschedule
+                            </button>
+                            <button
                               onClick={() => {
                                 setSelectedBookingId(booking.id);
                                 setShowChat(true);
@@ -1293,6 +1312,24 @@ useEffect(() => {
                                 Mark Complete
                               </button>
                             )}
+                            {['pending', 'accepted', 'confirmed'].includes(booking.status) && (
+                              <button
+                                onClick={() => {
+                                  setRescheduleBooking({
+                                    id: booking.id,
+                                    service: booking.service,
+                                    client: booking.client,
+                                    date: booking.date,
+                                    time: booking.time,
+                                  });
+                                  setShowRescheduleModal(true);
+                                }}
+                                className="px-4 py-2 border border-orange-500 text-orange-600 rounded-lg hover:bg-orange-50 transition-colors text-sm flex items-center gap-2"
+                              >
+                                <RefreshCw className="w-4 h-4" />
+                                Reschedule
+                              </button>
+                            )}
                             <button
                               onClick={() => {
                                 setSelectedBookingId(booking.id);
@@ -1435,6 +1472,23 @@ useEffect(() => {
           />
         );
       })()}
+
+      {/* Reschedule Modal */}
+      {showRescheduleModal && rescheduleBooking && (
+        <RescheduleModal
+          booking={rescheduleBooking}
+          onClose={() => {
+            setShowRescheduleModal(false);
+            setRescheduleBooking(null);
+          }}
+          onSuccess={() => {
+            setShowRescheduleModal(false);
+            setRescheduleBooking(null);
+            fetchBookings();
+            toast.success('Booking rescheduled', 'The booking has been rescheduled successfully.');
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -100,9 +100,20 @@ async function autoCompletePastBookings(providerId?: string) {
   }
 }
 
-async function ensureBookingChatExists(bookingId: string, clientId: string, providerId: string) {
+async function ensureBookingChatExists(bookingId: string, clientId: string, providerId: string): Promise<number | null> {
   const existing = await pool.query('SELECT id FROM chats WHERE booking_id::text = $1', [bookingId]);
   if (existing.rows[0]) return existing.rows[0].id as number;
+
+  // Verify both users exist before creating chat
+  const usersExist = await pool.query(
+    'SELECT id FROM users WHERE id::text IN ($1, $2) AND deleted_at IS NULL',
+    [clientId, providerId]
+  );
+
+  if (usersExist.rows.length < 2) {
+    console.warn(`Cannot create chat: one or both users don't exist (client: ${clientId}, provider: ${providerId})`);
+    return null;
+  }
 
   const created = await pool.query(
     'INSERT INTO chats (booking_id, user_a, user_b) VALUES ($1, $2, $3) RETURNING id',
@@ -822,23 +833,26 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
 
         const chatId = await ensureBookingChatExists(String(bookingId), String(existing.client_id), String(existing.provider_id));
 
-        const inserted = await pool.query(
-          `
-            INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
-            VALUES ($1, NULL, $2, TRUE)
-            RETURNING id, chat_id, sender_id, content, attachment_url, attachment_type, attachment_name, is_system, created_at, read_at
-          `,
-          [chatId, `Booking status updated to ${nextStatus}.`]
-        );
+        // Only send chat message if chat was created successfully
+        if (chatId) {
+          const inserted = await pool.query(
+            `
+              INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+              VALUES ($1, NULL, $2, TRUE)
+              RETURNING id, chat_id, sender_id, content, attachment_url, attachment_type, attachment_name, is_system, created_at, read_at
+            `,
+            [chatId, `Booking status updated to ${nextStatus}.`]
+          );
 
-        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+          await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
 
-        const io = (req.app as any).get('io');
-        if (io) {
-          io.to(`booking:${bookingId}`).emit('chat:message', {
-            bookingId,
-            message: inserted.rows[0],
-          });
+          const io = (req.app as any).get('io');
+          if (io) {
+            io.to(`booking:${bookingId}`).emit('chat:message', {
+              bookingId,
+              message: inserted.rows[0],
+            });
+          }
         }
       }
 
@@ -855,6 +869,198 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
   } catch (error) {
     console.error('Error updating booking:', error);
     return res.status(500).json({ error: 'Failed to update booking' });
+  }
+});
+
+// ==================== RESCHEDULE BOOKING ====================
+
+router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  try {
+    const currentUserId = req.userId;
+    const bookingId = req.params.id;
+    const { start_date, end_date, reason } = req.body;
+
+    if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!start_date || !end_date) {
+      return res.status(400).json({ error: 'New start_date and end_date are required' });
+    }
+
+    // Parse and validate dates
+    const newStartDate = new Date(start_date);
+    const newEndDate = new Date(end_date);
+
+    if (isNaN(newStartDate.getTime()) || isNaN(newEndDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid date format' });
+    }
+
+    if (newStartDate >= newEndDate) {
+      return res.status(400).json({ error: 'End date must be after start date' });
+    }
+
+    if (newStartDate < new Date()) {
+      return res.status(400).json({ error: 'Cannot reschedule to a past date' });
+    }
+
+    // Get existing booking
+    const bookingResult = await pool.query(
+      `SELECT b.*, s.title as service_title, s.duration_minutes
+       FROM bookings b
+       LEFT JOIN services s ON s.id = b.service_id
+       WHERE b.id::text = $1 AND b.deleted_at IS NULL`,
+      [bookingId]
+    );
+
+    if (!bookingResult.rows[0]) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    const booking = bookingResult.rows[0];
+    const clientUserId = String(booking.client_id);
+    const providerUserId = String(booking.provider_id);
+
+    // Check if user has permission (client or provider can reschedule)
+    const isClient = String(currentUserId) === clientUserId;
+    const isProvider = String(currentUserId) === providerUserId;
+
+    if (!isClient && !isProvider) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Only allow rescheduling for certain statuses
+    const allowedStatuses = ['pending', 'accepted', 'confirmed'];
+    if (!allowedStatuses.includes(booking.status)) {
+      return res.status(400).json({
+        error: `Cannot reschedule a ${booking.status} booking`
+      });
+    }
+
+    // Check for conflicts with other bookings
+    const conflictResult = await pool.query(
+      `SELECT id FROM bookings
+       WHERE provider_id = $1
+         AND id::text <> $2
+         AND status NOT IN ('cancelled', 'rejected')
+         AND deleted_at IS NULL
+         AND start_date < $3
+         AND end_date > $4
+       LIMIT 1`,
+      [booking.provider_id, bookingId, newEndDate.toISOString(), newStartDate.toISOString()]
+    );
+
+    if (conflictResult.rows[0]) {
+      return res.status(409).json({
+        error: 'The selected time slot conflicts with another booking'
+      });
+    }
+
+    // Store original dates for history
+    const originalStartDate = booking.start_date;
+    const originalEndDate = booking.end_date;
+
+    // Update the booking
+    const updateResult = await pool.query(
+      `UPDATE bookings
+       SET start_date = $1,
+           end_date = $2,
+           rescheduled_at = CURRENT_TIMESTAMP,
+           rescheduled_by = $3,
+           reschedule_reason = $4,
+           original_start_date = COALESCE(original_start_date, $5),
+           original_end_date = COALESCE(original_end_date, $6),
+           reschedule_count = COALESCE(reschedule_count, 0) + 1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $7
+       RETURNING *`,
+      [
+        newStartDate.toISOString(),
+        newEndDate.toISOString(),
+        currentUserId,
+        reason || null,
+        originalStartDate,
+        originalEndDate,
+        bookingId
+      ]
+    );
+
+    const updatedBooking = updateResult.rows[0];
+
+    // Get user names for notifications
+    const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [clientUserId]);
+    const providerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]);
+    const clientName = clientInfo.rows[0]?.name || 'Client';
+    const providerName = providerInfo.rows[0]?.name || 'Provider';
+    const serviceName = booking.service_title || 'service';
+
+    // Format dates for notification message
+    const formatDate = (date: Date) => {
+      return date.toLocaleDateString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+      });
+    };
+
+    const newDateStr = formatDate(newStartDate);
+    const rescheduledBy = isClient ? clientName : providerName;
+
+    // Send notification to the other party
+    const recipientId = isClient ? providerUserId : clientUserId;
+    const recipientRole = isClient ? 'provider' : 'client';
+
+    await notificationService.create({
+      userId: recipientId,
+      type: 'booking_request', // Reusing type, could add 'booking_rescheduled' type
+      title: 'Booking Rescheduled',
+      message: `${rescheduledBy} rescheduled the booking for "${serviceName}" to ${newDateStr}`,
+      data: {
+        booking_id: bookingId,
+        client_id: clientUserId,
+        client_name: clientName,
+        provider_id: providerUserId,
+        provider_name: providerName,
+        new_start_date: newStartDate.toISOString(),
+        old_start_date: originalStartDate,
+        reschedule_reason: reason
+      }
+    });
+
+    // Send system message in chat
+    try {
+      const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+      if (chatId) {
+        const systemMessage = reason
+          ? `Booking rescheduled to ${newDateStr}. Reason: ${reason}`
+          : `Booking rescheduled to ${newDateStr}`;
+
+        await pool.query(
+          `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+           VALUES ($1, NULL, $2, TRUE)`,
+          [chatId, systemMessage]
+        );
+
+        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+        const io = (req.app as any).get('io');
+        if (io) {
+          io.to(`booking:${bookingId}`).emit('chat:message', {
+            bookingId,
+            message: { content: systemMessage, is_system: true, created_at: new Date().toISOString() }
+          });
+        }
+      }
+    } catch (chatError) {
+      console.error('Failed to send reschedule chat message:', chatError);
+    }
+
+    return res.json({
+      data: updatedBooking,
+      message: 'Booking rescheduled successfully'
+    });
+  } catch (error) {
+    console.error('Error rescheduling booking:', error);
+    return res.status(500).json({ error: 'Failed to reschedule booking' });
   }
 });
 

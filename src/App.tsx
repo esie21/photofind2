@@ -5,10 +5,12 @@ import { LandingPage } from './components/LandingPage';
 import { AuthModal } from './components/AuthModal';
 import { ClientDashboard } from './components/ClientDashboard';
 import { ProviderDashboard } from './components/ProviderDashboard';
+import { ProviderProfilePage } from './components/ProviderProfilePage';
 import { BookingFlow } from './components/BookingFlow';
 import { AdminDashboard } from './components/AdminDashboard';
 import { ChatInterface } from './components/ChatInterface';
 import { Notification } from './api/services/notificationService';
+import chatService from './api/services/chatService';
 
 interface ChatContext {
   recipientId: string;
@@ -18,11 +20,12 @@ interface ChatContext {
 }
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin'>('landing');
+  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile'>('landing');
     const { user } = useAuth();
-  const [bookingContext, setBookingContext] = useState<{ providerId?: string; providerName?: string; providerImage?: string } | null>(null);
+  const [bookingContext, setBookingContext] = useState<{ providerId?: string; providerName?: string; providerImage?: string; serviceId?: string } | null>(null);
   const [dashboardKey, setDashboardKey] = useState(0);
   const [chatContext, setChatContext] = useState<ChatContext | null>(null);
+  const [viewingProviderId, setViewingProviderId] = useState<string | null>(null);
 
     useEffect(() => {
       if (user) {
@@ -34,7 +37,7 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
 
-  const handleViewChange = (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin') => {
+  const handleViewChange = (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile') => {
     // If trying to route to admin, ensure user is admin
     if (view === 'admin') {
       if (!user || user.role !== 'admin') {
@@ -53,9 +56,34 @@ export default function App() {
     setCurrentView(view);
   };
 
+  const handleViewProviderProfile = (providerId: string) => {
+    setViewingProviderId(providerId);
+    setCurrentView('provider-profile');
+  };
+
   // Handle notification click navigation
-  const handleNotificationNavigate = (notification: Notification) => {
-    const data = notification.data || {};
+  const handleNotificationNavigate = async (notification: Notification) => {
+    console.log('=== NOTIFICATION CLICK HANDLER STARTED ===');
+    console.log('Raw notification:', notification);
+
+    try {
+      // Parse data if it's a string (backwards compatibility for old double-stringified data)
+      let data = notification.data || {};
+
+      // Keep parsing while data is a string (handles multiple levels of stringify)
+      let parseAttempts = 0;
+      while (typeof data === 'string' && parseAttempts < 3) {
+        try {
+          data = JSON.parse(data);
+          parseAttempts++;
+        } catch (e) {
+          console.error('Failed to parse notification data:', e, data);
+          data = {};
+          break;
+        }
+      }
+
+      console.log('Notification click:', { type: notification.type, data, rawData: notification.data });
 
     // For message notifications, open the chat
     if (notification.type === 'new_message') {
@@ -63,12 +91,47 @@ export default function App() {
       const senderId = data.sender_id;
       const chatId = data.chat_id;
 
+      // Helper to safely convert to number
+      const toValidNumber = (val: any): number | undefined => {
+        if (val === null || val === undefined || val === '') return undefined;
+        const num = Number(val);
+        return isNaN(num) ? undefined : num;
+      };
+
+      // Extract booking_id - check multiple possible locations
+      let bookingId: number | undefined = toValidNumber(data.booking_id);
+
+      console.log('New message notification - initial:', { senderId, chatId, bookingId, rawBookingId: data.booking_id, data });
+
+      // Always try to get fresh booking_id from chat if we have chatId
+      if (chatId) {
+        console.log('Fetching booking_id from chat_id:', chatId);
+        try {
+          const chatInfo = await chatService.getChatInfo(chatId);
+          console.log('Chat info received:', chatInfo);
+          if (chatInfo.booking_id) {
+            const fetchedId = toValidNumber(chatInfo.booking_id);
+            if (fetchedId) {
+              bookingId = fetchedId;
+            }
+          }
+        } catch (e) {
+          console.error('Failed to get chat info:', e);
+        }
+      }
+
+      console.log('Final bookingId for chat:', bookingId);
+
       if (senderId) {
-        setChatContext({
+        const context = {
           recipientId: String(senderId),
           recipientName: senderName,
-          bookingId: data.booking_id ? Number(data.booking_id) : undefined,
-        });
+          bookingId,
+        };
+        console.log('Setting chatContext:', context);
+        setChatContext(context);
+      } else {
+        console.error('No senderId in notification data');
       }
       return;
     }
@@ -134,6 +197,9 @@ export default function App() {
         });
       }
     }
+    } catch (error) {
+      console.error('Error in notification handler:', error);
+    }
   };
 
   return (
@@ -150,7 +216,9 @@ export default function App() {
       
       <main>
         {currentView === 'landing' && <LandingPage onViewChange={handleViewChange} />}
-        {currentView === 'client' && <ClientDashboard key={dashboardKey} onStartBooking={(provider?: unknown) => {
+        {currentView === 'client' && <ClientDashboard
+          key={dashboardKey}
+          onStartBooking={(provider?: unknown) => {
             if (!user) {
               setAuthMode('login');
               setShowAuthModal(true);
@@ -166,7 +234,9 @@ export default function App() {
               setBookingContext(null);
             }
             setCurrentView('booking');
-          }} />}
+          }}
+          onViewProvider={handleViewProviderProfile}
+        />}
         {currentView === 'provider' && <ProviderDashboard />}
         {currentView === 'booking' && (
           <BookingFlow
@@ -180,6 +250,26 @@ export default function App() {
           />
         )}
         {currentView === 'admin' && <AdminDashboard />}
+        {currentView === 'provider-profile' && viewingProviderId && (
+          <ProviderProfilePage
+            providerId={viewingProviderId}
+            onStartBooking={(provider, service) => {
+              if (!user) {
+                setAuthMode('login');
+                setShowAuthModal(true);
+                return;
+              }
+              setBookingContext({
+                providerId: String(provider.id),
+                providerName: provider.name,
+                providerImage: provider.profile_image || provider.image,
+                serviceId: service?.id ? String(service.id) : undefined,
+              });
+              setCurrentView('booking');
+            }}
+            onBack={() => setCurrentView('client')}
+          />
+        )}
       </main>
 
       {showAuthModal && (

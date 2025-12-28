@@ -2,6 +2,7 @@ import express, { Router, Request, Response } from 'express';
 import pool from '../config/database';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { isValidEmail, isStrongPassword, setSecureCookie, clearSecureCookie, logSecurityEvent } from '../middleware/security';
 
 const router = Router();
 
@@ -14,6 +15,9 @@ interface AuthRequest extends Request {
   };
 }
 
+// Token cookie name
+const AUTH_COOKIE_NAME = 'auth_token';
+
 // Login endpoint
 router.post('/login', async (req: AuthRequest, res: Response) => {
   try {
@@ -23,15 +27,25 @@ router.post('/login', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Email and password required' });
     }
 
-    // Query user from database
-    console.debug('Login attempt for email:', email);
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Query user from database (using parameterized query - SQL injection safe)
     const result = await pool.query(
       'SELECT id, email, password_hash, role, name FROM users WHERE email = $1',
-      [email]
+      [email.toLowerCase().trim()]
     );
-    console.debug('Login lookup rows:', result.rows.length);
 
     if (result.rows.length === 0) {
+      // Log failed login attempt
+      logSecurityEvent({
+        type: 'auth_failure',
+        ip: req.ip || 'unknown',
+        path: req.path,
+        details: `Failed login attempt for email: ${email}`,
+      });
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -43,18 +57,35 @@ router.post('/login', async (req: AuthRequest, res: Response) => {
       console.error('Bcrypt compare failed', bcryptErr);
       passwordMatch = false;
     }
-    console.debug('Password match:', passwordMatch);
 
     if (!passwordMatch) {
+      // Log failed login attempt
+      logSecurityEvent({
+        type: 'auth_failure',
+        ip: req.ip || 'unknown',
+        userId: String(user.id),
+        path: req.path,
+        details: 'Invalid password',
+      });
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Generate JWT token
+    // Generate JWT token with secure claims
     const token = jwt.sign(
-      { userId: user.id, role: user.role },
+      {
+        userId: user.id,
+        role: user.role,
+        iat: Math.floor(Date.now() / 1000),
+      },
       process.env.JWT_SECRET || 'your_secret_key',
-      { expiresIn: '24h' }
+      {
+        expiresIn: '24h',
+        algorithm: 'HS256',
+      }
     );
+
+    // Set secure HTTP-only cookie
+    setSecureCookie(res, AUTH_COOKIE_NAME, token, 24 * 60 * 60 * 1000); // 24 hours
 
     res.json({
       token,
@@ -80,33 +111,63 @@ router.post('/signup', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Email, password, and name required' });
     }
 
-    // Check if user already exists
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Validate password strength
+    const passwordCheck = isStrongPassword(password);
+    if (!passwordCheck.valid) {
+      return res.status(400).json({ error: passwordCheck.message });
+    }
+
+    // Validate name length
+    if (name.trim().length < 2 || name.trim().length > 100) {
+      return res.status(400).json({ error: 'Name must be between 2 and 100 characters' });
+    }
+
+    // Validate role
+    const validRoles = ['client', 'provider'];
+    const userRole = role && validRoles.includes(role) ? role : 'client';
+
+    // Check if user already exists (case-insensitive email)
     const existingUser = await pool.query(
-      'SELECT id FROM users WHERE email = $1',
-      [email]
+      'SELECT id FROM users WHERE LOWER(email) = LOWER($1)',
+      [email.trim()]
     );
 
     if (existingUser.rows.length > 0) {
       return res.status(400).json({ error: 'Email already registered' });
     }
 
-    // Hash password
-    const passwordHash = await bcrypt.hash(password, 10);
+    // Hash password with strong salt rounds
+    const passwordHash = await bcrypt.hash(password, 12);
 
-    // Insert new user
+    // Insert new user (parameterized query - SQL injection safe)
     const result = await pool.query(
       'INSERT INTO users (email, name, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, email, role, name',
-      [email, name, passwordHash, role || 'client']
+      [email.toLowerCase().trim(), name.trim(), passwordHash, userRole]
     );
 
     const user = result.rows[0];
 
-    // Generate JWT token
+    // Generate JWT token with secure claims
     const token = jwt.sign(
-      { userId: user.id, role: user.role },
+      {
+        userId: user.id,
+        role: user.role,
+        iat: Math.floor(Date.now() / 1000),
+      },
       process.env.JWT_SECRET || 'your_secret_key',
-      { expiresIn: '24h' }
+      {
+        expiresIn: '24h',
+        algorithm: 'HS256',
+      }
     );
+
+    // Set secure HTTP-only cookie
+    setSecureCookie(res, AUTH_COOKIE_NAME, token, 24 * 60 * 60 * 1000); // 24 hours
 
     res.status(201).json({
       token,
@@ -153,10 +214,11 @@ router.get('/me', async (req: Request, res: Response) => {
   }
 });
 
-// Logout endpoint (no-op for JWT-based auth but helpful for clients)
+// Logout endpoint - clears secure cookie
 router.post('/logout', async (req: Request, res: Response) => {
   try {
-    // If you want server-side invalidation, implement a token blacklist store here
+    // Clear the auth cookie
+    clearSecureCookie(res, AUTH_COOKIE_NAME);
     return res.json({ success: true });
   } catch (error) {
     console.error('Logout error:', error);

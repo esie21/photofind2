@@ -51,10 +51,23 @@
     },
     build: {
       target: 'esnext',
-      outDir: 'build',
+      outDir: 'dist',
+      sourcemap: false,
+      minify: 'esbuild',
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            vendor: ['react', 'react-dom'],
+            ui: ['lucide-react', '@radix-ui/react-dialog', '@radix-ui/react-popover'],
+          },
+        },
+      },
     },
     server: {
       port: 3000,
       open: true,
+    },
+    preview: {
+      port: 3000,
     },
   });

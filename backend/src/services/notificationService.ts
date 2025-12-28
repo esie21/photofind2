@@ -41,10 +41,19 @@ class NotificationService {
         `INSERT INTO notifications (user_id, type, title, message, data)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id, user_id, type, title, message, data, read_at, created_at`,
-        [userId, type, title, message, data ? JSON.stringify(data) : null]
+        [userId, type, title, message, data || null]
       );
 
-      const notification = result.rows[0];
+      let notification = result.rows[0];
+
+      // Parse data if it's a string (backwards compatibility)
+      if (notification.data && typeof notification.data === 'string') {
+        try {
+          notification.data = JSON.parse(notification.data);
+        } catch (e) {
+          // Keep as-is if parsing fails
+        }
+      }
 
       // Emit real-time notification via Socket.IO
       if (this.io) {
@@ -233,14 +242,20 @@ class NotificationService {
     senderId: string | number,
     senderName: string,
     chatId: string | number,
-    messagePreview: string
+    messagePreview: string,
+    bookingId?: string | number
   ) {
     return this.create({
       userId,
       type: 'new_message',
       title: 'New Message',
       message: `${senderName}: ${messagePreview.substring(0, 50)}${messagePreview.length > 50 ? '...' : ''}`,
-      data: { chat_id: chatId, sender_id: senderId, sender_name: senderName }
+      data: {
+        chat_id: chatId,
+        sender_id: senderId,
+        sender_name: senderName,
+        booking_id: bookingId
+      }
     });
   }
 

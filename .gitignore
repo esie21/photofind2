@@ -1,3 +1,38 @@
-node_modules
-backend/uploads/
+# Dependencies
+node_modules/
+backend/node_modules/
+
+# Build outputs
+dist/
+build/
+backend/dist/
+
+# Environment files (contain secrets)
+.env
+.env.local
+.env.*.local
 backend/.env
+
+# Uploads (user generated content)
+uploads/
+backend/uploads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Testing
+coverage/
+
+# Misc
+*.tsbuildinfo
