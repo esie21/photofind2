@@ -182,16 +182,18 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS original_end_date TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_count INTEGER DEFAULT 0;`);
 
-    // Migrate old booking_date to start_date/end_date if needed
-    try {
+    // Migrate old booking_date to start_date/end_date if the column exists
+    const bookingDateCol = await client.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'bookings' AND column_name = 'booking_date'
+    `);
+    if (bookingDateCol.rows.length > 0) {
       await client.query(`
         UPDATE bookings
         SET start_date = booking_date::timestamp,
             end_date = booking_date::timestamp + interval '1 hour'
         WHERE start_date IS NULL AND booking_date IS NOT NULL;
       `);
-    } catch (e) {
-      // booking_date column may not exist, that's fine
     }
 
     // Create availability_slots table (only if not exists)
@@ -602,15 +604,13 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
     await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
 
-    // Add foreign key for payout_id in transactions after payouts table exists
-    try {
-      if (usesUUID) {
-        await client.query(`ALTER TABLE transactions ADD CONSTRAINT fk_transactions_payout FOREIGN KEY (payout_id) REFERENCES payouts(id) ON DELETE SET NULL;`);
-      } else {
-        await client.query(`ALTER TABLE transactions ADD CONSTRAINT fk_transactions_payout FOREIGN KEY (payout_id) REFERENCES payouts(id) ON DELETE SET NULL;`);
-      }
-    } catch (e) {
-      // Constraint might already exist
+    // Add foreign key for payout_id in transactions after payouts table exists (only if not exists)
+    const fkExists = await client.query(`
+      SELECT 1 FROM information_schema.table_constraints
+      WHERE constraint_name = 'fk_transactions_payout' AND table_name = 'transactions'
+    `);
+    if (fkExists.rows.length === 0) {
+      await client.query(`ALTER TABLE transactions ADD CONSTRAINT fk_transactions_payout FOREIGN KEY (payout_id) REFERENCES payouts(id) ON DELETE SET NULL;`);
     }
 
     // Payment system indexes
