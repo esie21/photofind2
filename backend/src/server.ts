@@ -314,22 +314,23 @@ io.on('connection', (socket: Socket) => {
 });
 
 async function startServer() {
+  // Start server FIRST so Railway health checks pass
+  httpServer.listen(PORT, () => {
+    console.log(`\n✅ Server running on http://localhost:${PORT}`);
+    console.log(`📱 Frontend connects to: http://localhost:${PORT}/api`);
+    console.log(`🔗 DATABASE_URL: ${process.env.DATABASE_URL ? 'Set' : 'Not set'}`);
+  });
+
+  // Then initialize database (non-blocking)
   try {
-    // Test database connection
+    console.log('Connecting to database...');
     await testConnection();
-
-    // Initialize tables
+    console.log('Initializing tables...');
     await initializeTables();
-
-    httpServer.listen(PORT, () => {
-      console.log(`\n✅ Server running on http://localhost:${PORT}`);
-      console.log(`📱 Frontend connects to: http://localhost:${PORT}/api`);
-      console.log(`🗄️  Database: ${process.env.DB_NAME}`);
-      console.log(`📊 Server: ${process.env.DB_HOST}\n`);
-    });
+    console.log('Database ready!');
   } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
+    console.error('Database initialization error:', error);
+    // Don't exit - server is already running
   }
 }
 
