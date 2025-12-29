@@ -51,28 +51,21 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5173',
 ];
 
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow non-browser requests (Railway, health checks)
-    if (!origin) {
-      return callback(null, true);
-    }
-
-    if (ALLOWED_ORIGINS.includes(origin)) {
-      return callback(null, true);
-    }
-
-    // IMPORTANT: do NOT error
-    return callback(null, false);
-  },
+// Handle ALL OPTIONS requests first (preflight)
+app.options('*', cors({
+  origin: ALLOWED_ORIGINS,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
 }));
 
-
-
-// Handle preflight for all routes
+// CORS for all other requests
+app.use(cors({
+  origin: ALLOWED_ORIGINS,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+}));
 
 
 // ==============================================
