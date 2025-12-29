@@ -45,23 +45,31 @@ const app: Express = express();
 // ==============================================
 // EARLIEST POSSIBLE TEST ENDPOINT
 // ==============================================
-app.get('/ping', (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.send('pong');
-});
+const ALLOWED_ORIGINS = [
+  'https://photofind2.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+];
 
 // ==============================================
 // CORS - MUST BE FIRST
 // ==============================================
 app.use(cors({
-  origin: true,
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true); // server-to-server
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('CORS not allowed'), false);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
 }));
 
+
 // Handle preflight for all routes
-app.options('*', cors());
+
 
 // ==============================================
 // SECURITY MIDDLEWARE
@@ -140,10 +148,12 @@ const httpServer = http.createServer(app);
 
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: '*',
+    origin: ALLOWED_ORIGINS,
+    credentials: true,
     methods: ['GET', 'POST'],
   },
 });
+
 
 app.set('io', io);
 
