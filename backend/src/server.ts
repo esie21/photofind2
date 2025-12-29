@@ -51,28 +51,23 @@ app.get('/ping', (req, res) => {
 });
 
 // ==============================================
-// CORS MUST BE FIRST (before other middleware)
+// CORS - MUST BE FIRST
 // ==============================================
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token'],
+}));
 
-// Manual CORS - set headers for ALL requests including errors
-app.use((req, res, next) => {
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-csrf-token');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  next();
-});
+// Handle preflight for all routes
+app.options('*', cors());
 
 // ==============================================
 // SECURITY MIDDLEWARE
 // ==============================================
 
-// Helmet security headers (disabled temporarily for CORS debugging)
+// Helmet disabled for now - was interfering with CORS
 // app.use(helmetMiddleware);
 
 // Cookie parser for CSRF tokens
