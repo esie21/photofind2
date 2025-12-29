@@ -43,10 +43,18 @@ dotenv.config();
 const app: Express = express();
 
 // ==============================================
+// EARLIEST POSSIBLE TEST ENDPOINT
+// ==============================================
+app.get('/ping', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.send('pong');
+});
+
+// ==============================================
 // CORS MUST BE FIRST (before other middleware)
 // ==============================================
 
-// Manual CORS - most reliable for debugging
+// Manual CORS - set headers for ALL requests including errors
 app.use((req, res, next) => {
   const origin = req.headers.origin || '*';
   res.setHeader('Access-Control-Allow-Origin', origin);
