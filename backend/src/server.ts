@@ -318,7 +318,7 @@ io.on('connection', (socket: Socket) => {
 async function startServer() {
   // Start server FIRST so Railway health checks pass
   // Bind to 0.0.0.0 so Railway's proxy can reach the server
-  httpServer.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`\n✅ Server running on http://0.0.0.0:${PORT}`);
     console.log(`📱 Frontend connects to: http://localhost:${PORT}/api`);
     console.log(`🔗 DATABASE_URL: ${process.env.DATABASE_URL ? 'Set' : 'Not set'}`);
