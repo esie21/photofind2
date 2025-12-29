@@ -75,7 +75,13 @@ app.use(xssSanitizer);
 app.use(csrfTokenSetter);
 
 // General rate limiting for all routes
-app.use('/api', generalLimiter);
+app.use('/api', (req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+  return generalLimiter(req, res, next);
+});
+
 
 // ==============================================
 // ROUTES WITH SECURITY MIDDLEWARE
