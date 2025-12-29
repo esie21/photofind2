@@ -124,6 +124,46 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
 
+    // Create bookings table (only if not exists)
+    const bookingsExist = await client.query(`SELECT to_regclass('public.bookings') as exists`);
+    if (!bookingsExist.rows[0].exists) {
+      if (usesUUID) {
+        await client.query(`
+          CREATE TABLE bookings (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            client_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            provider_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            service_id UUID REFERENCES services(id) ON DELETE SET NULL,
+            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed')),
+            notes TEXT,
+            start_date TIMESTAMP,
+            end_date TIMESTAMP,
+            booking_mode VARCHAR(20) DEFAULT 'request',
+            payment_status VARCHAR(50) DEFAULT 'unpaid',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      } else {
+        await client.query(`
+          CREATE TABLE bookings (
+            id SERIAL PRIMARY KEY,
+            client_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            provider_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            service_id INTEGER REFERENCES services(id) ON DELETE SET NULL,
+            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed')),
+            notes TEXT,
+            start_date TIMESTAMP,
+            end_date TIMESTAMP,
+            booking_mode VARCHAR(20) DEFAULT 'request',
+            payment_status VARCHAR(50) DEFAULT 'unpaid',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      }
+    }
+
     // Add missing columns to bookings table (works for both UUID and INTEGER schemas)
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS start_date TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS end_date TIMESTAMP;`);
