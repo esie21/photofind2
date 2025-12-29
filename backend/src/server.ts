@@ -46,20 +46,26 @@ const app: Express = express();
 // CORS MUST BE FIRST (before other middleware)
 // ==============================================
 
-// CORS - allow all origins for now
-app.use(cors({
-  origin: true,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token'],
-}));
-app.options('*', cors());
+// Manual CORS - most reliable for debugging
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-csrf-token');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
+
 // ==============================================
 // SECURITY MIDDLEWARE
 // ==============================================
 
-// Helmet security headers
-app.use(helmetMiddleware);
+// Helmet security headers (disabled temporarily for CORS debugging)
+// app.use(helmetMiddleware);
 
 // Cookie parser for CSRF tokens
 app.use(cookieParser());
