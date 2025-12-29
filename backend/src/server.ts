@@ -46,34 +46,9 @@ const app: Express = express();
 // CORS MUST BE FIRST (before other middleware)
 // ==============================================
 
-// CORS with credentials support - allow multiple frontend origins
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:5173',
-  'http://127.0.0.1:3000',
-  'http://127.0.0.1:5173',
-  process.env.FRONTEND_URL,
-].filter(Boolean) as string[];
-
+// CORS - allow all origins for now
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, etc.)
-    if (!origin) return callback(null, true);
-
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else if (origin.endsWith('.vercel.app')) {
-      // Allow all Vercel preview/production deployments
-      callback(null, true);
-    } else {
-      // In development, allow all localhost origins
-      if (process.env.NODE_ENV !== 'production' && origin.includes('localhost')) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    }
-  },
+  origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token'],
