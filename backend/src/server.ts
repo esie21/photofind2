@@ -47,25 +47,29 @@ const app: Express = express();
 // ==============================================
 const ALLOWED_ORIGINS = [
   'https://photofind2.vercel.app',
-  'http://localhost:5173',
   'http://localhost:3000',
+  'http://localhost:5173',
 ];
 
-// ==============================================
-// CORS - MUST BE FIRST
-// ==============================================
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // server-to-server
+    // Allow non-browser requests (Railway, health checks)
+    if (!origin) {
+      return callback(null, true);
+    }
+
     if (ALLOWED_ORIGINS.includes(origin)) {
       return callback(null, true);
     }
-    return callback(new Error('CORS not allowed'), false);
+
+    // IMPORTANT: do NOT error
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
 }));
+
 
 
 // Handle preflight for all routes
