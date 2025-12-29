@@ -43,14 +43,8 @@ dotenv.config();
 const app: Express = express();
 
 // ==============================================
-// SECURITY MIDDLEWARE (Applied First)
+// CORS MUST BE FIRST (before other middleware)
 // ==============================================
-
-// Helmet security headers
-app.use(helmetMiddleware);
-
-// Cookie parser for CSRF tokens
-app.use(cookieParser());
 
 // CORS with credentials support - allow multiple frontend origins
 const allowedOrigins = [
@@ -84,6 +78,16 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token'],
 }));
+
+// ==============================================
+// SECURITY MIDDLEWARE
+// ==============================================
+
+// Helmet security headers
+app.use(helmetMiddleware);
+
+// Cookie parser for CSRF tokens
+app.use(cookieParser());
 
 // Body parser with size limits
 app.use(express.json({ limit: '10mb' }));
