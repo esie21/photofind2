@@ -42,48 +42,34 @@ dotenv.config();
 
 const app: Express = express();
 
+// Trust Railway's reverse proxy
+app.set('trust proxy', 1);
+
 // ==============================================
-// EARLIEST POSSIBLE TEST ENDPOINT
+// CORS CONFIGURATION
 // ==============================================
 const ALLOWED_ORIGINS = [
-  'https://photofind2.vercel.app/',
+  'https://photofind2.vercel.app',
   'http://localhost:3000',
   'http://localhost:5173',
 ];
 
-// Handle ALL OPTIONS requests first (preflight)
-app.use((req: Request, res: Response, next) => {
-  const origin = req.headers.origin;
-
-  if (origin && ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
-
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-CSRF-Token'
-  );
-  res.setHeader(
-    'Access-Control-Allow-Methods',
-    'GET, POST, PUT, DELETE, PATCH, OPTIONS'
-  );
-
-  // END preflight requests immediately with 200
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  next();
-});
-
-
-// CORS for all other requests
+// Simple, unified CORS - handles both preflight and actual requests
 app.use(cors({
-  origin: ALLOWED_ORIGINS,
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, origin);
+    } else {
+      callback(null, false);
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+  optionsSuccessStatus: 200, // For legacy browser support
 }));
 
 

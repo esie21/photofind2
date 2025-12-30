@@ -1,5 +1,8 @@
-// Use environment variable or fallback to localhost for development
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+// In production, use relative path (goes through Vercel rewrite)
+// In development, use localhost
+const API_URL = import.meta.env.PROD
+  ? '/api'
+  : (import.meta.env.VITE_API_URL || 'http://localhost:3001/api');
 
 export const API_CONFIG = {
   BASE_URL: API_URL,
