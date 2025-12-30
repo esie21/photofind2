@@ -45,6 +45,11 @@ const app: Express = express();
 // Trust Railway's reverse proxy
 app.set('trust proxy', 1);
 
+// EARLIEST test endpoint - before ANY middleware
+app.get('/health', (req: Request, res: Response) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // ==============================================
 // CORS CONFIGURATION
 // ==============================================
@@ -57,19 +62,21 @@ const ALLOWED_ORIGINS = [
 // Simple, unified CORS - handles both preflight and actual requests
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, etc.)
+    // Allow requests with no origin (direct browser, mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
 
     if (ALLOWED_ORIGINS.includes(origin)) {
       callback(null, origin);
     } else {
-      callback(null, false);
+      // Log rejected origins for debugging
+      console.log(`CORS: Rejected origin ${origin}`);
+      callback(null, true); // Allow anyway for now - debug mode
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
-  optionsSuccessStatus: 200, // For legacy browser support
+  optionsSuccessStatus: 200,
 }));
 
 
