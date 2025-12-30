@@ -46,7 +46,7 @@ const app: Express = express();
 // EARLIEST POSSIBLE TEST ENDPOINT
 // ==============================================
 const ALLOWED_ORIGINS = [
-  'https://photofind2.vercel.app',
+  'https://photofind2.vercel.app/',
   'http://localhost:3000',
   'http://localhost:5173',
 ];
