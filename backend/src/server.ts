@@ -52,12 +52,7 @@ const ALLOWED_ORIGINS = [
 ];
 
 // Handle ALL OPTIONS requests first (preflight)
-app.options('*', cors({
-  origin: ALLOWED_ORIGINS,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
-}));
+
 
 // CORS for all other requests
 app.use(cors({
