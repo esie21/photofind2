@@ -45,34 +45,31 @@ const app: Express = express();
 // ==============================================
 // EARLIEST POSSIBLE TEST ENDPOINT
 // ==============================================
-
+const ALLOWED_ORIGINS = [
+  'https://photofind2.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:5173',
+];
 
 // Handle ALL OPTIONS requests first (preflight)
-
+app.options('*', (req: Request, res: Response) => {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-CSRF-Token');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.status(200).end();
+});
 
 // CORS for all other requests
-const ALLOWED_ORIGIN =
-  process.env.NODE_ENV === 'production'
-    ? 'https://photofind2.vercel.app'
-    : '*';
-
-export async function OPTIONS() {
-  return new Response(null, {
-    status: 200,
-    headers: {
-      'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Credentials': 'true',
-    },
-  });
-}
-
-export async function GET() {
-  return Response.json({ ok: true }, {
-    headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN },
-  });
-}
+app.use(cors({
+  origin: ALLOWED_ORIGINS,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+}));
 
 
 // ==============================================
@@ -152,7 +149,7 @@ const httpServer = http.createServer(app);
 
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: ALLOWED_ORIGIN,
+    origin: ALLOWED_ORIGINS,
     credentials: true,
     methods: ['GET', 'POST'],
   },
