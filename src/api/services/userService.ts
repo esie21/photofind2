@@ -8,11 +8,15 @@ const userService = {
   },
 
   async getAllProviders(params?: { q?: string; page?: number; limit?: number }): Promise<{ data: User[]; meta?: any }> {
-    const url = new URL(API_CONFIG.ENDPOINTS.PROVIDERS.GET_ALL as string);
-    if (params?.q) url.searchParams.set('q', params.q);
-    if (params?.page) url.searchParams.set('page', params.page.toString());
-    if (params?.limit) url.searchParams.set('limit', params.limit.toString());
-    const resp = await apiClient.get<{ data: User[]; meta?: any }>(url.toString());
+    const searchParams = new URLSearchParams();
+    if (params?.q) searchParams.set('q', params.q);
+    if (params?.page) searchParams.set('page', params.page.toString());
+    if (params?.limit) searchParams.set('limit', params.limit.toString());
+    const queryString = searchParams.toString();
+    const url = queryString
+      ? `${API_CONFIG.ENDPOINTS.PROVIDERS.GET_ALL}?${queryString}`
+      : API_CONFIG.ENDPOINTS.PROVIDERS.GET_ALL;
+    const resp = await apiClient.get<{ data: User[]; meta?: any }>(url);
     // Normalize property `profile_image` -> `image` for UI compatibility
     const data = (resp.data || []).map((u: any) => ({ ...u, image: u.profile_image || (u as any).image }));
     return { data, meta: resp.meta };
