@@ -69,6 +69,11 @@ app.use((req: Request, res: Response, next) => {
     'GET, POST, PUT, DELETE, PATCH, OPTIONS'
   );
 
+  // END preflight requests immediately with 200
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   next();
 });
 
