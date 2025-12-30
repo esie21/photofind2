@@ -152,7 +152,7 @@ const httpServer = http.createServer(app);
 
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: ALLOWED_ORIGINS,
+    origin: ALLOWED_ORIGIN,
     credentials: true,
     methods: ['GET', 'POST'],
   },
