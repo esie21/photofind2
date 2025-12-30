@@ -45,22 +45,34 @@ const app: Express = express();
 // ==============================================
 // EARLIEST POSSIBLE TEST ENDPOINT
 // ==============================================
-const ALLOWED_ORIGINS = [
-  'https://photofind2.vercel.app',
-  'http://localhost:3000',
-  'http://localhost:5173',
-];
+
 
 // Handle ALL OPTIONS requests first (preflight)
 
 
 // CORS for all other requests
-app.use(cors({
-  origin: ALLOWED_ORIGINS,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
-}));
+const ALLOWED_ORIGIN =
+  process.env.NODE_ENV === 'production'
+    ? 'https://photofind2.vercel.app'
+    : '*';
+
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Credentials': 'true',
+    },
+  });
+}
+
+export async function GET() {
+  return Response.json({ ok: true }, {
+    headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN },
+  });
+}
 
 
 // ==============================================
