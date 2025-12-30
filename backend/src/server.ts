@@ -52,16 +52,26 @@ const ALLOWED_ORIGINS = [
 ];
 
 // Handle ALL OPTIONS requests first (preflight)
-app.options('*', (req: Request, res: Response) => {
+app.use((req: Request, res: Response, next) => {
   const origin = req.headers.origin;
+
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-CSRF-Token');
+
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.status(200).end();
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, X-CSRF-Token'
+  );
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET, POST, PUT, DELETE, PATCH, OPTIONS'
+  );
+
+  next();
 });
+
 
 // CORS for all other requests
 app.use(cors({
