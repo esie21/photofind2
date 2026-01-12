@@ -96,9 +96,10 @@ async function ensureProviderWallet(providerId: string): Promise<string> {
   return created.rows[0].id;
 }
 
-// Generate idempotency key for payment
+// Generate idempotency key for payment - deterministic to prevent duplicate payments
 function generateIdempotencyKey(bookingId: string, clientId: string): string {
-  return `payment_${bookingId}_${clientId}_${Date.now()}`;
+  // Use only bookingId and clientId to ensure same booking+client always gets same key
+  return `payment_${bookingId}_${clientId}`;
 }
 
 // Create payment intent for a booking
@@ -118,9 +119,9 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
   try {
     await dbClient.query('BEGIN');
 
-    // Get booking details with provider's user_id
+    // Get booking details with provider's user_id and service price
     const bookingRes = await dbClient.query(
-      `SELECT b.*, s.title as service_title, p.user_id as provider_user_id
+      `SELECT b.*, s.title as service_title, s.price as service_price, p.user_id as provider_user_id
        FROM bookings b
        LEFT JOIN services s ON s.id::text = b.service_id::text
        LEFT JOIN providers p ON p.id::text = b.provider_id::text
@@ -138,6 +139,18 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
     if (String(booking.client_id) !== String(clientId)) {
       await dbClient.query('ROLLBACK');
       return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Validate payment amount against service price (prevent underpayment)
+    const bookingPrice = parseFloat(booking.total_price || 0);
+    const servicePrice = parseFloat(booking.service_price || 0);
+    if (servicePrice > 0 && bookingPrice < servicePrice) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'Payment amount is less than the service price',
+        expected: servicePrice,
+        received: bookingPrice
+      });
     }
 
     // Check if payment already exists
@@ -397,19 +410,30 @@ router.post('/confirm', verifyToken, async (req: Request & { userId?: string }, 
       // Credit provider wallet (to pending balance until service completion)
       const walletId = await ensureProviderWallet(String(payment.provider_id));
 
+      // Lock wallet row to prevent race conditions with concurrent payments
+      const walletLockRes = await dbClient.query(
+        'SELECT id, pending_balance FROM wallets WHERE id::text = $1 FOR UPDATE',
+        [walletId]
+      );
+
+      if (!walletLockRes.rows[0]) {
+        await dbClient.query('ROLLBACK');
+        return res.status(500).json({ error: 'Wallet not found' });
+      }
+
+      const currentPending = parseFloat(walletLockRes.rows[0].pending_balance) || 0;
+      const newPending = currentPending + parseFloat(payment.net_provider_amount);
+
       // Add to pending balance
       await dbClient.query(
         `UPDATE wallets
-         SET pending_balance = pending_balance + $1, updated_at = CURRENT_TIMESTAMP
+         SET pending_balance = $1, updated_at = CURRENT_TIMESTAMP
          WHERE id::text = $2`,
-        [payment.net_provider_amount, walletId]
+        [newPending, walletId]
       );
 
-      // Get updated balance
-      const walletRes = await dbClient.query(
-        'SELECT pending_balance FROM wallets WHERE id::text = $1',
-        [walletId]
-      );
+      // Use newly calculated balance for transaction record
+      const walletRes = { rows: [{ pending_balance: newPending }] };
 
       // Record transaction
       await dbClient.query(

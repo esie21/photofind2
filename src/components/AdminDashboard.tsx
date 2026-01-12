@@ -9,8 +9,9 @@ import adminService, {
   AdminUser, PendingVerification, AdminReview, AdminDispute, AuditLog
 } from '../api/services/adminService';
 import { Users, DollarSign, TrendingUp, AlertCircle, Search, Filter, Eye, X, CheckCircle, XCircle, Clock, Shield, FileText } from 'lucide-react';
+import { BookingDisputesPanel } from './BookingDisputesPanel';
 
-type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'disputes' | 'audit';
+type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit';
 
 export function AdminDashboard() {
   const { user } = useAuth();
@@ -874,6 +875,7 @@ export function AdminDashboard() {
     { id: 'users', label: 'Users' },
     { id: 'providers', label: 'Verifications' },
     { id: 'reviews', label: 'Reviews' },
+    { id: 'booking_disputes', label: 'Booking Disputes' },
     { id: 'disputes', label: 'Disputes' },
     { id: 'audit', label: 'Audit Logs' },
   ];
@@ -920,6 +922,7 @@ export function AdminDashboard() {
             {activeTab === 'users' && renderUsers()}
             {activeTab === 'providers' && renderProviders()}
             {activeTab === 'reviews' && renderReviews()}
+            {activeTab === 'booking_disputes' && <BookingDisputesPanel onRefresh={loadTabData} />}
             {activeTab === 'disputes' && renderDisputes()}
             {activeTab === 'audit' && renderAuditLogs()}
           </>

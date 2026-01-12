@@ -25,13 +25,14 @@ import serviceService from '../api/services/serviceService';
 import bookingService from '../api/services/bookingService';
 import availabilityService from '../api/services/availabilityService';
 import reviewService, { Review, ReviewStats } from '../api/services/reviewService';
+import { getUploadUrl } from '../api/config';
 import { ChatInterface } from './ChatInterface';
 import { WalletDashboard } from './WalletDashboard';
 import { RescheduleModal } from './RescheduleModal';
+import { CompleteBookingModal } from './CompleteBookingModal';
 
 export function ProviderDashboard() {
   const BASE_URL = ((import.meta as any).env?.VITE_API_URL as string) || 'http://localhost:3001/api';
-  const STATIC_URL = 'http://localhost:3001/uploads';
   const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews'>('overview');
   const [showChat, setShowChat] = useState(false);
   const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
@@ -58,6 +59,8 @@ export function ProviderDashboard() {
   const [reviewsError, setReviewsError] = useState<string | null>(null);
   const [showRescheduleModal, setShowRescheduleModal] = useState(false);
   const [rescheduleBooking, setRescheduleBooking] = useState<any>(null);
+  const [showCompleteModal, setShowCompleteModal] = useState(false);
+  const [completeBookingData, setCompleteBookingData] = useState<any>(null);
   const [formState, setFormState] = useState<any>({
   name: user?.name || 'Sarah Johnson',
   title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
@@ -66,12 +69,10 @@ export function ProviderDashboard() {
   category: user?.category || 'Photography',
   years_experience: user?.years_experience || 10,
   profile_image: user?.profile_image
-    ? user.profile_image.startsWith('http')
-      ? user.profile_image
-      : `${STATIC_URL}/${user.profile_image}`
+    ? getUploadUrl(user.profile_image)
     : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
   portfolio_images: (user?.portfolio_images || []).map(
-    (img: string) => img.startsWith('http') ? img : `${STATIC_URL}/${img}`
+    (img: string) => getUploadUrl(img)
   ),
 });
 
@@ -123,12 +124,10 @@ useEffect(() => {
     category: user.category || 'Photography',
     years_experience: user.years_experience || 10,
     profile_image: user.profile_image
-      ? user.profile_image.startsWith('http')
-        ? user.profile_image
-        : `${STATIC_URL}/${user.profile_image}`
+      ? getUploadUrl(user.profile_image)
       : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
     portfolio_images: (user.portfolio_images || []).map(
-      (img: string) => img.startsWith('http') ? img : `${STATIC_URL}/${img}`
+      (img: string) => getUploadUrl(img)
     ),
   });
 }, [user]);
@@ -239,10 +238,9 @@ useEffect(() => {
 
         // Handle client image URL
         let clientImage = b.client_image;
-        if (clientImage && !clientImage.startsWith('http')) {
-          clientImage = `${STATIC_URL}/${clientImage}`;
-        }
-        if (!clientImage) {
+        if (clientImage) {
+          clientImage = getUploadUrl(clientImage);
+        } else {
           clientImage = `https://ui-avatars.com/api/?name=${encodeURIComponent(b.client_name || 'Client')}&background=7c3aed&color=fff`;
         }
 
@@ -251,9 +249,10 @@ useEffect(() => {
           client_id: b.client_user_id || b.client_id,
           client: b.client_name || b.client_email || 'Client',
           clientEmail: b.client_email,
-          service: b.service_title || 'Service',
+          service: b.service_title || b.service_name || 'Service',
           date,
           time,
+          start_date: b.start_date,
           amount: Number(b.total_price || b.totalPrice || 0),
           status: b.status,
           image: clientImage,
@@ -412,7 +411,7 @@ useEffect(() => {
                         <div className="flex items-start justify-between mb-2">
                           <div>
                             <h3 className="text-gray-900">{booking.client}</h3>
-                            <p className="text-sm text-gray-600">{booking.service}</p>
+                            <p className="text-sm text-gray-600">{booking.service || 'Service'}</p>
                           </div>
                           <div className="text-right">
                             <div className="text-purple-600">${booking.amount}</div>
@@ -473,26 +472,48 @@ useEffect(() => {
                             </button>
                           </div>
                         ) : (
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm">
-                              Confirmed
+                              {booking.status === 'awaiting_confirmation' ? 'Awaiting Confirmation' :
+                               booking.status === 'disputed' ? 'Disputed' :
+                               booking.status === 'completed' ? 'Completed' : 'Confirmed'}
                             </span>
-                            <button
-                              onClick={() => {
-                                setRescheduleBooking({
-                                  id: booking.id,
-                                  service: booking.service,
-                                  client: booking.client,
-                                  date: booking.date,
-                                  time: booking.time,
-                                });
-                                setShowRescheduleModal(true);
-                              }}
-                              className="px-4 py-2 border border-orange-500 text-orange-600 rounded-lg hover:bg-orange-50 transition-colors text-sm flex items-center gap-2"
-                            >
-                              <RefreshCw className="w-4 h-4" />
-                              Reschedule
-                            </button>
+                            {['accepted', 'confirmed'].includes(booking.status) &&
+                             new Date(booking.start_date || booking.date) <= new Date() && (
+                              <button
+                                onClick={() => {
+                                  setCompleteBookingData({
+                                    id: String(booking.id),
+                                    service_title: booking.service || 'Service',
+                                    client_name: booking.client || 'Client',
+                                    start_date: booking.start_date || booking.date,
+                                  });
+                                  setShowCompleteModal(true);
+                                }}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center gap-2"
+                              >
+                                <CheckCircle className="w-4 h-4" />
+                                Mark Complete
+                              </button>
+                            )}
+                            {['pending', 'accepted', 'confirmed'].includes(booking.status) && (
+                              <button
+                                onClick={() => {
+                                  setRescheduleBooking({
+                                    id: booking.id,
+                                    service: booking.service,
+                                    client: booking.client,
+                                    date: booking.date,
+                                    time: booking.time,
+                                  });
+                                  setShowRescheduleModal(true);
+                                }}
+                                className="px-4 py-2 border border-orange-500 text-orange-600 rounded-lg hover:bg-orange-50 transition-colors text-sm flex items-center gap-2"
+                              >
+                                <RefreshCw className="w-4 h-4" />
+                                Reschedule
+                              </button>
+                            )}
                             <button
                               onClick={() => {
                                 setSelectedBookingId(booking.id);
@@ -1198,7 +1219,60 @@ useEffect(() => {
 
         {/* Bookings Tab */}
         {activeTab === 'bookings' && (
-          <div className="bg-white rounded-2xl p-6 shadow-sm">
+          <div className="space-y-6">
+            {/* Ready to Complete - Bookings that can be marked as done */}
+            {(() => {
+              const readyToComplete = providerBookings.filter(b =>
+                ['accepted', 'confirmed'].includes(b.status) &&
+                new Date(b.start_date || b.date) <= new Date()
+              );
+              if (readyToComplete.length === 0) return null;
+              return (
+                <div className="bg-blue-50 border-2 border-blue-200 rounded-2xl p-6 shadow-sm">
+                  <div className="flex items-center gap-2 mb-4">
+                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                    <h3 className="text-blue-800 font-semibold">Ready to Mark Complete ({readyToComplete.length})</h3>
+                  </div>
+                  <p className="text-sm text-blue-700 mb-4">These bookings have passed their scheduled date. Upload evidence photos to mark them complete.</p>
+                  <div className="space-y-3">
+                    {readyToComplete.slice(0, 5).map((booking) => (
+                      <div key={`ready-${booking.id}`} className="p-4 bg-white border border-blue-200 rounded-xl flex items-center gap-4">
+                        <ImageWithFallback
+                          src={booking.image}
+                          alt={booking.client}
+                          className="w-12 h-12 object-cover rounded-lg"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-gray-900 font-medium truncate">{booking.client}</p>
+                          <p className="text-xs text-gray-600 truncate">{booking.service || 'Service'}</p>
+                          <p className="text-xs text-gray-500">{booking.date} at {booking.time}</p>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setCompleteBookingData({
+                              id: String(booking.id),
+                              service_title: booking.service || 'Service',
+                              client_name: booking.client || 'Client',
+                              start_date: booking.start_date || booking.date,
+                            });
+                            setShowCompleteModal(true);
+                          }}
+                          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center gap-2 whitespace-nowrap"
+                        >
+                          <CheckCircle className="w-4 h-4" />
+                          Mark Complete
+                        </button>
+                      </div>
+                    ))}
+                    {readyToComplete.length > 5 && (
+                      <p className="text-sm text-blue-600 text-center">+{readyToComplete.length - 5} more bookings ready to complete</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div className="bg-white rounded-2xl p-6 shadow-sm">
             <h2 className="text-gray-900 mb-6">All Bookings</h2>
             {isLoadingBookings ? (
               <div className="space-y-4">
@@ -1227,9 +1301,15 @@ useEffect(() => {
                     pending: 'bg-yellow-100 text-yellow-700',
                     accepted: 'bg-green-100 text-green-700',
                     confirmed: 'bg-green-100 text-green-700',
+                    awaiting_confirmation: 'bg-orange-100 text-orange-700',
                     completed: 'bg-blue-100 text-blue-700',
                     cancelled: 'bg-gray-100 text-gray-700',
                     rejected: 'bg-red-100 text-red-700',
+                    disputed: 'bg-red-100 text-red-700',
+                  };
+                  const statusLabels: Record<string, string> = {
+                    awaiting_confirmation: 'Awaiting Client Confirmation',
+                    disputed: 'Disputed - Under Review',
                   };
                   return (
                     <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
@@ -1245,8 +1325,8 @@ useEffect(() => {
                               <h3 className="text-gray-900 font-medium">{booking.client}</h3>
                               <p className="text-sm text-gray-600">{booking.service || 'Service'}</p>
                             </div>
-                            <span className={`px-3 py-1 rounded-full text-sm capitalize ${statusStyles[booking.status] || 'bg-gray-100 text-gray-700'}`}>
-                              {booking.status}
+                            <span className={`px-3 py-1 rounded-full text-sm ${statusStyles[booking.status] || 'bg-gray-100 text-gray-700'}`}>
+                              {statusLabels[booking.status] || booking.status.replace('_', ' ')}
                             </span>
                           </div>
                           <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600 mb-3">
@@ -1294,17 +1374,17 @@ useEffect(() => {
                                 </button>
                               </>
                             )}
-                            {['accepted', 'confirmed'].includes(booking.status) && (
+                            {['accepted', 'confirmed'].includes(booking.status) &&
+                             new Date(booking.start_date || booking.date) <= new Date() && (
                               <button
-                                onClick={async () => {
-                                  try {
-                                    await bookingService.updateBooking(String(booking.id), { status: 'completed' } as any);
-                                    setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'completed' } : b));
-                                    toast.success('Booking completed', 'Great job! The booking has been marked as complete.');
-                                  } catch (e) {
-                                    console.error('Failed to complete booking', e);
-                                    toast.error('Failed to complete', 'Please try again.');
-                                  }
+                                onClick={() => {
+                                  setCompleteBookingData({
+                                    id: String(booking.id),
+                                    service_title: booking.service || 'Service',
+                                    client_name: booking.client || 'Client',
+                                    start_date: booking.start_date || booking.date,
+                                  });
+                                  setShowCompleteModal(true);
                                 }}
                                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center gap-2"
                               >
@@ -1330,6 +1410,18 @@ useEffect(() => {
                                 Reschedule
                               </button>
                             )}
+                            {booking.status === 'awaiting_confirmation' && (
+                              <span className="px-3 py-2 text-orange-600 text-sm flex items-center gap-1">
+                                <Calendar className="w-4 h-4" />
+                                Waiting for client to confirm (48h timeout)
+                              </span>
+                            )}
+                            {booking.status === 'disputed' && (
+                              <span className="px-3 py-2 text-red-600 text-sm flex items-center gap-1">
+                                <XCircle className="w-4 h-4" />
+                                Under admin review
+                              </span>
+                            )}
                             <button
                               onClick={() => {
                                 setSelectedBookingId(booking.id);
@@ -1348,6 +1440,7 @@ useEffect(() => {
                 })}
               </div>
             )}
+            </div>
           </div>
         )}
 
@@ -1410,7 +1503,7 @@ useEffect(() => {
                       <div className="flex items-center gap-3">
                         {review.reviewer_image ? (
                           <ImageWithFallback
-                            src={review.reviewer_image.startsWith('http') ? review.reviewer_image : `${STATIC_URL}/${review.reviewer_image}`}
+                            src={getUploadUrl(review.reviewer_image)}
                             alt={review.reviewer_name || 'Reviewer'}
                             className="w-10 h-10 rounded-full object-cover"
                           />
@@ -1486,6 +1579,23 @@ useEffect(() => {
             setRescheduleBooking(null);
             fetchBookings();
             toast.success('Booking rescheduled', 'The booking has been rescheduled successfully.');
+          }}
+        />
+      )}
+
+      {/* Complete Booking Modal - Provider uploads evidence */}
+      {showCompleteModal && completeBookingData && (
+        <CompleteBookingModal
+          booking={completeBookingData}
+          onClose={() => {
+            setShowCompleteModal(false);
+            setCompleteBookingData(null);
+          }}
+          onSuccess={() => {
+            setShowCompleteModal(false);
+            setCompleteBookingData(null);
+            fetchBookings();
+            toast.success('Evidence submitted', 'Awaiting client confirmation. They have 48 hours to respond.');
           }}
         />
       )}

@@ -9,7 +9,7 @@ import adminRoutes from './routes/admin';
 import debugRoutes from './routes/debug';
 import usersRoutes from './routes/users';
 import providersRoutes from './routes/providers';
-import bookingsRoutes from './routes/bookings';
+import bookingsRoutes, { autoConfirmPastCompletions, autoResolveStaleDisputes } from './routes/bookings';
 import availabilityRoutes from './routes/availability';
 import servicesRoutes from './routes/services';
 import messagesRoutes from './routes/messages';
@@ -343,6 +343,34 @@ async function startServer() {
     console.log('Initializing tables...');
     await initializeTables();
     console.log('Database ready!');
+
+    // Run auto-confirm check once on startup
+    await autoConfirmPastCompletions();
+    console.log('Initial auto-confirm check complete.');
+
+    // Run auto-resolve disputes check once on startup
+    await autoResolveStaleDisputes();
+    console.log('Initial dispute auto-resolve check complete.');
+
+    // Schedule auto-confirm check every 10 minutes (600000ms)
+    setInterval(async () => {
+      try {
+        await autoConfirmPastCompletions();
+      } catch (err) {
+        console.error('Auto-confirm interval error:', err);
+      }
+    }, 10 * 60 * 1000);
+    console.log('Auto-confirm scheduler started (every 10 minutes).');
+
+    // Schedule dispute auto-resolve check every hour (3600000ms)
+    setInterval(async () => {
+      try {
+        await autoResolveStaleDisputes();
+      } catch (err) {
+        console.error('Auto-resolve disputes interval error:', err);
+      }
+    }, 60 * 60 * 1000);
+    console.log('Dispute auto-resolve scheduler started (every hour).');
   } catch (error) {
     console.error('Database initialization error:', error);
     // Don't exit - server is already running

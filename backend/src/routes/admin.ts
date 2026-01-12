@@ -220,20 +220,28 @@ router.get('/metrics/users-chart', async (req: Request & { userId?: string }, re
   try {
     const period = req.query.period as string || 'month';
     let lookback = period === 'week' ? '7 days' : period === 'year' ? '12 months' : '30 days';
-    let interval = period === 'year' ? 'month' : 'day';
+    let interval = period === 'year' ? '1 month' : '1 day';
     let format = period === 'year' ? 'YYYY-MM' : 'YYYY-MM-DD';
 
+    // Generate date series and calculate cumulative user counts
+    // This shows total users at each point in time, not just new users created that day
     const result = await pool.query(`
+      WITH date_series AS (
+        SELECT d::date as date
+        FROM generate_series(
+          (NOW() - INTERVAL '${lookback}')::date,
+          NOW()::date,
+          INTERVAL '${interval}'
+        ) d
+      )
       SELECT
-        TO_CHAR(DATE_TRUNC($1, created_at), $2) as date,
-        COUNT(*) as total,
-        COUNT(*) FILTER (WHERE role = 'client') as clients,
-        COUNT(*) FILTER (WHERE role = 'provider') as providers
-      FROM users
-      WHERE deleted_at IS NULL AND created_at >= NOW() - INTERVAL '${lookback}'
-      GROUP BY DATE_TRUNC($1, created_at)
-      ORDER BY DATE_TRUNC($1, created_at)
-    `, [interval, format]);
+        TO_CHAR(ds.date, $1) as date,
+        (SELECT COUNT(*) FROM users WHERE role = 'client' AND deleted_at IS NULL AND created_at::date <= ds.date)::integer as clients,
+        (SELECT COUNT(*) FROM users WHERE role = 'provider' AND deleted_at IS NULL AND created_at::date <= ds.date)::integer as providers,
+        (SELECT COUNT(*) FROM users WHERE role IN ('client', 'provider') AND deleted_at IS NULL AND created_at::date <= ds.date)::integer as total
+      FROM date_series ds
+      ORDER BY ds.date
+    `, [format]);
 
     return res.json({ data: result.rows });
   } catch (error) {
@@ -592,6 +600,28 @@ router.get('/disputes', async (req: Request & { userId?: string }, res: Response
   try {
     const { status = 'all', priority, limit = '50', offset = '0' } = req.query;
 
+    // Check if disputes table exists and has required columns
+    const tableCheck = await pool.query(`SELECT to_regclass('public.disputes') as exists`);
+    if (!tableCheck.rows[0].exists) {
+      return res.json({ data: [], meta: { total: 0, limit: parseInt(limit as string), offset: parseInt(offset as string) } });
+    }
+
+    // Check what columns exist in disputes table
+    const colsResult = await pool.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'disputes' AND table_schema = 'public'
+    `);
+    const existingCols = colsResult.rows.map((r: any) => r.column_name);
+
+    // If table is missing required columns, return empty
+    const hasRaisedBy = existingCols.includes('raised_by');
+    const hasAgainstUser = existingCols.includes('against_user');
+
+    if (!hasRaisedBy || !hasAgainstUser) {
+      console.warn('Disputes table missing required columns (raised_by, against_user)');
+      return res.json({ data: [], meta: { total: 0, limit: parseInt(limit as string), offset: parseInt(offset as string) } });
+    }
+
     const conditions: string[] = [];
     const params: any[] = [];
     let paramIndex = 1;
@@ -602,7 +632,7 @@ router.get('/disputes', async (req: Request & { userId?: string }, res: Response
       paramIndex++;
     }
 
-    if (priority) {
+    if (priority && existingCols.includes('priority')) {
       conditions.push(`d.priority = $${paramIndex}`);
       params.push(priority);
       paramIndex++;
@@ -618,8 +648,8 @@ router.get('/disputes', async (req: Request & { userId?: string }, res: Response
              assigned.name as assigned_to_name,
              b.id as booking_id, s.title as service_title
       FROM disputes d
-      JOIN users raised ON raised.id::text = d.raised_by::text
-      JOIN users against ON against.id::text = d.against_user::text
+      LEFT JOIN users raised ON raised.id::text = d.raised_by::text
+      LEFT JOIN users against ON against.id::text = d.against_user::text
       LEFT JOIN users assigned ON assigned.id::text = d.assigned_to::text
       LEFT JOIN bookings b ON b.id::text = d.booking_id::text
       LEFT JOIN services s ON s.id::text = b.service_id::text

@@ -134,7 +134,7 @@ export async function initializeTables() {
             client_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             provider_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             service_id UUID REFERENCES services(id) ON DELETE SET NULL,
-            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed')),
+            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'confirmed', 'awaiting_confirmation', 'disputed')),
             notes TEXT,
             start_date TIMESTAMP,
             end_date TIMESTAMP,
@@ -151,7 +151,7 @@ export async function initializeTables() {
             client_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             provider_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             service_id INTEGER REFERENCES services(id) ON DELETE SET NULL,
-            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed')),
+            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'confirmed', 'awaiting_confirmation', 'disputed')),
             notes TEXT,
             start_date TIMESTAMP,
             end_date TIMESTAMP,
@@ -181,6 +181,38 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS original_start_date TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS original_end_date TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_count INTEGER DEFAULT 0;`);
+
+    // Dual confirmation columns for service completion verification
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS provider_completed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS client_confirmed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS completion_notes TEXT;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_raised BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_reason TEXT;`);
+
+    // Update status column size and CHECK constraint to include new statuses
+    try {
+      // First, check current column size and increase if needed
+      const statusColInfo = await client.query(`
+        SELECT character_maximum_length FROM information_schema.columns
+        WHERE table_name = 'bookings' AND column_name = 'status'
+      `);
+      const currentSize = statusColInfo.rows[0]?.character_maximum_length;
+      if (currentSize && currentSize < 30) {
+        console.log(`Increasing bookings.status column size from ${currentSize} to 50...`);
+        await client.query(`ALTER TABLE bookings ALTER COLUMN status TYPE VARCHAR(50);`);
+      }
+
+      // Drop old constraint if exists
+      await client.query(`ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_status_check;`);
+      // Add new constraint with all statuses
+      await client.query(`
+        ALTER TABLE bookings ADD CONSTRAINT bookings_status_check
+        CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'confirmed', 'awaiting_confirmation', 'disputed'));
+      `);
+      console.log('Updated bookings status constraint to include new statuses.');
+    } catch (e) {
+      console.log('Could not update bookings status constraint (may already be correct):', (e as Error).message);
+    }
 
     // Migrate old booking_date to start_date/end_date if the column exists
     const bookingDateCol = await client.query(`
@@ -230,6 +262,40 @@ export async function initializeTables() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_bookings_provider_end ON bookings (provider_id, end_date);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_availability_provider_start ON availability_slots (provider_id, start_time);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_availability_provider_end ON availability_slots (provider_id, end_time);`);
+
+    // ==================== BOOKING EVIDENCE TABLE ====================
+    const bookingEvidenceExist = await client.query(`SELECT to_regclass('public.booking_evidence') as exists`);
+    if (!bookingEvidenceExist.rows[0].exists) {
+      if (usesUUID) {
+        await client.query(`
+          CREATE TABLE booking_evidence (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            booking_id UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+            uploaded_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            evidence_type VARCHAR(20) NOT NULL CHECK (evidence_type IN ('before', 'after', 'during', 'other')),
+            file_url TEXT NOT NULL,
+            caption TEXT,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      } else {
+        await client.query(`
+          CREATE TABLE booking_evidence (
+            id SERIAL PRIMARY KEY,
+            booking_id INTEGER NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+            uploaded_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            evidence_type VARCHAR(20) NOT NULL CHECK (evidence_type IN ('before', 'after', 'during', 'other')),
+            file_url TEXT NOT NULL,
+            caption TEXT,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      }
+    }
+
+    // Booking evidence indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_booking_evidence_booking ON booking_evidence (booking_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_booking_evidence_uploaded_by ON booking_evidence (uploaded_by);`);
 
     // Check if chats table has wrong column types and drop if needed
     const chatsColType = await client.query(`
@@ -951,15 +1017,32 @@ export async function initializeTables() {
       }
     }
 
-    // Disputes indexes - only create if disputes table exists
+    // Disputes indexes - only create if disputes table exists and has required columns
     const disputesTableExists = await client.query(`SELECT to_regclass('public.disputes') as exists`);
     if (disputesTableExists.rows[0].exists) {
+      // Get existing columns in disputes table
+      const disputeCols = await client.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'disputes' AND table_schema = 'public'
+      `);
+      const disputeColNames = disputeCols.rows.map((r: any) => r.column_name);
+
       try {
-        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_booking ON disputes (booking_id);`);
-        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_raised_by ON disputes (raised_by);`);
-        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes (status);`);
-        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_priority ON disputes (priority);`);
-        await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_assigned ON disputes (assigned_to);`);
+        if (disputeColNames.includes('booking_id')) {
+          await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_booking ON disputes (booking_id);`);
+        }
+        if (disputeColNames.includes('raised_by')) {
+          await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_raised_by ON disputes (raised_by);`);
+        }
+        if (disputeColNames.includes('status')) {
+          await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes (status);`);
+        }
+        if (disputeColNames.includes('priority')) {
+          await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_priority ON disputes (priority);`);
+        }
+        if (disputeColNames.includes('assigned_to')) {
+          await client.query(`CREATE INDEX IF NOT EXISTS idx_disputes_assigned ON disputes (assigned_to);`);
+        }
       } catch (e) {
         console.warn('Some dispute indexes could not be created:', e);
       }

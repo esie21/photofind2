@@ -5,9 +5,9 @@ import { ChatInterface } from './ChatInterface';
 import reviewService, { Review, ReviewStats } from '../api/services/reviewService';
 import serviceService from '../api/services/serviceService';
 import { useAuth } from '../context/AuthContext';
+import { getUploadUrl, API_CONFIG } from '../api/config';
 
-const STATIC_URL = 'http://localhost:3001/uploads';
-const API_URL = 'http://localhost:3001/api';
+const API_URL = API_CONFIG.BASE_URL;
 
 interface ProviderProfilePageProps {
   providerId: string;
@@ -124,9 +124,7 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
   };
 
   const getImageUrl = (path: string) => {
-    if (!path) return '';
-    if (path.startsWith('http')) return path;
-    return `${STATIC_URL}/${path}`;
+    return getUploadUrl(path);
   };
 
   const handleBookService = (service?: Service) => {

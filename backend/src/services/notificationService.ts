@@ -7,6 +7,10 @@ export type NotificationType =
   | 'booking_rejected'
   | 'booking_cancelled'
   | 'booking_completed'
+  | 'booking_awaiting_confirmation'
+  | 'booking_confirmed'
+  | 'booking_disputed'
+  | 'dispute_resolved'
   | 'payment_received'
   | 'payment_failed'
   | 'payout_approved'
@@ -160,6 +164,82 @@ class NotificationService {
       title: 'Booking Completed',
       message: `Your booking for "${serviceName}" has been completed`,
       data: { booking_id: bookingId, other_party_id: otherPartyId }
+    });
+  }
+
+  // Notify client that provider has marked service complete and is awaiting confirmation
+  async notifyClientToConfirm(
+    clientId: string | number,
+    providerId: string | number,
+    providerName: string,
+    bookingId: string | number,
+    serviceName: string
+  ) {
+    return this.create({
+      userId: clientId,
+      type: 'booking_awaiting_confirmation',
+      title: 'Please Confirm Service Completion',
+      message: `${providerName} has marked "${serviceName}" as complete. Please confirm or raise a dispute.`,
+      data: { booking_id: bookingId, provider_id: providerId, provider_name: providerName }
+    });
+  }
+
+  // Notify provider that client has confirmed completion
+  async notifyProviderConfirmed(
+    providerId: string | number,
+    clientId: string | number,
+    clientName: string,
+    bookingId: string | number,
+    serviceName: string
+  ) {
+    return this.create({
+      userId: providerId,
+      type: 'booking_confirmed',
+      title: 'Service Completion Confirmed',
+      message: `${clientName} has confirmed completion of "${serviceName}"`,
+      data: { booking_id: bookingId, client_id: clientId, client_name: clientName }
+    });
+  }
+
+  // Notify admin when a dispute is raised
+  async notifyAdminDispute(
+    adminId: string | number,
+    clientId: string | number,
+    clientName: string,
+    providerId: string | number,
+    providerName: string,
+    bookingId: string | number,
+    reason: string
+  ) {
+    return this.create({
+      userId: adminId,
+      type: 'booking_disputed',
+      title: 'New Booking Dispute',
+      message: `${clientName} has disputed a booking with ${providerName}: ${reason.substring(0, 100)}${reason.length > 100 ? '...' : ''}`,
+      data: {
+        booking_id: bookingId,
+        client_id: clientId,
+        client_name: clientName,
+        provider_id: providerId,
+        provider_name: providerName,
+        reason
+      }
+    });
+  }
+
+  // Notify both parties when admin resolves a dispute
+  async notifyDisputeResolved(
+    userId: string | number,
+    bookingId: string | number,
+    resolution: string,
+    resolvedInFavorOf: 'client' | 'provider'
+  ) {
+    return this.create({
+      userId,
+      type: 'dispute_resolved',
+      title: 'Dispute Resolved',
+      message: `Your booking dispute has been resolved: ${resolution}`,
+      data: { booking_id: bookingId, resolution, resolved_in_favor_of: resolvedInFavorOf }
     });
   }
 

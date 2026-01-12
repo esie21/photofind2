@@ -7,6 +7,7 @@ import { EmptyState } from './EmptyState';
 import { ErrorState, InlineError } from './ErrorState';
 import { ReviewForm } from './ReviewForm';
 import { RescheduleModal } from './RescheduleModal';
+import { ConfirmCompletionModal } from './ConfirmCompletionModal';
 import userService from '../api/services/userService';
 import bookingService from '../api/services/bookingService';
 import reviewService from '../api/services/reviewService';
@@ -40,6 +41,8 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
   const [reviewedBookingIds, setReviewedBookingIds] = useState<Set<string>>(new Set());
   const [showRescheduleModal, setShowRescheduleModal] = useState(false);
   const [rescheduleBooking, setRescheduleBooking] = useState<any>(null);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [confirmBookingData, setConfirmBookingData] = useState<any>(null);
 
   const upcomingBookings = myBookings;
 
@@ -93,11 +96,14 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
           id: b.id,
           provider_id: b.provider_user_id || b.provider_id,
           provider: b.provider_name || 'Provider',
-          service: b.service_title || 'Service',
+          service: b.service_title || b.service_name || 'Service',
           date,
           time,
+          start_date: b.start_date,
           status: b.status,
           image: b.provider_image || b.image || '',
+          provider_completed_at: b.provider_completed_at,
+          completion_notes: b.completion_notes,
         };
       });
       setMyBookings(mapped);
@@ -367,6 +373,53 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
 
           {/* Sidebar */}
           <div className="space-y-6">
+            {/* Needs Your Attention - Bookings awaiting confirmation */}
+            {upcomingBookings.filter(b => b.status === 'awaiting_confirmation').length > 0 && (
+              <div className="bg-orange-50 border-2 border-orange-200 rounded-2xl p-6 shadow-sm">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse" />
+                  <h3 className="text-orange-800 font-semibold">Needs Your Confirmation</h3>
+                </div>
+                <div className="space-y-3">
+                  {upcomingBookings
+                    .filter(b => b.status === 'awaiting_confirmation')
+                    .map((booking) => (
+                      <div key={`attention-${booking.id}`} className="p-4 bg-white border border-orange-200 rounded-xl">
+                        <div className="flex gap-3">
+                          <ImageWithFallback
+                            src={booking.image}
+                            alt={booking.provider}
+                            className="w-12 h-12 object-cover rounded-lg"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-gray-900 truncate">{booking.provider}</p>
+                            <p className="text-xs text-gray-600 truncate">{booking.service || 'Service'}</p>
+                            <p className="text-xs text-orange-600 mt-1">Provider marked this service as complete</p>
+                            <button
+                              onClick={() => {
+                                setConfirmBookingData({
+                                  id: String(booking.id),
+                                  service_title: booking.service || 'Service',
+                                  provider_name: booking.provider || 'Provider',
+                                  provider_completed_at: booking.provider_completed_at,
+                                  completion_notes: booking.completion_notes,
+                                  start_date: booking.start_date || booking.date,
+                                });
+                                setShowConfirmModal(true);
+                              }}
+                              className="mt-2 w-full px-3 py-2 bg-orange-600 text-white text-sm rounded-lg hover:bg-orange-700 transition-colors flex items-center justify-center gap-2"
+                            >
+                              <Clock className="w-4 h-4" />
+                              Review & Confirm Completion
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
             {/* Upcoming Bookings */}
             <div className="bg-white rounded-2xl p-6 shadow-sm">
               <div className="flex items-center justify-between mb-4">
@@ -413,7 +466,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                         />
                         <div className="flex-1 min-w-0">
                           <p className="text-sm text-gray-900 truncate">{booking.provider}</p>
-                          <p className="text-xs text-gray-600 truncate">{booking.service}</p>
+                          <p className="text-xs text-gray-600 truncate">{booking.service || 'Service'}</p>
                           <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
                             <Calendar className="w-3 h-3" />
                             <span>{booking.date}</span>
@@ -428,9 +481,13 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                                 ? 'bg-blue-100 text-blue-700'
                                 : booking.status === 'cancelled' || booking.status === 'rejected'
                                 ? 'bg-red-100 text-red-700'
+                                : booking.status === 'awaiting_confirmation'
+                                ? 'bg-orange-100 text-orange-700'
+                                : booking.status === 'disputed'
+                                ? 'bg-red-100 text-red-700'
                                 : 'bg-yellow-100 text-yellow-700'
                             }`}>
-                              {booking.status}
+                              {booking.status === 'awaiting_confirmation' ? 'Awaiting Your Confirmation' : booking.status}
                             </span>
                             <button
                               onClick={() => {
@@ -465,6 +522,31 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                                 <RefreshCw className="w-3 h-3" />
                                 Reschedule
                               </button>
+                            )}
+                            {booking.status === 'awaiting_confirmation' && (
+                              <button
+                                onClick={() => {
+                                  setConfirmBookingData({
+                                    id: String(booking.id),
+                                    service_title: booking.service || 'Service',
+                                    provider_name: booking.provider || 'Provider',
+                                    provider_completed_at: booking.provider_completed_at,
+                                    completion_notes: booking.completion_notes,
+                                    start_date: booking.start_date || booking.date,
+                                  });
+                                  setShowConfirmModal(true);
+                                }}
+                                className="px-2 py-1 text-xs bg-orange-600 text-white hover:bg-orange-700 rounded-lg flex items-center gap-1"
+                              >
+                                <Clock className="w-3 h-3" />
+                                Confirm Completion
+                              </button>
+                            )}
+                            {booking.status === 'disputed' && (
+                              <span className="px-2 py-1 text-xs text-red-600 flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                Under Review
+                              </span>
                             )}
                             {booking.status === 'completed' && !reviewedBookingIds.has(String(booking.id)) && (
                               <button
@@ -543,6 +625,22 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
           onSuccess={() => {
             setShowRescheduleModal(false);
             setRescheduleBooking(null);
+            fetchMyBookings();
+          }}
+        />
+      )}
+
+      {/* Confirm Completion Modal - Client confirms or disputes */}
+      {showConfirmModal && confirmBookingData && (
+        <ConfirmCompletionModal
+          booking={confirmBookingData}
+          onClose={() => {
+            setShowConfirmModal(false);
+            setConfirmBookingData(null);
+          }}
+          onSuccess={() => {
+            setShowConfirmModal(false);
+            setConfirmBookingData(null);
             fetchMyBookings();
           }}
         />

@@ -4,8 +4,38 @@ const API_BASE = import.meta.env.PROD
   ? '/api'
   : (import.meta.env.VITE_API_URL || 'http://localhost:3001/api');
 
+// Direct backend URL for file uploads (bypasses Vercel's 4.5MB body size limit)
+const DIRECT_BACKEND_URL = import.meta.env.PROD
+  ? 'https://photofind2-production.up.railway.app/api'
+  : (import.meta.env.VITE_API_URL || 'http://localhost:3001/api');
+
+// Static files URL (for uploaded images, evidence photos, etc.)
+// Always use direct backend URL to avoid Vercel proxy issues with static files
+const STATIC_BASE_URL = import.meta.env.PROD
+  ? 'https://photofind2-production.up.railway.app/uploads'
+  : 'http://localhost:3001/uploads';
+
+/**
+ * Get the full URL for an uploaded file
+ * Works in both development (localhost) and production (Railway)
+ * @param filePath - The file path stored in database (e.g., "bookings/uuid/filename.png" or just "filename.png")
+ * @returns Full URL to the file
+ */
+export function getUploadUrl(filePath: string | null | undefined): string {
+  if (!filePath) return '';
+  // If already a full URL, return as-is
+  if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
+    return filePath;
+  }
+  // Remove leading slash if present to avoid double slashes
+  const cleanPath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
+  return `${STATIC_BASE_URL}/${cleanPath}`;
+}
+
 export const API_CONFIG = {
   BASE_URL: API_BASE,
+  DIRECT_UPLOAD_URL: DIRECT_BACKEND_URL,
+  STATIC_URL: STATIC_BASE_URL,
   // Endpoints are RELATIVE paths - BASE_URL is prepended by apiClient
   ENDPOINTS: {
     // Auth endpoints
@@ -34,9 +64,15 @@ export const API_CONFIG = {
       CREATE: '/bookings',
       MY: '/bookings/my',
       PROVIDER_MY: '/bookings/provider/my',
+      DISPUTED: '/bookings/disputed',
       GET_BY_ID: (id: string) => `/bookings/${id}`,
       UPDATE: (id: string) => `/bookings/${id}`,
       DELETE: (id: string) => `/bookings/${id}`,
+      COMPLETE: (id: string) => `/bookings/${id}/complete`,
+      CONFIRM: (id: string) => `/bookings/${id}/confirm`,
+      EVIDENCE: (id: string) => `/bookings/${id}/evidence`,
+      RESOLVE_DISPUTE: (id: string) => `/bookings/${id}/resolve-dispute`,
+      RESCHEDULE: (id: string) => `/bookings/${id}/reschedule`,
     },
     AVAILABILITY: {
       PROVIDER_SLOTS: (providerId: string | number) => `/availability/providers/${providerId}/slots`,

@@ -172,8 +172,8 @@ router.get('/can-review/:bookingId', verifyToken, async (req: any, res: Response
     const bookingResult = await pool.query(
       `SELECT b.id, b.client_id, b.provider_id, b.status
        FROM bookings b
-       WHERE b.id = $1`,
-      [bookingId]
+       WHERE b.id::text = $1`,
+      [String(bookingId)]
     );
 
     if (bookingResult.rows.length === 0) {
@@ -182,8 +182,22 @@ router.get('/can-review/:bookingId', verifyToken, async (req: any, res: Response
 
     const booking = bookingResult.rows[0];
 
+    // Get actual client user ID (handle clients table if it exists)
+    let clientUserId = String(booking.client_id);
+    try {
+      const clientCheck = await pool.query(
+        `SELECT user_id FROM clients WHERE id::text = $1`,
+        [String(booking.client_id)]
+      );
+      if (clientCheck.rows[0]?.user_id) {
+        clientUserId = String(clientCheck.rows[0].user_id);
+      }
+    } catch (e) {
+      // clients table doesn't exist or client_id is already a user ID
+    }
+
     // Only the client can review, and only completed bookings
-    if (String(booking.client_id) !== String(userId)) {
+    if (clientUserId !== String(userId)) {
       return res.json({ canReview: false, reason: 'Only the client can leave a review' });
     }
 
@@ -193,8 +207,8 @@ router.get('/can-review/:bookingId', verifyToken, async (req: any, res: Response
 
     // Check if already reviewed
     const existingReview = await pool.query(
-      `SELECT id FROM reviews WHERE booking_id = $1 AND reviewer_id = $2 AND deleted_at IS NULL`,
-      [bookingId, userId]
+      `SELECT id FROM reviews WHERE booking_id::text = $1 AND reviewer_id::text = $2 AND deleted_at IS NULL`,
+      [String(bookingId), String(userId)]
     );
 
     if (existingReview.rows.length > 0) {
@@ -227,8 +241,8 @@ router.post('/', verifyToken, async (req: any, res: Response) => {
     const bookingResult = await pool.query(
       `SELECT b.id, b.client_id, b.provider_id, b.status
        FROM bookings b
-       WHERE b.id = $1`,
-      [booking_id]
+       WHERE b.id::text = $1`,
+      [String(booking_id)]
     );
 
     if (bookingResult.rows.length === 0) {
@@ -237,8 +251,38 @@ router.post('/', verifyToken, async (req: any, res: Response) => {
 
     const booking = bookingResult.rows[0];
 
+    // Get actual user IDs (handle providers/clients tables if they exist)
+    let clientUserId = String(booking.client_id);
+    let providerUserId = String(booking.provider_id);
+
+    // Check if providers table exists and get actual user_id
+    try {
+      const providerCheck = await pool.query(
+        `SELECT user_id FROM providers WHERE id::text = $1`,
+        [String(booking.provider_id)]
+      );
+      if (providerCheck.rows[0]?.user_id) {
+        providerUserId = String(providerCheck.rows[0].user_id);
+      }
+    } catch (e) {
+      // providers table doesn't exist or provider_id is already a user ID
+    }
+
+    // Check if clients table exists and get actual user_id
+    try {
+      const clientCheck = await pool.query(
+        `SELECT user_id FROM clients WHERE id::text = $1`,
+        [String(booking.client_id)]
+      );
+      if (clientCheck.rows[0]?.user_id) {
+        clientUserId = String(clientCheck.rows[0].user_id);
+      }
+    } catch (e) {
+      // clients table doesn't exist or client_id is already a user ID
+    }
+
     // Only the client can review
-    if (String(booking.client_id) !== String(userId)) {
+    if (clientUserId !== String(userId)) {
       return res.status(403).json({ error: 'Only the client can leave a review' });
     }
 
@@ -249,29 +293,29 @@ router.post('/', verifyToken, async (req: any, res: Response) => {
 
     // Check for existing review
     const existingReview = await pool.query(
-      `SELECT id FROM reviews WHERE booking_id = $1 AND reviewer_id = $2 AND deleted_at IS NULL`,
-      [booking_id, userId]
+      `SELECT id FROM reviews WHERE booking_id::text = $1 AND reviewer_id::text = $2 AND deleted_at IS NULL`,
+      [String(booking_id), String(userId)]
     );
 
     if (existingReview.rows.length > 0) {
       return res.status(400).json({ error: 'You have already reviewed this booking' });
     }
 
-    // Create the review
+    // Create the review with the actual provider USER ID (not providers table ID)
     const result = await pool.query(
       `INSERT INTO reviews (booking_id, reviewer_id, reviewee_id, rating, comment, is_visible, moderation_status)
        VALUES ($1, $2, $3, $4, $5, TRUE, 'approved')
        RETURNING id, booking_id, rating, comment, created_at`,
-      [booking_id, userId, booking.provider_id, rating, comment || null]
+      [booking_id, userId, providerUserId, rating, comment || null]
     );
 
-    // Update provider's average rating and review count
+    // Update provider's average rating and review count (use actual user ID)
     await pool.query(
       `UPDATE users
        SET rating = (
          SELECT COALESCE(AVG(rating), 0)
          FROM reviews
-         WHERE reviewee_id = $1
+         WHERE reviewee_id::text = $1
            AND is_visible = TRUE
            AND moderation_status = 'approved'
            AND deleted_at IS NULL
@@ -279,16 +323,16 @@ router.post('/', verifyToken, async (req: any, res: Response) => {
        review_count = (
          SELECT COUNT(*)
          FROM reviews
-         WHERE reviewee_id = $1
+         WHERE reviewee_id::text = $1
            AND is_visible = TRUE
            AND moderation_status = 'approved'
            AND deleted_at IS NULL
        )
-       WHERE id = $1`,
-      [booking.provider_id]
+       WHERE id::text = $1`,
+      [providerUserId]
     );
 
-    console.log('Review created:', result.rows[0]);
+    console.log('Review created:', result.rows[0], 'for provider user:', providerUserId);
     res.status(201).json(result.rows[0]);
   } catch (error: any) {
     console.error('Create review error:', error);

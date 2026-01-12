@@ -2,9 +2,41 @@ import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
-
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
 
 const router = express.Router();
+
+// ==================== MULTER SETUP FOR BOOKING EVIDENCE ====================
+const UPLOADS_ROOT = path.resolve(__dirname, '../../../uploads');
+
+const evidenceStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const bookingId = req.params.id;
+    const uploadPath = path.join(UPLOADS_ROOT, 'bookings', bookingId);
+    fs.mkdirSync(uploadPath, { recursive: true });
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    cb(null, filename);
+  }
+});
+
+const evidenceUpload = multer({
+  storage: evidenceStorage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter: (req, file, cb) => {
+    const allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files (JPEG, PNG, GIF, WEBP) are allowed'));
+    }
+  }
+});
 
 function parseId(v: any): string | null {
   if (!v) return null;
@@ -516,6 +548,49 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
   }
 });
 
+// ==================== GET DISPUTED BOOKINGS (Admin only) ====================
+// NOTE: This route MUST be before /:id routes to avoid "disputed" being treated as an ID
+
+router.get('/disputed', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  const role = (req as any).role;
+  if (role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT b.*,
+              s.title as service_title,
+              u1.name as client_name, u1.email as client_email,
+              u2.name as provider_name, u2.email as provider_email
+       FROM bookings b
+       LEFT JOIN services s ON s.id = b.service_id
+       LEFT JOIN users u1 ON u1.id = b.client_id
+       LEFT JOIN users u2 ON u2.id = b.provider_id
+       WHERE b.dispute_raised = TRUE OR b.status = 'disputed'
+       ORDER BY b.updated_at DESC`
+    );
+
+    // Get evidence for each disputed booking
+    const bookingsWithEvidence = await Promise.all(
+      rows.map(async (booking: any) => {
+        const evidenceRes = await pool.query(
+          `SELECT be.*, u.name as uploaded_by_name
+           FROM booking_evidence be
+           LEFT JOIN users u ON u.id = be.uploaded_by
+           WHERE be.booking_id::text = $1
+           ORDER BY be.uploaded_at ASC`,
+          [String(booking.id)]
+        );
+        return { ...booking, evidence: evidenceRes.rows };
+      })
+    );
+
+    return res.json({ data: bookingsWithEvidence });
+  } catch (error) {
+    console.error('Error fetching disputed bookings:', error);
+    return res.status(500).json({ error: 'Failed to fetch disputed bookings' });
+  }
+});
+
 router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   const currentUserId = req.userId;
   const role = (req as any).role;
@@ -934,17 +1009,32 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
       });
     }
 
-    // Check for conflicts with other bookings
+    // Don't allow rescheduling if dispute is raised
+    if (booking.dispute_raised) {
+      return res.status(400).json({
+        error: 'Cannot reschedule a booking with an active dispute'
+      });
+    }
+
+    // Limit reschedule count to prevent abuse
+    const MAX_RESCHEDULES = 10;
+    if ((booking.reschedule_count || 0) >= MAX_RESCHEDULES) {
+      return res.status(400).json({
+        error: `Maximum reschedule limit (${MAX_RESCHEDULES}) reached`
+      });
+    }
+
+    // Check for conflicts with other bookings (use ::text for type safety)
     const conflictResult = await pool.query(
       `SELECT id FROM bookings
-       WHERE provider_id = $1
+       WHERE provider_id::text = $1
          AND id::text <> $2
          AND status NOT IN ('cancelled', 'rejected')
          AND deleted_at IS NULL
          AND start_date < $3
          AND end_date > $4
        LIMIT 1`,
-      [booking.provider_id, bookingId, newEndDate.toISOString(), newStartDate.toISOString()]
+      [String(booking.provider_id), bookingId, newEndDate.toISOString(), newStartDate.toISOString()]
     );
 
     if (conflictResult.rows[0]) {
@@ -1061,6 +1151,1113 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
   } catch (error) {
     console.error('Error rescheduling booking:', error);
     return res.status(500).json({ error: 'Failed to reschedule booking' });
+  }
+});
+
+// ==================== AUTO-CONFIRM PAST COMPLETIONS (48-hour timeout) ====================
+
+export async function autoConfirmPastCompletions() {
+  try {
+    // Find bookings that need auto-confirmation (don't update yet - use transaction per booking)
+    const pendingResult = await pool.query(
+      `SELECT id, client_id, provider_id, service_id
+       FROM bookings
+       WHERE status = 'awaiting_confirmation'
+         AND provider_completed_at IS NOT NULL
+         AND provider_completed_at < NOW() - INTERVAL '48 hours'
+         AND client_confirmed_at IS NULL`
+    );
+
+    if (pendingResult.rows.length === 0) return;
+
+    // Process each booking in its own transaction for safety
+    for (const booking of pendingResult.rows) {
+      const txClient = await pool.connect();
+      try {
+        await txClient.query('BEGIN');
+
+        // Double-check booking status within transaction (prevent race condition)
+        const checkRes = await txClient.query(
+          `SELECT id FROM bookings
+           WHERE id::text = $1
+             AND status = 'awaiting_confirmation'
+             AND client_confirmed_at IS NULL
+           FOR UPDATE`,
+          [String(booking.id)]
+        );
+
+        if (checkRes.rows.length === 0) {
+          // Already confirmed by client or status changed - skip
+          await txClient.query('ROLLBACK');
+          continue;
+        }
+
+        // Update booking status
+        await txClient.query(
+          `UPDATE bookings
+           SET status = 'completed',
+               client_confirmed_at = CURRENT_TIMESTAMP,
+               completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id::text = $1`,
+          [String(booking.id)]
+        );
+
+        // Resolve provider user ID (handle providers table FK)
+        let providerUserId = String(booking.provider_id);
+        try {
+          const providerCheck = await txClient.query(
+            `SELECT user_id FROM providers WHERE id::text = $1`,
+            [String(booking.provider_id)]
+          );
+          if (providerCheck.rows[0]?.user_id) {
+            providerUserId = String(providerCheck.rows[0].user_id);
+          }
+        } catch (e) {
+          // providers table doesn't exist or provider_id is already a user ID
+        }
+
+        // Resolve client user ID (handle clients table FK)
+        let clientUserId = String(booking.client_id);
+        try {
+          const clientCheck = await txClient.query(
+            `SELECT user_id FROM clients WHERE id::text = $1`,
+            [String(booking.client_id)]
+          );
+          if (clientCheck.rows[0]?.user_id) {
+            clientUserId = String(clientCheck.rows[0].user_id);
+          }
+        } catch (e) {
+          // clients table doesn't exist or client_id is already a user ID
+        }
+
+        // Get names for notifications
+        const serviceInfo = await txClient.query('SELECT title FROM services WHERE id::text = $1', [String(booking.service_id)]);
+        const serviceName = serviceInfo.rows[0]?.title || 'service';
+        const clientInfo = await txClient.query('SELECT name FROM users WHERE id::text = $1', [clientUserId]);
+        const clientName = clientInfo.rows[0]?.name || 'Client';
+
+        // ==================== RELEASE PAYMENT TO PROVIDER ====================
+        let paymentReleased = false;
+        let releasedAmount = 0;
+
+        // Get payment record for this booking
+        const paymentRes = await txClient.query(
+          `SELECT id, net_provider_amount, status FROM payments WHERE booking_id::text = $1`,
+          [String(booking.id)]
+        );
+        const payment = paymentRes.rows[0];
+
+        if (payment && payment.status === 'succeeded') {
+          const amount = parseFloat(payment.net_provider_amount);
+
+          // Get provider's wallet using resolved user ID with FOR UPDATE lock to prevent race conditions
+          const walletRes = await txClient.query(
+            `SELECT id, pending_balance, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
+            [providerUserId]
+          );
+          let wallet = walletRes.rows[0];
+
+          // Create wallet if it doesn't exist
+          if (!wallet) {
+            const newWalletRes = await txClient.query(
+              `INSERT INTO wallets (provider_id, available_balance, pending_balance)
+               VALUES ($1, 0, 0)
+               RETURNING id, pending_balance, available_balance`,
+              [providerUserId]
+            );
+            wallet = newWalletRes.rows[0];
+          }
+
+          // Move funds from pending to available balance
+          const currentPending = parseFloat(wallet.pending_balance) || 0;
+          const currentAvailable = parseFloat(wallet.available_balance) || 0;
+          const newPending = Math.max(0, currentPending - amount);
+          const newAvailable = currentAvailable + amount;
+
+          await txClient.query(
+            `UPDATE wallets
+             SET pending_balance = $1,
+                 available_balance = $2,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id::text = $3`,
+            [newPending, newAvailable, String(wallet.id)]
+          );
+
+          // Create transaction record
+          await txClient.query(
+            `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
+             VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
+            [
+              String(wallet.id),
+              String(payment.id),
+              amount,
+              newAvailable,
+              `booking_${booking.id}_auto_confirmed`,
+              `Payment auto-released for booking #${booking.id} (48-hour timeout)`
+            ]
+          );
+
+          paymentReleased = true;
+          releasedAmount = amount;
+          console.log(`Auto-released payment of ${amount} to provider ${providerUserId} for booking ${booking.id}`);
+        }
+
+        // Warn if auto-confirmed but payment wasn't released
+        if (!paymentReleased) {
+          console.warn(`WARNING: Booking ${booking.id} auto-confirmed but payment not released. Provider ${providerUserId} may not have received payment.`);
+        }
+
+        await txClient.query('COMMIT');
+
+        // Send notifications AFTER commit (outside transaction)
+        try {
+          await notificationService.notifyBookingCompleted(
+            clientUserId,
+            providerUserId,
+            String(booking.id),
+            serviceName
+          );
+          await notificationService.notifyBookingCompleted(
+            providerUserId,
+            clientUserId,
+            String(booking.id),
+            serviceName
+          );
+
+          if (paymentReleased) {
+            await notificationService.notifyPaymentReceived(
+              providerUserId,
+              clientUserId,
+              releasedAmount,
+              clientName,
+              String(booking.id)
+            );
+          }
+        } catch (notifError) {
+          console.error('Failed to send auto-confirm notifications (non-fatal):', notifError);
+        }
+
+      } catch (bookingError) {
+        await txClient.query('ROLLBACK');
+        console.error(`Failed to auto-confirm booking ${booking.id}:`, bookingError);
+      } finally {
+        txClient.release();
+      }
+    }
+
+    console.log(`Auto-confirmed ${pendingResult.rows.length} bookings after 48-hour timeout`);
+  } catch (e) {
+    console.log('autoConfirmPastCompletions error (non-fatal):', e);
+  }
+}
+
+// ==================== AUTO-RESOLVE STALE DISPUTES ====================
+// Disputes that remain unresolved for 7 days are auto-resolved in favor of the provider
+const DISPUTE_TIMEOUT_DAYS = 7;
+
+export async function autoResolveStaleDisputes() {
+  try {
+    // Find disputes that have been open for more than 7 days
+    const staleDisputes = await pool.query(
+      `SELECT id, client_id, provider_id, service_id, dispute_reason
+       FROM bookings
+       WHERE (status = 'disputed' OR dispute_raised = TRUE)
+         AND updated_at < NOW() - INTERVAL '${DISPUTE_TIMEOUT_DAYS} days'`
+    );
+
+    if (staleDisputes.rows.length === 0) return;
+
+    console.log(`Found ${staleDisputes.rows.length} stale disputes to auto-resolve`);
+
+    for (const booking of staleDisputes.rows) {
+      const txClient = await pool.connect();
+      try {
+        await txClient.query('BEGIN');
+
+        // Lock the booking row
+        const checkRes = await txClient.query(
+          `SELECT id FROM bookings
+           WHERE id::text = $1
+             AND (status = 'disputed' OR dispute_raised = TRUE)
+           FOR UPDATE`,
+          [String(booking.id)]
+        );
+
+        if (checkRes.rows.length === 0) {
+          await txClient.query('ROLLBACK');
+          continue;
+        }
+
+        // Resolve provider user ID
+        let providerUserId = String(booking.provider_id);
+        try {
+          const providerCheck = await txClient.query(
+            `SELECT user_id FROM providers WHERE id::text = $1`,
+            [String(booking.provider_id)]
+          );
+          if (providerCheck.rows[0]?.user_id) {
+            providerUserId = String(providerCheck.rows[0].user_id);
+          }
+        } catch (e) { /* providers table doesn't exist */ }
+
+        // Resolve client user ID
+        let clientUserId = String(booking.client_id);
+        try {
+          const clientCheck = await txClient.query(
+            `SELECT user_id FROM clients WHERE id::text = $1`,
+            [String(booking.client_id)]
+          );
+          if (clientCheck.rows[0]?.user_id) {
+            clientUserId = String(clientCheck.rows[0].user_id);
+          }
+        } catch (e) { /* clients table doesn't exist */ }
+
+        // Update booking - auto-resolve in favor of provider
+        await txClient.query(
+          `UPDATE bookings
+           SET status = 'completed',
+               dispute_raised = FALSE,
+               dispute_reason = NULL,
+               completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id::text = $1`,
+          [String(booking.id)]
+        );
+
+        // Release payment to provider
+        let paymentReleased = false;
+        let releasedAmount = 0;
+
+        const paymentRes = await txClient.query(
+          `SELECT id, net_provider_amount, status FROM payments WHERE booking_id::text = $1`,
+          [String(booking.id)]
+        );
+        const payment = paymentRes.rows[0];
+
+        if (payment && payment.status === 'succeeded') {
+          const amount = parseFloat(payment.net_provider_amount);
+
+          const walletRes = await txClient.query(
+            `SELECT id, pending_balance, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
+            [providerUserId]
+          );
+          let wallet = walletRes.rows[0];
+
+          if (!wallet) {
+            const newWalletRes = await txClient.query(
+              `INSERT INTO wallets (provider_id, available_balance, pending_balance)
+               VALUES ($1, 0, 0)
+               RETURNING id, pending_balance, available_balance`,
+              [providerUserId]
+            );
+            wallet = newWalletRes.rows[0];
+          }
+
+          const currentPending = parseFloat(wallet.pending_balance) || 0;
+          const currentAvailable = parseFloat(wallet.available_balance) || 0;
+          const newPending = Math.max(0, currentPending - amount);
+          const newAvailable = currentAvailable + amount;
+
+          await txClient.query(
+            `UPDATE wallets SET pending_balance = $1, available_balance = $2, updated_at = CURRENT_TIMESTAMP WHERE id::text = $3`,
+            [newPending, newAvailable, String(wallet.id)]
+          );
+
+          await txClient.query(
+            `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
+             VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
+            [String(wallet.id), String(payment.id), amount, newAvailable, `dispute_auto_resolved_${booking.id}`, `Payment auto-released after dispute timeout (${DISPUTE_TIMEOUT_DAYS} days)`]
+          );
+
+          paymentReleased = true;
+          releasedAmount = amount;
+        }
+
+        await txClient.query('COMMIT');
+
+        // Send notifications
+        try {
+          const resolution = `Dispute auto-resolved in favor of provider after ${DISPUTE_TIMEOUT_DAYS} days without admin action.`;
+          await notificationService.notifyDisputeResolved(clientUserId, String(booking.id), resolution, 'provider');
+          await notificationService.notifyDisputeResolved(providerUserId, String(booking.id), resolution, 'provider');
+
+          if (paymentReleased) {
+            await notificationService.notifyPaymentReceived(
+              providerUserId,
+              clientUserId,
+              releasedAmount,
+              'Client',
+              String(booking.id)
+            );
+          }
+        } catch (notifError) {
+          console.error('Failed to send auto-resolve dispute notifications:', notifError);
+        }
+
+        console.log(`Auto-resolved dispute for booking ${booking.id} in favor of provider. Payment released: ${paymentReleased}`);
+
+      } catch (bookingError) {
+        await txClient.query('ROLLBACK');
+        console.error(`Failed to auto-resolve dispute for booking ${booking.id}:`, bookingError);
+      } finally {
+        txClient.release();
+      }
+    }
+
+    console.log(`Auto-resolved ${staleDisputes.rows.length} stale disputes`);
+  } catch (e) {
+    console.log('autoResolveStaleDisputes error (non-fatal):', e);
+  }
+}
+
+// ==================== PROVIDER COMPLETE WITH EVIDENCE ====================
+
+router.post('/:id/complete', verifyToken, evidenceUpload.array('evidence', 10), async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = req.userId;
+  const bookingId = String(req.params.id || '');
+  const { notes, evidence_types } = req.body;
+  const files = req.files as Express.Multer.File[];
+
+  if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
+  if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
+
+  // Require at least 1 evidence photo
+  if (!files || files.length === 0) {
+    return res.status(400).json({ error: 'At least 1 evidence photo is required' });
+  }
+
+  try {
+    // Get booking
+    const bookingRes = await pool.query(
+      `SELECT b.*, s.title as service_title
+       FROM bookings b
+       LEFT JOIN services s ON s.id = b.service_id
+       WHERE b.id::text = $1`,
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    // Check if user is the provider - handle both direct user_id and providers table FK
+    let providerUserId = String(booking.provider_id);
+    try {
+      // Check if providers table exists and get actual user_id
+      const providerCheck = await pool.query(
+        `SELECT user_id FROM providers WHERE id::text = $1`,
+        [String(booking.provider_id)]
+      );
+      if (providerCheck.rows[0]?.user_id) {
+        providerUserId = String(providerCheck.rows[0].user_id);
+      }
+    } catch (e) {
+      // providers table doesn't exist or provider_id is already a user ID - that's fine
+    }
+
+    const isProvider = providerUserId === String(currentUserId);
+    if (!isProvider) {
+      return res.status(403).json({ error: 'Only the provider can complete this booking' });
+    }
+
+    // Check booking status
+    if (!['accepted', 'confirmed'].includes(booking.status)) {
+      return res.status(400).json({ error: `Cannot complete a ${booking.status} booking` });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Parse evidence types (can be JSON array or comma-separated)
+      let types: string[] = [];
+      if (evidence_types) {
+        try {
+          types = JSON.parse(evidence_types);
+        } catch {
+          types = String(evidence_types).split(',').map(t => t.trim());
+        }
+      }
+
+      // Insert evidence records
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const evidenceType = types[i] || 'after';
+        const fileUrl = `bookings/${bookingId}/${file.filename}`;
+
+        await client.query(
+          `INSERT INTO booking_evidence (booking_id, uploaded_by, evidence_type, file_url)
+           VALUES ($1, $2, $3, $4)`,
+          [bookingId, currentUserId, evidenceType, fileUrl]
+        );
+      }
+
+      // Update booking status to awaiting_confirmation
+      await client.query(
+        `UPDATE bookings
+         SET status = 'awaiting_confirmation',
+             provider_completed_at = CURRENT_TIMESTAMP,
+             completion_notes = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $2`,
+        [notes || null, bookingId]
+      );
+
+      await client.query('COMMIT');
+
+      // Get client info for notification - handle both direct user_id and clients table FK
+      let clientUserId = String(booking.client_id);
+      let clientName = 'Client';
+      try {
+        // First check if clients table exists and get actual user_id
+        const clientCheck = await pool.query(
+          `SELECT user_id FROM clients WHERE id::text = $1`,
+          [String(booking.client_id)]
+        );
+        if (clientCheck.rows[0]?.user_id) {
+          clientUserId = String(clientCheck.rows[0].user_id);
+        }
+      } catch (e) {
+        // clients table doesn't exist or client_id is already a user ID - that's fine
+      }
+
+      // Now get user details
+      const clientInfo = await pool.query('SELECT id, name FROM users WHERE id::text = $1', [clientUserId]);
+      const providerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [currentUserId]);
+      if (clientInfo.rows[0]) {
+        clientUserId = String(clientInfo.rows[0].id);
+        clientName = clientInfo.rows[0].name || 'Client';
+      }
+      const providerName = providerInfo.rows[0]?.name || 'Provider';
+      const serviceName = booking.service_title || 'service';
+
+      // Notify client to confirm
+      if (clientUserId && clientInfo.rows[0]) {
+        await notificationService.notifyClientToConfirm(
+          String(clientUserId),
+          currentUserId,
+          providerName,
+          bookingId,
+          serviceName
+        );
+      }
+
+      // Send system message in chat
+      try {
+        const chatId = await ensureBookingChatExists(bookingId, String(booking.client_id), String(booking.provider_id));
+        if (chatId) {
+          await pool.query(
+            `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+             VALUES ($1, NULL, $2, TRUE)`,
+            [chatId, `${providerName} has marked this service as complete. Please review the evidence and confirm completion.`]
+          );
+          await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+          const io = (req.app as any).get('io');
+          if (io) {
+            io.to(`booking:${bookingId}`).emit('booking:awaiting_confirmation', { bookingId });
+          }
+        }
+      } catch (chatError) {
+        console.error('Failed to send completion chat message:', chatError);
+      }
+
+      // Fetch updated booking
+      const updatedRes = await pool.query('SELECT * FROM bookings WHERE id::text = $1', [bookingId]);
+
+      return res.json({
+        data: updatedRes.rows[0],
+        message: 'Service marked as complete. Awaiting client confirmation.'
+      });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      // Clean up uploaded files on error
+      for (const file of files) {
+        try {
+          fs.unlinkSync(file.path);
+        } catch {}
+      }
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (error: any) {
+    console.error('Error completing booking:', error);
+    if (error.message?.includes('Only image files')) {
+      return res.status(400).json({ error: error.message });
+    }
+    return res.status(500).json({ error: 'Failed to complete booking' });
+  }
+});
+
+// ==================== CLIENT CONFIRM OR DISPUTE COMPLETION ====================
+
+router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = req.userId;
+  const bookingId = String(req.params.id || '');
+  const { confirmed, dispute_reason } = req.body;
+
+  if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
+  if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
+  if (typeof confirmed !== 'boolean') {
+    return res.status(400).json({ error: 'confirmed field is required (true/false)' });
+  }
+
+  try {
+    // Get booking
+    const bookingRes = await pool.query(
+      `SELECT b.*, s.title as service_title
+       FROM bookings b
+       LEFT JOIN services s ON s.id = b.service_id
+       WHERE b.id::text = $1`,
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    // Resolve client user ID (handle clients table FK)
+    let clientUserId = String(booking.client_id);
+    try {
+      const clientCheck = await pool.query(
+        `SELECT user_id FROM clients WHERE id::text = $1`,
+        [String(booking.client_id)]
+      );
+      if (clientCheck.rows[0]?.user_id) {
+        clientUserId = String(clientCheck.rows[0].user_id);
+      }
+    } catch (e) {
+      // clients table doesn't exist or client_id is already a user ID
+    }
+
+    // Resolve provider user ID (handle providers table FK)
+    let providerUserId = String(booking.provider_id);
+    try {
+      const providerCheck = await pool.query(
+        `SELECT user_id FROM providers WHERE id::text = $1`,
+        [String(booking.provider_id)]
+      );
+      if (providerCheck.rows[0]?.user_id) {
+        providerUserId = String(providerCheck.rows[0].user_id);
+      }
+    } catch (e) {
+      // providers table doesn't exist or provider_id is already a user ID
+    }
+
+    // Check if user is the client
+    const isClient = clientUserId === String(currentUserId);
+    if (!isClient) {
+      return res.status(403).json({ error: 'Only the client can confirm this booking' });
+    }
+
+    // Check booking status
+    if (booking.status !== 'awaiting_confirmation') {
+      return res.status(400).json({ error: 'Booking is not awaiting confirmation' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      if (confirmed) {
+        // Client confirms completion
+        await client.query(
+          `UPDATE bookings
+           SET status = 'completed',
+               client_confirmed_at = CURRENT_TIMESTAMP,
+               completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id::text = $1`,
+          [bookingId]
+        );
+
+        // ==================== RELEASE PAYMENT TO PROVIDER ====================
+        let paymentReleased = false;
+        let releasedAmount = 0;
+
+        // Get payment record for this booking
+        const paymentRes = await client.query(
+          `SELECT id, net_provider_amount, status FROM payments WHERE booking_id::text = $1`,
+          [bookingId]
+        );
+        const payment = paymentRes.rows[0];
+
+        if (payment && payment.status === 'succeeded') {
+          const amount = parseFloat(payment.net_provider_amount);
+
+          // Get provider's wallet using resolved provider user ID with FOR UPDATE lock
+          const walletRes = await client.query(
+            `SELECT id, pending_balance, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
+            [providerUserId]
+          );
+          let wallet = walletRes.rows[0];
+
+          // Create wallet if it doesn't exist
+          if (!wallet) {
+            const newWalletRes = await client.query(
+              `INSERT INTO wallets (provider_id, available_balance, pending_balance)
+               VALUES ($1, 0, 0)
+               RETURNING id, pending_balance, available_balance`,
+              [providerUserId]
+            );
+            wallet = newWalletRes.rows[0];
+          }
+
+          // Move funds from pending to available balance
+          const currentPending = parseFloat(wallet.pending_balance) || 0;
+          const currentAvailable = parseFloat(wallet.available_balance) || 0;
+          const newPending = Math.max(0, currentPending - amount);
+          const newAvailable = currentAvailable + amount;
+
+          await client.query(
+            `UPDATE wallets
+             SET pending_balance = $1,
+                 available_balance = $2,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id::text = $3`,
+            [newPending, newAvailable, String(wallet.id)]
+          );
+
+          // Create transaction record
+          await client.query(
+            `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
+             VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
+            [
+              String(wallet.id),
+              String(payment.id),
+              amount,
+              newAvailable,
+              `booking_${bookingId}_completed`,
+              `Payment released for completed booking #${bookingId}`
+            ]
+          );
+
+          paymentReleased = true;
+          releasedAmount = amount;
+          console.log(`Payment of ${amount} released to provider ${providerUserId} for booking ${bookingId}`);
+        } else if (!payment) {
+          // No payment record - log warning but allow completion (could be free service or test)
+          console.warn(`No payment record found for booking ${bookingId} - completing without payment release`);
+        }
+
+        await client.query('COMMIT');
+
+        // Get user names for notifications (already have providerUserId resolved above)
+        const providerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]);
+        const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [currentUserId]);
+        const providerName = providerInfo.rows[0]?.name || 'Provider';
+        const clientName = clientInfo.rows[0]?.name || 'Client';
+        const serviceName = booking.service_title || 'service';
+
+        // Notify provider
+        await notificationService.notifyProviderConfirmed(
+          providerUserId,
+          currentUserId,
+          clientName,
+          bookingId,
+          serviceName
+        );
+
+        // Notify provider about payment release
+        if (paymentReleased) {
+          await notificationService.notifyPaymentReceived(
+            providerUserId,
+            currentUserId,
+            releasedAmount,
+            clientName,
+            bookingId
+          );
+        }
+
+        // Also send completed notification to both parties
+        await notificationService.notifyBookingCompleted(
+          currentUserId,
+          providerUserId,
+          bookingId,
+          serviceName
+        );
+
+        // Send system message in chat
+        try {
+          const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+          if (chatId) {
+            const chatMessage = paymentReleased
+              ? `Service completion confirmed. Booking is now complete. Payment of ₱${releasedAmount.toFixed(2)} has been released to provider.`
+              : 'Service completion confirmed. Booking is now complete.';
+
+            await pool.query(
+              `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+               VALUES ($1, NULL, $2, TRUE)`,
+              [chatId, chatMessage]
+            );
+            await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+            const io = (req.app as any).get('io');
+            if (io) {
+              io.to(`booking:${bookingId}`).emit('booking:completed', { bookingId, paymentReleased, releasedAmount });
+            }
+          }
+        } catch (chatError) {
+          console.error('Failed to send confirmation chat message:', chatError);
+        }
+
+        const updatedRes = await pool.query('SELECT * FROM bookings WHERE id::text = $1', [bookingId]);
+        return res.json({
+          data: updatedRes.rows[0],
+          message: paymentReleased
+            ? `Service completion confirmed. Payment of ₱${releasedAmount.toFixed(2)} released to provider.`
+            : 'Service completion confirmed successfully'
+        });
+
+      } else {
+        // Client disputes completion
+        if (!dispute_reason || String(dispute_reason).trim().length < 10) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Please provide a detailed dispute reason (at least 10 characters)' });
+        }
+
+        await client.query(
+          `UPDATE bookings
+           SET status = 'disputed',
+               dispute_raised = TRUE,
+               dispute_reason = $1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id::text = $2`,
+          [dispute_reason.trim(), bookingId]
+        );
+
+        await client.query('COMMIT');
+
+        // Get user info for notifications (we already have providerUserId and clientUserId resolved)
+        const disputeClientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [currentUserId]);
+        const disputeProviderInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]);
+        const disputeClientName = disputeClientInfo.rows[0]?.name || 'Client';
+        const disputeProviderName = disputeProviderInfo.rows[0]?.name || 'Provider';
+
+        // Notify all admins
+        const adminsRes = await pool.query("SELECT id FROM users WHERE role = 'admin' AND deleted_at IS NULL");
+        for (const admin of adminsRes.rows) {
+          await notificationService.notifyAdminDispute(
+            String(admin.id),
+            currentUserId,
+            disputeClientName,
+            providerUserId,
+            disputeProviderName,
+            bookingId,
+            dispute_reason.trim()
+          );
+        }
+
+        // Also notify provider
+        await notificationService.create({
+          userId: providerUserId,
+          type: 'booking_disputed',
+          title: 'Booking Disputed',
+          message: `${disputeClientName} has raised a dispute: ${dispute_reason.substring(0, 100)}${dispute_reason.length > 100 ? '...' : ''}`,
+          data: { booking_id: bookingId, reason: dispute_reason }
+        });
+
+        // Send system message in chat
+        try {
+          const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+          if (chatId) {
+            await pool.query(
+              `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+               VALUES ($1, NULL, $2, TRUE)`,
+              [chatId, `A dispute has been raised. An admin will review this booking.`]
+            );
+            await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+            const io = (req.app as any).get('io');
+            if (io) {
+              io.to(`booking:${bookingId}`).emit('booking:disputed', { bookingId });
+            }
+          }
+        } catch (chatError) {
+          console.error('Failed to send dispute chat message:', chatError);
+        }
+
+        const updatedRes = await pool.query('SELECT * FROM bookings WHERE id::text = $1', [bookingId]);
+        return res.json({
+          data: updatedRes.rows[0],
+          message: 'Dispute has been raised and admin has been notified'
+        });
+      }
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Error confirming booking:', error);
+    return res.status(500).json({ error: 'Failed to process confirmation' });
+  }
+});
+
+// ==================== GET BOOKING EVIDENCE ====================
+
+router.get('/:id/evidence', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = req.userId;
+  const bookingId = String(req.params.id || '');
+  const role = (req as any).role;
+
+  if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
+  if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
+
+  try {
+    // Get booking to verify access
+    const bookingRes = await pool.query(
+      'SELECT client_id, provider_id FROM bookings WHERE id::text = $1',
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    // Check access (client, provider, or admin)
+    const isParticipant =
+      String(booking.client_id) === String(currentUserId) ||
+      String(booking.provider_id) === String(currentUserId);
+
+    if (role !== 'admin' && !isParticipant) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Get evidence
+    const evidenceRes = await pool.query(
+      `SELECT be.*, u.name as uploaded_by_name
+       FROM booking_evidence be
+       LEFT JOIN users u ON u.id = be.uploaded_by
+       WHERE be.booking_id::text = $1
+       ORDER BY be.uploaded_at ASC`,
+      [bookingId]
+    );
+
+    return res.json({ data: evidenceRes.rows });
+  } catch (error) {
+    console.error('Error fetching evidence:', error);
+    return res.status(500).json({ error: 'Failed to fetch evidence' });
+  }
+});
+
+// ==================== ADMIN RESOLVE DISPUTE ====================
+
+router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = req.userId;
+  const bookingId = String(req.params.id || '');
+  const role = (req as any).role;
+  const { resolution, resolved_in_favor_of } = req.body;
+
+  if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
+  if (role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
+  if (!resolution) return res.status(400).json({ error: 'Resolution is required' });
+  if (!['client', 'provider'].includes(resolved_in_favor_of)) {
+    return res.status(400).json({ error: 'resolved_in_favor_of must be "client" or "provider"' });
+  }
+
+  try {
+    // Get booking
+    const bookingRes = await pool.query(
+      `SELECT b.*, s.title as service_title
+       FROM bookings b
+       LEFT JOIN services s ON s.id = b.service_id
+       WHERE b.id::text = $1`,
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    if (booking.status !== 'disputed' && !booking.dispute_raised) {
+      return res.status(400).json({ error: 'This booking is not disputed' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Resolve actual user IDs from providers/clients tables if they exist
+      let clientUserId = String(booking.client_id);
+      let providerUserId = String(booking.provider_id);
+
+      // Check if providers table exists and resolve provider user ID
+      const providersTableCheck = await client.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables
+          WHERE table_name = 'providers'
+        ) as exists
+      `);
+      if (providersTableCheck.rows[0]?.exists) {
+        const providerRes = await client.query(
+          `SELECT user_id FROM providers WHERE id::text = $1`,
+          [String(booking.provider_id)]
+        );
+        if (providerRes.rows[0]?.user_id) {
+          providerUserId = String(providerRes.rows[0].user_id);
+        }
+      }
+
+      // Check if clients table exists and resolve client user ID
+      const clientsTableCheck = await client.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables
+          WHERE table_name = 'clients'
+        ) as exists
+      `);
+      if (clientsTableCheck.rows[0]?.exists) {
+        const clientRes = await client.query(
+          `SELECT user_id FROM clients WHERE id::text = $1`,
+          [String(booking.client_id)]
+        );
+        if (clientRes.rows[0]?.user_id) {
+          clientUserId = String(clientRes.rows[0].user_id);
+        }
+      }
+
+      // Determine final status based on resolution
+      const finalStatus = resolved_in_favor_of === 'provider' ? 'completed' : 'cancelled';
+
+      await client.query(
+        `UPDATE bookings
+         SET status = $1,
+             dispute_raised = FALSE,
+             dispute_reason = NULL,
+             completed_at = CASE WHEN $1 = 'completed' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE completed_at END,
+             cancelled_at = CASE WHEN $1 = 'cancelled' THEN CURRENT_TIMESTAMP ELSE cancelled_at END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $2`,
+        [finalStatus, bookingId]
+      );
+
+      // If resolved in favor of provider, release payment
+      let paymentReleased = false;
+      let releasedAmount = 0;
+      if (resolved_in_favor_of === 'provider') {
+        try {
+          const paymentRes = await client.query(
+            `SELECT id, net_provider_amount, status FROM payments WHERE booking_id::text = $1`,
+            [bookingId]
+          );
+          const payment = paymentRes.rows[0];
+
+          if (payment && payment.status === 'succeeded') {
+            const amount = parseFloat(payment.net_provider_amount);
+
+            // Get provider's wallet
+            const walletRes = await client.query(
+              `SELECT id, pending_balance, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
+              [providerUserId]
+            );
+            let wallet = walletRes.rows[0];
+
+            if (!wallet) {
+              const newWalletRes = await client.query(
+                `INSERT INTO wallets (provider_id, available_balance, pending_balance)
+                 VALUES ($1, 0, 0)
+                 RETURNING id, pending_balance, available_balance`,
+                [providerUserId]
+              );
+              wallet = newWalletRes.rows[0];
+            }
+
+            // Move funds from pending to available
+            const currentPending = parseFloat(wallet.pending_balance) || 0;
+            const currentAvailable = parseFloat(wallet.available_balance) || 0;
+            const newPending = Math.max(0, currentPending - amount);
+            const newAvailable = currentAvailable + amount;
+
+            await client.query(
+              `UPDATE wallets SET pending_balance = $1, available_balance = $2, updated_at = CURRENT_TIMESTAMP WHERE id::text = $3`,
+              [newPending, newAvailable, String(wallet.id)]
+            );
+
+            await client.query(
+              `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
+               VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
+              [String(wallet.id), String(payment.id), amount, newAvailable, `dispute_resolved_${bookingId}`, `Payment released after dispute resolved in provider's favor`]
+            );
+
+            paymentReleased = true;
+            releasedAmount = amount;
+            console.log(`Dispute resolved: Payment of ${amount} released to provider ${providerUserId} for booking ${bookingId}`);
+          }
+        } catch (paymentError) {
+          console.error('Failed to release payment during dispute resolution:', paymentError);
+        }
+      }
+
+      await client.query('COMMIT');
+
+      // Notify both parties with resolved user IDs
+      await notificationService.notifyDisputeResolved(
+        clientUserId,
+        bookingId,
+        resolution,
+        resolved_in_favor_of
+      );
+      await notificationService.notifyDisputeResolved(
+        providerUserId,
+        bookingId,
+        resolution,
+        resolved_in_favor_of
+      );
+
+      // Notify provider about payment if released
+      if (paymentReleased) {
+        await notificationService.notifyPaymentReceived(
+          providerUserId,
+          clientUserId,
+          releasedAmount,
+          'Client',
+          bookingId
+        );
+      }
+
+      // Send system message in chat using resolved user IDs
+      try {
+        const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+        if (chatId) {
+          const favorText = resolved_in_favor_of === 'client' ? 'the client' : 'the provider';
+          let chatMessage = `Dispute has been resolved in favor of ${favorText}. Resolution: ${resolution}`;
+          if (paymentReleased) {
+            chatMessage += ` Payment of ₱${releasedAmount.toFixed(2)} has been released to the provider.`;
+          }
+          await pool.query(
+            `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+             VALUES ($1, NULL, $2, TRUE)`,
+            [chatId, chatMessage]
+          );
+          await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+          const io = (req.app as any).get('io');
+          if (io) {
+            io.to(`booking:${bookingId}`).emit('booking:dispute_resolved', {
+              bookingId,
+              resolved_in_favor_of,
+              final_status: finalStatus,
+              paymentReleased,
+              releasedAmount
+            });
+          }
+        }
+      } catch (chatError) {
+        console.error('Failed to send dispute resolution chat message:', chatError);
+      }
+
+      const updatedRes = await pool.query('SELECT * FROM bookings WHERE id::text = $1', [bookingId]);
+      return res.json({
+        data: updatedRes.rows[0],
+        message: paymentReleased
+          ? `Dispute resolved in favor of ${resolved_in_favor_of}. Payment of ₱${releasedAmount.toFixed(2)} released.`
+          : `Dispute resolved in favor of ${resolved_in_favor_of}`
+      });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Error resolving dispute:', error);
+    return res.status(500).json({ error: 'Failed to resolve dispute' });
   }
 });
 

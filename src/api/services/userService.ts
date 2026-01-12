@@ -37,7 +37,28 @@ const userService = {
     const fd = new FormData();
     fd.append('profile', file);
     try {
-      const resp = await apiClient.postForm<User>(API_CONFIG.ENDPOINTS.USERS.UPLOAD_PROFILE(id), fd);
+      // Use direct backend URL for file uploads (bypasses Vercel proxy limits)
+      const directUrl = `${API_CONFIG.DIRECT_UPLOAD_URL}${API_CONFIG.ENDPOINTS.USERS.UPLOAD_PROFILE(id)}`;
+      const token = localStorage.getItem('authToken');
+      const response = await fetch(directUrl, {
+        method: 'POST',
+        body: fd,
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        let errorText = `API Error: ${response.status} ${response.statusText}`;
+        try {
+          const errJson = await response.json();
+          if (errJson?.error) errorText = errJson.error;
+        } catch (e) {}
+        throw new Error(errorText);
+      }
+
+      const resp = await response.json();
       console.log('uploadProfileImage response', resp);
       return resp;
     } catch (err) {
@@ -50,7 +71,28 @@ const userService = {
     const fd = new FormData();
     files.forEach((f) => fd.append('images', f));
     try {
-      const resp = await apiClient.postForm<User>(API_CONFIG.ENDPOINTS.USERS.UPLOAD_PORTFOLIO(id), fd);
+      // Use direct backend URL for file uploads (bypasses Vercel proxy limits)
+      const directUrl = `${API_CONFIG.DIRECT_UPLOAD_URL}${API_CONFIG.ENDPOINTS.USERS.UPLOAD_PORTFOLIO(id)}`;
+      const token = localStorage.getItem('authToken');
+      const response = await fetch(directUrl, {
+        method: 'POST',
+        body: fd,
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        let errorText = `API Error: ${response.status} ${response.statusText}`;
+        try {
+          const errJson = await response.json();
+          if (errJson?.error) errorText = errJson.error;
+        } catch (e) {}
+        throw new Error(errorText);
+      }
+
+      const resp = await response.json();
       console.log('uploadPortfolioImages response', resp);
       return resp;
     } catch (err) {
