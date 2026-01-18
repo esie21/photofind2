@@ -59,12 +59,14 @@ export interface RescheduleBookingData {
 }
 
 export interface CreateBookingData {
-  provider_id: number;
-  service_id: number;
+  provider_id: string | number;
+  service_id: string | number;
   start_date: string;
   end_date?: string;
   total_price: number;
   booking_mode?: 'instant' | 'request';
+  slot_ids?: string[];
+  duration_minutes?: number;
 }
 
 const bookingService = {
@@ -205,11 +207,16 @@ const bookingService = {
   async resolveDispute(
     id: string,
     resolution: string,
-    resolvedInFavorOf: 'client' | 'provider'
-  ): Promise<{ data: Booking; message: string }> {
-    return apiClient.put<{ data: Booking; message: string }>(
+    resolvedInFavorOf: 'client' | 'provider',
+    refundPercentage?: number
+  ): Promise<{ data: Booking; message: string; details?: { released_to_provider: number; refunded_to_client: number; refund_percentage: number } }> {
+    return apiClient.put<{ data: Booking; message: string; details?: { released_to_provider: number; refunded_to_client: number; refund_percentage: number } }>(
       API_CONFIG.ENDPOINTS.BOOKINGS.RESOLVE_DISPUTE(id),
-      { resolution, resolved_in_favor_of: resolvedInFavorOf }
+      {
+        resolution,
+        resolved_in_favor_of: resolvedInFavorOf,
+        refund_percentage: refundPercentage
+      }
     );
   },
 };

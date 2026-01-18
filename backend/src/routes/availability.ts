@@ -5,7 +5,7 @@ import { verifyToken } from '../middleware/auth';
 const router = express.Router();
 
 // Constants
-const DEFAULT_SLOT_DURATION = 60; // minutes
+const DEFAULT_SLOT_DURATION = 30; // minutes - 30 min slots for flexible booking
 const DEFAULT_BUFFER_MINUTES = 0;
 const HOLD_DURATION_MINUTES = 10;
 const SLOT_GENERATION_DAYS = 60; // Generate slots 60 days ahead
@@ -301,6 +301,7 @@ router.get('/providers/:providerId/timeslots', async (req: Request, res: Respons
     if (!dateStr) return res.status(400).json({ error: 'Missing date (YYYY-MM-DD)' });
 
     const providerUserId = await getProviderUserId(providerId);
+    console.log(`[Timeslots] Fetching for provider ${providerId} (userId: ${providerUserId}), date: ${dateStr}`);
 
     // Ensure slots are generated
     await generateSlotsForProvider(providerUserId, SLOT_GENERATION_DAYS);
@@ -308,17 +309,48 @@ router.get('/providers/:providerId/timeslots', async (req: Request, res: Respons
     // Release expired holds
     await releaseExpiredHolds();
 
-    // Get available slots only
+    // Get available AND held slots (so users can see what's temporarily unavailable)
+    // Booked slots are excluded - they're permanently taken
     const result = await pool.query(
-      `SELECT id, start_datetime, end_datetime, status
+      `SELECT id, start_datetime, end_datetime, status, held_by, hold_expires_at
        FROM time_slots
        WHERE provider_id::text = $1
          AND DATE(start_datetime) = $2::date
-         AND status = 'available'
+         AND status IN ('available', 'held')
          AND start_datetime > NOW()
        ORDER BY start_datetime`,
       [providerUserId, dateStr]
     );
+
+    console.log(`[Timeslots] Found ${result.rows.length} slots for ${dateStr}`);
+
+    // Debug: If no slots, check what's in the database
+    if (result.rows.length === 0) {
+      const debugResult = await pool.query(
+        `SELECT COUNT(*) as total,
+                COUNT(*) FILTER (WHERE status = 'available') as available,
+                COUNT(*) FILTER (WHERE status = 'held') as held,
+                COUNT(*) FILTER (WHERE status = 'booked') as booked,
+                MIN(start_datetime) as first_slot,
+                MAX(start_datetime) as last_slot
+         FROM time_slots
+         WHERE provider_id::text = $1`,
+        [providerUserId]
+      );
+      console.log(`[Timeslots] Debug - Total slots in DB for provider:`, debugResult.rows[0]);
+
+      // Check if date filter is the issue
+      const dateDebug = await pool.query(
+        `SELECT COUNT(*) as count, DATE(start_datetime) as slot_date
+         FROM time_slots
+         WHERE provider_id::text = $1
+         GROUP BY DATE(start_datetime)
+         ORDER BY slot_date
+         LIMIT 5`,
+        [providerUserId]
+      );
+      console.log(`[Timeslots] Debug - Slots by date:`, dateDebug.rows);
+    }
 
     return res.json({
       data: {
@@ -328,7 +360,9 @@ router.get('/providers/:providerId/timeslots', async (req: Request, res: Respons
           id: s.id,
           start: s.start_datetime,
           end: s.end_datetime,
-          status: s.status
+          status: s.status,
+          is_held: s.status === 'held',
+          hold_expires_at: s.hold_expires_at
         }))
       }
     });
@@ -653,26 +687,45 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
       [providerId]
     );
 
-    if (rulesRes.rows.length === 0) {
-      // No rules defined - create default rules (Mon-Fri 9am-5pm)
-      const defaultDays = [1, 2, 3, 4, 5]; // Monday to Friday
+    // Check if existing rules are outdated (not 24/7) or missing
+    const hasOldRules = rulesRes.rows.length === 0 || rulesRes.rows.some(r =>
+      r.start_time !== '00:00:00' || r.end_time !== '23:30:00' || r.slot_duration !== 30
+    );
+
+    if (hasOldRules) {
+      console.log(`[Availability] Updating/creating 24/7 rules for provider ${providerId}`);
+
+      // Delete old rules and old slots for this provider
+      await client.query(
+        `DELETE FROM availability_rules WHERE provider_id::text = $1`,
+        [providerId]
+      );
+
+      // Delete old available slots (keep booked ones)
+      await client.query(
+        `DELETE FROM time_slots WHERE provider_id::text = $1 AND status = 'available'`,
+        [providerId]
+      );
+
+      // Create new 24/7 rules for all days
+      const defaultDays = [0, 1, 2, 3, 4, 5, 6]; // Sunday to Saturday
       for (const day of defaultDays) {
         await client.query(
           `INSERT INTO availability_rules
            (provider_id, day_of_week, start_time, end_time, slot_duration, buffer_minutes, is_active)
-           VALUES ($1, $2, '09:00', '17:00', 60, 0, TRUE)
-           ON CONFLICT DO NOTHING`,
+           VALUES ($1, $2, '00:00', '23:30', 30, 0, TRUE)`,
           [providerId, day]
         );
       }
 
-      // Re-fetch rules
+      // Re-fetch new rules
       const newRulesRes = await client.query(
         `SELECT * FROM availability_rules
          WHERE provider_id::text = $1 AND is_active = TRUE`,
         [providerId]
       );
       rulesRes.rows = newRulesRes.rows;
+      console.log(`[Availability] Created ${rulesRes.rows.length} rules (24/7) for provider ${providerId}`);
     }
 
     // Get overrides
@@ -739,6 +792,7 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
       }
 
       // Generate slots for this day's rules
+      let slotsCreatedForDay = 0;
       for (const rule of dayRules) {
         const startTimeParts = rule.start_time.split(':');
         const endTimeParts = rule.end_time.split(':');
@@ -758,16 +812,28 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
 
           // Only create if not in the past and doesn't exist
           if (slotStart.getTime() > Date.now()) {
-            await client.query(
-              `INSERT INTO time_slots (provider_id, start_datetime, end_datetime, status)
-               VALUES ($1, $2, $3, 'available')
-               ON CONFLICT ON CONSTRAINT unique_provider_slot DO NOTHING`,
-              [providerId, slotStart.toISOString(), slotEnd.toISOString()]
-            );
+            try {
+              const insertResult = await client.query(
+                `INSERT INTO time_slots (provider_id, start_datetime, end_datetime, status)
+                 VALUES ($1, $2, $3, 'available')
+                 ON CONFLICT DO NOTHING
+                 RETURNING id`,
+                [providerId, slotStart.toISOString(), slotEnd.toISOString()]
+              );
+              if (insertResult.rowCount && insertResult.rowCount > 0) {
+                slotsCreatedForDay++;
+              }
+            } catch (insertErr) {
+              // Log but continue - slot might already exist
+              console.error(`[Availability] Failed to insert slot:`, insertErr);
+            }
           }
 
           slotStart.setMinutes(slotStart.getMinutes() + stepMinutes);
         }
+      }
+      if (slotsCreatedForDay > 0) {
+        console.log(`[Availability] Created ${slotsCreatedForDay} slots for ${dateStr}`);
       }
 
       currentDate.setDate(currentDate.getDate() + 1);
@@ -777,18 +843,90 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
   }
 }
 
-async function regenerateSlotsForDate(providerId: string, date: string) {
-  // Delete existing available slots for the date
-  await pool.query(
-    `DELETE FROM time_slots
-     WHERE provider_id::text = $1
-       AND DATE(start_datetime) = $2::date
-       AND status = 'available'`,
-    [providerId, date]
-  );
+async function regenerateSlotsForDate(providerId: string, dateStr: string) {
+  const client = await pool.connect();
+  try {
+    // Delete existing available slots for the date
+    await client.query(
+      `DELETE FROM time_slots
+       WHERE provider_id::text = $1
+         AND DATE(start_datetime) = $2::date
+         AND status = 'available'`,
+      [providerId, dateStr]
+    );
 
-  // Regenerate
-  await generateSlotsForProvider(providerId, 1);
+    // Parse the target date
+    const targetDate = new Date(dateStr);
+    targetDate.setHours(0, 0, 0, 0);
+    const dayOfWeek = targetDate.getDay();
+
+    // Get provider's rules for this day of week
+    const rulesRes = await client.query(
+      `SELECT * FROM availability_rules
+       WHERE provider_id::text = $1 AND is_active = TRUE AND day_of_week = $2`,
+      [providerId, dayOfWeek]
+    );
+
+    // Check for override on this date
+    const overrideRes = await client.query(
+      `SELECT * FROM availability_overrides
+       WHERE provider_id::text = $1 AND override_date = $2::date`,
+      [providerId, dateStr]
+    );
+    const override = overrideRes.rows[0];
+
+    // If day is blocked by override, don't generate slots
+    if (override && !override.is_available) {
+      return;
+    }
+
+    // Determine rules to use
+    let rulesToUse = rulesRes.rows;
+
+    // If override has custom times, use those instead
+    if (override && override.is_available && override.start_time && override.end_time) {
+      rulesToUse = [{
+        start_time: override.start_time,
+        end_time: override.end_time,
+        slot_duration: DEFAULT_SLOT_DURATION,
+        buffer_minutes: DEFAULT_BUFFER_MINUTES
+      }];
+    }
+
+    // Generate slots for this specific date
+    for (const rule of rulesToUse) {
+      const startTimeParts = rule.start_time.split(':');
+      const endTimeParts = rule.end_time.split(':');
+
+      const slotStart = new Date(targetDate);
+      slotStart.setHours(parseInt(startTimeParts[0]), parseInt(startTimeParts[1]), 0, 0);
+
+      const dayEnd = new Date(targetDate);
+      dayEnd.setHours(parseInt(endTimeParts[0]), parseInt(endTimeParts[1]), 0, 0);
+
+      const slotDuration = rule.slot_duration || DEFAULT_SLOT_DURATION;
+      const bufferMinutes = rule.buffer_minutes || DEFAULT_BUFFER_MINUTES;
+      const stepMinutes = slotDuration + bufferMinutes;
+
+      while (slotStart.getTime() + slotDuration * 60 * 1000 <= dayEnd.getTime()) {
+        const slotEnd = new Date(slotStart.getTime() + slotDuration * 60 * 1000);
+
+        // Only create if not in the past
+        if (slotStart.getTime() > Date.now()) {
+          await client.query(
+            `INSERT INTO time_slots (provider_id, start_datetime, end_datetime, status)
+             VALUES ($1, $2, $3, 'available')
+             ON CONFLICT ON CONSTRAINT unique_provider_slot DO NOTHING`,
+            [providerId, slotStart.toISOString(), slotEnd.toISOString()]
+          );
+        }
+
+        slotStart.setMinutes(slotStart.getMinutes() + stepMinutes);
+      }
+    }
+  } finally {
+    client.release();
+  }
 }
 
 async function releaseExpiredHolds() {

@@ -123,6 +123,8 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS description TEXT;`);
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+    // pricing_type: 'package' (fixed price) or 'hourly' (price per hour)
+    await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS pricing_type VARCHAR(20) DEFAULT 'package';`);
 
     // Create bookings table (only if not exists)
     const bookingsExist = await client.query(`SELECT to_regclass('public.bookings') as exists`);
@@ -188,6 +190,11 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS completion_notes TEXT;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_raised BOOLEAN DEFAULT FALSE;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_reason TEXT;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_raised_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_resolution TEXT;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_resolved_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_resolved_by ${refType};`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS confirmation_warning_sent_at TIMESTAMP;`);
 
     // Update status column size and CHECK constraint to include new statuses
     try {
@@ -660,6 +667,7 @@ export async function initializeTables() {
     }
 
     // Add missing columns to payouts table
+    await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS wallet_id ${refType};`);
     await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS payout_method VARCHAR(50);`);
     await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS payout_details JSONB;`);
     await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS rejection_reason TEXT;`);
@@ -669,6 +677,27 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;`);
     await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
     await client.query(`ALTER TABLE payouts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+
+    // Fix payouts foreign key - should reference users table, not providers table
+    try {
+      // Drop incorrect foreign key if it exists (references providers table)
+      await client.query(`ALTER TABLE payouts DROP CONSTRAINT IF EXISTS payouts_provider_id_fkey;`);
+      // Add correct foreign key to users table
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE constraint_name = 'payouts_provider_id_users_fkey' AND table_name = 'payouts'
+          ) THEN
+            ALTER TABLE payouts ADD CONSTRAINT payouts_provider_id_users_fkey
+              FOREIGN KEY (provider_id) REFERENCES users(id) ON DELETE CASCADE;
+          END IF;
+        END $$;
+      `);
+    } catch (fkError) {
+      console.log('Payouts FK fix (non-fatal):', fkError);
+    }
 
     // Add foreign key for payout_id in transactions after payouts table exists (only if not exists)
     const fkExists = await client.query(`
@@ -707,7 +736,7 @@ export async function initializeTables() {
             day_of_week INTEGER NOT NULL CHECK (day_of_week >= 0 AND day_of_week <= 6),
             start_time TIME NOT NULL,
             end_time TIME NOT NULL,
-            slot_duration INTEGER NOT NULL DEFAULT 60,
+            slot_duration INTEGER NOT NULL DEFAULT 30,
             buffer_minutes INTEGER NOT NULL DEFAULT 0,
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -723,7 +752,7 @@ export async function initializeTables() {
             day_of_week INTEGER NOT NULL CHECK (day_of_week >= 0 AND day_of_week <= 6),
             start_time TIME NOT NULL,
             end_time TIME NOT NULL,
-            slot_duration INTEGER NOT NULL DEFAULT 60,
+            slot_duration INTEGER NOT NULL DEFAULT 30,
             buffer_minutes INTEGER NOT NULL DEFAULT 0,
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -860,6 +889,38 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP;`);
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;`);
+
+    // ==================== PASSWORD RESET TOKENS TABLE ====================
+    const passwordResetTokensExist = await client.query(`SELECT to_regclass('public.password_reset_tokens') as exists`);
+    if (!passwordResetTokensExist.rows[0].exists) {
+      if (usesUUID) {
+        await client.query(`
+          CREATE TABLE password_reset_tokens (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash VARCHAR(255) NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            used_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      } else {
+        await client.query(`
+          CREATE TABLE password_reset_tokens (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash VARCHAR(255) NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            used_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      }
+      // Create index for faster token lookups
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_password_reset_token_hash ON password_reset_tokens(token_hash);`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_password_reset_user_id ON password_reset_tokens(user_id);`);
+      console.log('Password reset tokens table created');
+    }
 
     // ==================== REVIEWS TABLE ====================
     const reviewsExist = await client.query(`SELECT to_regclass('public.reviews') as exists`);

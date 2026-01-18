@@ -7,10 +7,13 @@ export interface Service {
   provider_id: string;
   title: string;
   description: string;
-  price: number;
+  price: number;  // Legacy field - kept for backward compatibility
   category: string;
   images: string[];
-  duration_minutes?: number;
+  pricing_type?: 'package' | 'hourly' | 'both';  // 'both' when both pricing options available
+  hourly_rate?: number;      // Hourly rate (optional)
+  package_price?: number;    // Package price (optional)
+  duration_minutes?: number;  // Package duration in minutes
   createdAt: string;
   updatedAt: string;
 }
@@ -18,9 +21,13 @@ export interface Service {
 export interface CreateServiceData {
   title: string;
   description: string;
-  price: number;
+  price?: number;  // Legacy - kept for backward compatibility
   category: string;
   images?: string[];
+  pricing_type?: 'package' | 'hourly' | 'both';
+  hourly_rate?: number;
+  package_price?: number;
+  duration_minutes?: number;
 }
 
 const serviceService = {

@@ -11,6 +11,7 @@ export type NotificationType =
   | 'booking_confirmed'
   | 'booking_disputed'
   | 'dispute_resolved'
+  | 'confirmation_warning'
   | 'payment_received'
   | 'payment_failed'
   | 'payout_approved'

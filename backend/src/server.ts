@@ -9,7 +9,7 @@ import adminRoutes from './routes/admin';
 import debugRoutes from './routes/debug';
 import usersRoutes from './routes/users';
 import providersRoutes from './routes/providers';
-import bookingsRoutes, { autoConfirmPastCompletions, autoResolveStaleDisputes } from './routes/bookings';
+import bookingsRoutes, { autoConfirmPastCompletions, autoResolveStaleDisputes, sendConfirmationWarnings } from './routes/bookings';
 import availabilityRoutes from './routes/availability';
 import servicesRoutes from './routes/services';
 import messagesRoutes from './routes/messages';
@@ -352,6 +352,10 @@ async function startServer() {
     await autoResolveStaleDisputes();
     console.log('Initial dispute auto-resolve check complete.');
 
+    // Run confirmation warning check once on startup
+    await sendConfirmationWarnings();
+    console.log('Initial confirmation warning check complete.');
+
     // Schedule auto-confirm check every 10 minutes (600000ms)
     setInterval(async () => {
       try {
@@ -361,6 +365,16 @@ async function startServer() {
       }
     }, 10 * 60 * 1000);
     console.log('Auto-confirm scheduler started (every 10 minutes).');
+
+    // Schedule confirmation warning check every 30 minutes
+    setInterval(async () => {
+      try {
+        await sendConfirmationWarnings();
+      } catch (err) {
+        console.error('Confirmation warning interval error:', err);
+      }
+    }, 30 * 60 * 1000);
+    console.log('Confirmation warning scheduler started (every 30 minutes).');
 
     // Schedule dispute auto-resolve check every hour (3600000ms)
     setInterval(async () => {

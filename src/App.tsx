@@ -3,6 +3,8 @@ import { Header } from './components/Header';
 import { useAuth } from './context/AuthContext';
 import { LandingPage } from './components/LandingPage';
 import { AuthModal } from './components/AuthModal';
+import { ForgotPasswordModal } from './components/ForgotPasswordModal';
+import { ResetPasswordPage } from './components/ResetPasswordPage';
 import { ClientDashboard } from './components/ClientDashboard';
 import { ProviderDashboard } from './components/ProviderDashboard';
 import { ProviderProfilePage } from './components/ProviderProfilePage';
@@ -20,21 +22,49 @@ interface ChatContext {
 }
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile'>('landing');
-    const { user } = useAuth();
+  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'reset-password'>('landing');
+  const { user } = useAuth();
   const [bookingContext, setBookingContext] = useState<{ providerId?: string; providerName?: string; providerImage?: string; serviceId?: string } | null>(null);
   const [dashboardKey, setDashboardKey] = useState(0);
   const [chatContext, setChatContext] = useState<ChatContext | null>(null);
   const [viewingProviderId, setViewingProviderId] = useState<string | null>(null);
 
-    useEffect(() => {
-      if (user) {
-        setCurrentView(user.role === 'provider' ? 'provider' : 'client');
-      } else {
-        setCurrentView('landing');
+  // Check for reset-password route on mount
+  useEffect(() => {
+    const path = window.location.pathname;
+    if (path === '/reset-password') {
+      setCurrentView('reset-password');
+      return;
+    }
+
+    if (user) {
+      setCurrentView(user.role === 'provider' ? 'provider' : 'client');
+    } else {
+      setCurrentView('landing');
+    }
+  }, [user]);
+
+  // Handle browser back/forward
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname;
+      if (path === '/reset-password') {
+        setCurrentView('reset-password');
+      } else if (path === '/') {
+        if (user) {
+          setCurrentView(user.role === 'provider' ? 'provider' : 'client');
+        } else {
+          setCurrentView('landing');
+        }
       }
-    }, [user]);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [user]);
+
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showForgotPasswordModal, setShowForgotPasswordModal] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
 
   const handleViewChange = (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile') => {
@@ -215,6 +245,7 @@ export default function App() {
       />
       
       <main>
+        {currentView === 'reset-password' && <ResetPasswordPage />}
         {currentView === 'landing' && <LandingPage onViewChange={handleViewChange} />}
         {currentView === 'client' && <ClientDashboard
           key={dashboardKey}
@@ -279,6 +310,21 @@ export default function App() {
           onSuccess={(role) => {
             setShowAuthModal(false);
             setCurrentView(role === 'provider' ? 'provider' : 'client');
+          }}
+          onForgotPassword={() => {
+            setShowAuthModal(false);
+            setShowForgotPasswordModal(true);
+          }}
+        />
+      )}
+
+      {showForgotPasswordModal && (
+        <ForgotPasswordModal
+          onClose={() => setShowForgotPasswordModal(false)}
+          onBackToLogin={() => {
+            setShowForgotPasswordModal(false);
+            setAuthMode('login');
+            setShowAuthModal(true);
           }}
         />
       )}

@@ -4,5 +4,22 @@
       "source": "/api/:path*",
       "destination": "https://photofind2-production.up.railway.app/api/:path*"
     }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "https://photofind2-production.up.railway.app/api/$1"
+    },
+    {
+      "src": "/reset-password",
+      "dest": "/index.html"
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
   ]
 }

@@ -227,14 +227,30 @@ export function AvailabilityCalendar({
                 const selected = isSelected(day);
                 const dayData = getDayData(day);
 
+                const getTooltip = () => {
+                  switch (status) {
+                    case 'past': return 'This date has passed';
+                    case 'blocked':
+                      const override = getOverride(day);
+                      return override?.reason ? `Unavailable: ${override.reason}` : 'Provider marked as unavailable';
+                    case 'booked': return 'All time slots are booked';
+                    case 'partial':
+                      return dayData ? `${dayData.available_count} of ${dayData.total_count} slots available` : 'Some slots available';
+                    case 'available':
+                      return dayData ? `${dayData.available_count} slots available` : 'Available for booking';
+                    default: return 'Check availability';
+                  }
+                };
+
                 return (
                   <button
                     key={day}
                     onClick={() => handleDateClick(day)}
                     disabled={!selectable}
+                    title={getTooltip()}
                     className={`
                       aspect-square rounded-lg flex flex-col items-center justify-center
-                      text-sm font-medium transition-all relative
+                      text-sm font-medium transition-all relative group
                       ${selected ? 'ring-2 ring-purple-600 bg-purple-100 text-purple-700' : getStatusColor(status)}
                       ${selectable ? 'cursor-pointer' : 'cursor-not-allowed'}
                     `}
@@ -255,19 +271,19 @@ export function AvailabilityCalendar({
 
       {/* Legend */}
       <div className="px-4 pb-4 flex flex-wrap gap-3 text-xs">
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5" title="All time slots are open for booking">
           <div className="w-3 h-3 rounded bg-green-100 border border-green-300" />
           <span className="text-gray-600">Available</span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5" title="Some slots are taken, but openings remain">
           <div className="w-3 h-3 rounded bg-yellow-100 border border-yellow-300" />
           <span className="text-gray-600">Partial</span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5" title="All time slots are already booked">
           <div className="w-3 h-3 rounded bg-red-100 border border-red-300" />
-          <span className="text-gray-600">Booked</span>
+          <span className="text-gray-600">Fully Booked</span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5" title="Provider has marked this day as unavailable">
           <div className="w-3 h-3 rounded bg-gray-200 border border-gray-300" />
           <span className="text-gray-600">Unavailable</span>
         </div>

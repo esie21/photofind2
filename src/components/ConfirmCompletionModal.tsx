@@ -87,20 +87,42 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
     });
   };
 
-  const getTimeRemaining = () => {
+  const getTimeRemaining = (): { text: string; urgency: 'normal' | 'warning' | 'critical' } | null => {
     if (!booking.provider_completed_at) return null;
     const completedAt = new Date(booking.provider_completed_at);
     const deadline = new Date(completedAt.getTime() + 48 * 60 * 60 * 1000);
     const now = new Date();
     const remaining = deadline.getTime() - now.getTime();
 
-    if (remaining <= 0) return 'Auto-confirming soon...';
+    if (remaining <= 0) return { text: 'Auto-confirming very soon...', urgency: 'critical' };
 
     const hours = Math.floor(remaining / (1000 * 60 * 60));
     const minutes = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
 
-    return `${hours}h ${minutes}m remaining to respond`;
+    // Determine urgency level
+    let urgency: 'normal' | 'warning' | 'critical' = 'normal';
+    if (hours < 6) {
+      urgency = 'critical';
+    } else if (hours < 12) {
+      urgency = 'warning';
+    }
+
+    // Format text based on time remaining
+    let text: string;
+    if (hours === 0) {
+      text = `Only ${minutes} minutes left to respond!`;
+    } else if (hours < 6) {
+      text = `Only ${hours}h ${minutes}m left - respond now!`;
+    } else if (hours < 24) {
+      text = `${hours}h ${minutes}m remaining to respond`;
+    } else {
+      text = `${hours}h ${minutes}m remaining`;
+    }
+
+    return { text, urgency };
   };
+
+  const timeInfo = getTimeRemaining();
 
   const getEvidenceUrl = (fileUrl: string) => {
     // Use centralized URL utility that works in both dev and production
@@ -134,11 +156,17 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
               <p className="text-sm text-gray-500">{formatDate(booking.start_date)}</p>
             </div>
 
-            {/* Time Remaining */}
-            {booking.provider_completed_at && (
-              <div className="flex items-center gap-2 text-sm text-amber-700 bg-amber-50 rounded-xl p-3">
-                <Clock className="w-4 h-4" />
-                <span>{getTimeRemaining()}</span>
+            {/* Time Remaining with Urgency Indicators */}
+            {timeInfo && (
+              <div className={`flex items-center gap-2 text-sm rounded-xl p-3 ${
+                timeInfo.urgency === 'critical'
+                  ? 'text-red-700 bg-red-50 animate-pulse'
+                  : timeInfo.urgency === 'warning'
+                    ? 'text-orange-700 bg-orange-50'
+                    : 'text-amber-700 bg-amber-50'
+              }`}>
+                <Clock className={`w-4 h-4 ${timeInfo.urgency === 'critical' ? 'animate-bounce' : ''}`} />
+                <span className="font-medium">{timeInfo.text}</span>
               </div>
             )}
 

@@ -16,7 +16,9 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
   const [showResolveModal, setShowResolveModal] = useState(false);
   const [resolution, setResolution] = useState('');
   const [resolvedInFavorOf, setResolvedInFavorOf] = useState<'client' | 'provider'>('provider');
+  const [refundPercentage, setRefundPercentage] = useState(100);
   const [resolving, setResolving] = useState(false);
+  const [resolutionResult, setResolutionResult] = useState<{ message: string; details?: any } | null>(null);
 
   useEffect(() => {
     loadDisputes();
@@ -40,15 +42,24 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
 
     setResolving(true);
     try {
-      await bookingService.resolveDispute(
+      // Use refund percentage for client resolution, 0 for provider resolution
+      const effectiveRefundPct = resolvedInFavorOf === 'client' ? refundPercentage : 0;
+      const result = await bookingService.resolveDispute(
         selectedDispute.id,
         resolution.trim(),
-        resolvedInFavorOf
+        resolvedInFavorOf,
+        effectiveRefundPct
       );
+      // Show success result
+      setResolutionResult({
+        message: result.message,
+        details: result.details
+      });
       await loadDisputes();
       setShowResolveModal(false);
       setSelectedDispute(null);
       setResolution('');
+      setRefundPercentage(100);
       onRefresh?.();
     } catch (err: any) {
       alert(err?.message || 'Failed to resolve dispute');
@@ -408,6 +419,7 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 onClick={() => {
                   setShowResolveModal(false);
                   setResolution('');
+                  setRefundPercentage(100);
                 }}
                 className="p-2 hover:bg-gray-100 rounded-full"
               >
@@ -415,16 +427,50 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
               </button>
             </div>
 
-            <div className="mb-4 p-3 bg-gray-50 rounded-xl">
-              <p className="text-sm text-gray-600">
-                Resolving in favor of: <span className="font-semibold capitalize">{resolvedInFavorOf}</span>
+            {/* Clear outcome explanation */}
+            <div className={`mb-4 p-3 rounded-xl ${resolvedInFavorOf === 'provider' ? 'bg-green-50' : 'bg-blue-50'}`}>
+              <p className={`text-sm font-medium ${resolvedInFavorOf === 'provider' ? 'text-green-800' : 'text-blue-800'}`}>
+                Resolving in favor of: <span className="capitalize">{resolvedInFavorOf}</span>
               </p>
-              <p className="text-xs text-gray-500 mt-1">
-                {resolvedInFavorOf === 'provider'
-                  ? 'Booking will be marked as completed.'
-                  : 'Booking will be cancelled.'}
-              </p>
+              <ul className={`text-xs mt-2 space-y-1 ${resolvedInFavorOf === 'provider' ? 'text-green-700' : 'text-blue-700'}`}>
+                {resolvedInFavorOf === 'provider' ? (
+                  <>
+                    <li>• Booking will be marked as completed</li>
+                    <li>• Full payment will be released to provider</li>
+                    <li>• Client will not receive any refund</li>
+                  </>
+                ) : (
+                  <>
+                    <li>• Booking will be cancelled</li>
+                    <li>• Client will receive {refundPercentage}% refund</li>
+                    <li>• Provider will receive {100 - refundPercentage}% of payment</li>
+                  </>
+                )}
+              </ul>
             </div>
+
+            {/* Partial Refund Slider (only for client resolution) */}
+            {resolvedInFavorOf === 'client' && (
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Refund Amount: {refundPercentage}%
+                </label>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="5"
+                  value={refundPercentage}
+                  onChange={(e) => setRefundPercentage(Number(e.target.value))}
+                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>0% (No refund)</span>
+                  <span>50% (Split)</span>
+                  <span>100% (Full refund)</span>
+                </div>
+              </div>
+            )}
 
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -437,6 +483,7 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 rows={4}
                 className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none"
               />
+              <p className="text-xs text-gray-500 mt-1">Minimum 10 characters required</p>
             </div>
 
             <div className="flex gap-3">
@@ -444,6 +491,7 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 onClick={() => {
                   setShowResolveModal(false);
                   setResolution('');
+                  setRefundPercentage(100);
                 }}
                 disabled={resolving}
                 className="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-xl hover:bg-gray-50 disabled:opacity-50"
@@ -452,7 +500,7 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
               </button>
               <button
                 onClick={handleResolve}
-                disabled={resolving || !resolution.trim()}
+                disabled={resolving || resolution.trim().length < 10}
                 className={`flex-1 px-4 py-2.5 text-white rounded-xl disabled:opacity-50 flex items-center justify-center gap-2 ${
                   resolvedInFavorOf === 'provider'
                     ? 'bg-green-600 hover:bg-green-700'
@@ -469,6 +517,39 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 )}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Resolution Success Modal */}
+      {resolutionResult && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm p-6 text-center">
+            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <CheckCircle className="w-8 h-8 text-green-600" />
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Dispute Resolved</h3>
+            <p className="text-gray-600 mb-4">{resolutionResult.message}</p>
+            {resolutionResult.details && (
+              <div className="bg-gray-50 rounded-xl p-3 text-sm text-left mb-4">
+                {resolutionResult.details.released_to_provider > 0 && (
+                  <p className="text-green-700">
+                    Released to provider: <span className="font-medium">₱{resolutionResult.details.released_to_provider.toFixed(2)}</span>
+                  </p>
+                )}
+                {resolutionResult.details.refunded_to_client > 0 && (
+                  <p className="text-blue-700">
+                    Refunded to client: <span className="font-medium">₱{resolutionResult.details.refunded_to_client.toFixed(2)}</span>
+                  </p>
+                )}
+              </div>
+            )}
+            <button
+              onClick={() => setResolutionResult(null)}
+              className="w-full px-4 py-2.5 bg-purple-600 text-white rounded-xl hover:bg-purple-700"
+            >
+              Done
+            </button>
           </div>
         </div>
       )}

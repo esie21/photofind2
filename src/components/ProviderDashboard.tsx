@@ -169,22 +169,29 @@ useEffect(() => {
             description: s.description || '',
             price: parseFloat(s.price) || 0,
             category: s.category || '',
+            // Support both new and legacy pricing fields
+            hourly_rate: s.hourly_rate || (s.pricing_type === 'hourly' ? parseFloat(s.price) : null),
+            package_price: s.package_price || (s.pricing_type === 'package' ? parseFloat(s.price) : null),
+            duration_minutes: s.duration_minutes || null,
+            // Enable flags for UI
+            enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly'),
+            enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
           })));
         } else {
           // Initialize with default packages if none exist
           setPackages([
-            { id: null, title: 'Basic Package', description: 'Description of package features and benefits...', price: 1200, category: 'Photography' },
-            { id: null, title: 'Standard Package', description: 'Description of package features and benefits...', price: 2400, category: 'Photography' },
-            { id: null, title: 'Premium Package', description: 'Description of package features and benefits...', price: 3600, category: 'Photography' },
+            { id: null, title: 'Basic Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 300, package_price: 1200, duration_minutes: 240, enable_hourly: true, enable_package: true },
+            { id: null, title: 'Standard Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 400, package_price: 2400, duration_minutes: 480, enable_hourly: true, enable_package: true },
+            { id: null, title: 'Premium Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 500, package_price: 3600, duration_minutes: 720, enable_hourly: true, enable_package: true },
           ]);
         }
       } catch (error) {
         console.error('Failed to load packages:', error);
         // Initialize with default packages on error
         setPackages([
-          { id: null, title: 'Basic Package', description: 'Description of package features and benefits...', price: 1200, category: 'Photography' },
-          { id: null, title: 'Standard Package', description: 'Description of package features and benefits...', price: 2400, category: 'Photography' },
-          { id: null, title: 'Premium Package', description: 'Description of package features and benefits...', price: 3600, category: 'Photography' },
+          { id: null, title: 'Basic Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 300, package_price: 1200, duration_minutes: 240, enable_hourly: true, enable_package: true },
+          { id: null, title: 'Standard Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 400, package_price: 2400, duration_minutes: 480, enable_hourly: true, enable_package: true },
+          { id: null, title: 'Premium Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 500, package_price: 3600, duration_minutes: 720, enable_hourly: true, enable_package: true },
         ]);
       } finally {
         setIsLoadingPackages(false);
@@ -213,6 +220,13 @@ useEffect(() => {
               description: s.description || '',
               price: parseFloat(s.price) || 0,
               category: s.category || '',
+              // Support both new and legacy pricing fields
+              hourly_rate: s.hourly_rate || (s.pricing_type === 'hourly' ? parseFloat(s.price) : null),
+              package_price: s.package_price || (s.pricing_type === 'package' ? parseFloat(s.price) : null),
+              duration_minutes: s.duration_minutes || null,
+              // Enable flags for UI
+              enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly'),
+              enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
             })));
           }
         } catch (error) {
@@ -770,27 +784,36 @@ useEffect(() => {
                             try {
                               await Promise.all(
                                 packages.map(async (pkg) => {
+                                  // Determine pricing type based on enabled options
+                                  const pricingType = pkg.enable_hourly && pkg.enable_package ? 'both'
+                                    : pkg.enable_hourly ? 'hourly'
+                                    : 'package';
+
+                                  // Use package_price as primary price for backward compatibility
+                                  const primaryPrice = pkg.enable_package ? pkg.package_price : pkg.hourly_rate;
+
+                                  const serviceData = {
+                                    title: pkg.title,
+                                    description: pkg.description,
+                                    price: primaryPrice || 0,
+                                    category: pkg.category || 'Photography',
+                                    pricing_type: pricingType,
+                                    hourly_rate: pkg.enable_hourly ? pkg.hourly_rate : undefined,
+                                    package_price: pkg.enable_package ? pkg.package_price : undefined,
+                                    duration_minutes: pkg.enable_package ? (pkg.duration_minutes || undefined) : undefined,
+                                  };
+
                                   if (pkg.id) {
                                     // Update existing service
-                                    return serviceService.updateService(pkg.id, {
-                                      title: pkg.title,
-                                      description: pkg.description,
-                                      price: pkg.price,
-                                      category: pkg.category,
-                                    });
+                                    return serviceService.updateService(pkg.id, serviceData);
                                   } else {
                                     // Create new service
-                                    return serviceService.createService({
-                                      title: pkg.title,
-                                      description: pkg.description,
-                                      price: pkg.price,
-                                      category: pkg.category || 'Photography',
-                                    });
+                                    return serviceService.createService(serviceData);
                                   }
                                 })
                               );
                               console.log('Packages saved successfully');
-                              
+
                               // Reload packages to get IDs for newly created ones
                               const allServices = await serviceService.getAllServices();
                               const providerServices = allServices.filter(
@@ -802,6 +825,11 @@ useEffect(() => {
                                 description: s.description || '',
                                 price: parseFloat(s.price) || 0,
                                 category: s.category || '',
+                                hourly_rate: s.hourly_rate || (s.pricing_type === 'hourly' ? parseFloat(s.price) : null),
+                                package_price: s.package_price || (s.pricing_type === 'package' ? parseFloat(s.price) : null),
+                                duration_minutes: s.duration_minutes || null,
+                                enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly' || s.pricing_type === 'both'),
+                                enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
                               })));
                             } catch (packageError) {
                               console.error('Failed to save packages:', packageError);
@@ -1062,16 +1090,20 @@ useEffect(() => {
                     onClick={() => {
                       setPackages([...packages, {
                         id: null,
-                        title: 'New Package',
-                        description: 'Description of package features and benefits...',
-                        price: 0,
-                        category: 'Photography'
+                        title: 'New Service',
+                        description: 'Description of service features and benefits...',
+                        category: 'Photography',
+                        hourly_rate: 500,
+                        package_price: 2000,
+                        duration_minutes: 240,
+                        enable_hourly: true,
+                        enable_package: true,
                       }]);
                     }}
                     className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2"
                   >
                     <Plus className="w-4 h-4" />
-                    Add Package
+                    Add Service
                   </button>
                 )}
               </div>
@@ -1104,25 +1136,22 @@ useEffect(() => {
                           )}
                         </div>
                         <div className="flex items-center gap-2">
-                          {editMode && (
-                            <span className="text-gray-400">$</span>
-                          )}
-                          {editMode ? (
-                            <input
-                              type="number"
-                              value={pkg.price}
-                              onChange={(e) => {
-                                const updated = [...packages];
-                                updated[index].price = parseFloat(e.target.value) || 0;
-                                setPackages(updated);
-                              }}
-                              className="w-24 text-right px-2 py-2 border border-gray-200 rounded-lg text-purple-600 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
-                              min="0"
-                              step="0.01"
-                            />
-                          ) : (
-                            <span className="text-purple-600 font-semibold">${pkg.price.toLocaleString()}</span>
-                          )}
+                          {/* Price display - show both if available */}
+                          <div className="flex items-center gap-2">
+                            {pkg.enable_hourly && pkg.hourly_rate && (
+                              <span className="text-blue-600 font-semibold">
+                                ₱{pkg.hourly_rate.toLocaleString()}/hr
+                              </span>
+                            )}
+                            {pkg.enable_hourly && pkg.hourly_rate && pkg.enable_package && pkg.package_price && (
+                              <span className="text-gray-400">|</span>
+                            )}
+                            {pkg.enable_package && pkg.package_price && (
+                              <span className="text-green-600 font-semibold">
+                                ₱{pkg.package_price.toLocaleString()}
+                              </span>
+                            )}
+                          </div>
                           {editMode && packages.length > 1 && (
                             <button
                               onClick={async () => {
@@ -1185,28 +1214,171 @@ useEffect(() => {
                           </span>
                         </div>
                       )}
+                      {/* Pricing Options */}
+                      {editMode ? (
+                        <div className="mt-3 space-y-3">
+                          {/* Pricing Type Checkboxes */}
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-2">Pricing Options (select one or both)</label>
+                            <div className="flex gap-2">
+                              <label
+                                className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2 ${
+                                  pkg.enable_hourly
+                                    ? 'bg-blue-600 text-white'
+                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={pkg.enable_hourly || false}
+                                  onChange={(e) => {
+                                    const updated = [...packages];
+                                    updated[index].enable_hourly = e.target.checked;
+                                    // Ensure at least one option is enabled
+                                    if (!e.target.checked && !updated[index].enable_package) {
+                                      updated[index].enable_package = true;
+                                    }
+                                    setPackages(updated);
+                                  }}
+                                  className="sr-only"
+                                />
+                                ⏱️ Hourly
+                              </label>
+                              <label
+                                className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2 ${
+                                  pkg.enable_package
+                                    ? 'bg-green-600 text-white'
+                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={pkg.enable_package || false}
+                                  onChange={(e) => {
+                                    const updated = [...packages];
+                                    updated[index].enable_package = e.target.checked;
+                                    // Ensure at least one option is enabled
+                                    if (!e.target.checked && !updated[index].enable_hourly) {
+                                      updated[index].enable_hourly = true;
+                                    }
+                                    setPackages(updated);
+                                  }}
+                                  className="sr-only"
+                                />
+                                📦 Package
+                              </label>
+                            </div>
+                          </div>
+
+                          {/* Hourly Pricing Fields */}
+                          {pkg.enable_hourly && (
+                            <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                              <label className="block text-xs text-blue-800 mb-1">Hourly Rate (₱/hr)</label>
+                              <input
+                                type="number"
+                                value={pkg.hourly_rate || ''}
+                                onChange={(e) => {
+                                  const updated = [...packages];
+                                  updated[index].hourly_rate = e.target.value ? parseFloat(e.target.value) : null;
+                                  setPackages(updated);
+                                }}
+                                placeholder="e.g., 500"
+                                className="w-full px-3 py-2 text-sm border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                              />
+                              <p className="text-xs text-blue-600 mt-2">Client pays based on hours booked</p>
+                            </div>
+                          )}
+
+                          {/* Package Pricing Fields */}
+                          {pkg.enable_package && (
+                            <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                              <div className="flex gap-3">
+                                <div className="flex-1">
+                                  <label className="block text-xs text-green-800 mb-1">Package Price (₱)</label>
+                                  <input
+                                    type="number"
+                                    value={pkg.package_price || ''}
+                                    onChange={(e) => {
+                                      const updated = [...packages];
+                                      updated[index].package_price = e.target.value ? parseFloat(e.target.value) : null;
+                                      setPackages(updated);
+                                    }}
+                                    placeholder="e.g., 2500"
+                                    className="w-full px-3 py-2 text-sm border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-xs text-green-800 mb-1">Duration (hours)</label>
+                                  <input
+                                    type="number"
+                                    value={pkg.duration_minutes ? pkg.duration_minutes / 60 : ''}
+                                    onChange={(e) => {
+                                      const updated = [...packages];
+                                      updated[index].duration_minutes = e.target.value ? parseFloat(e.target.value) * 60 : null;
+                                      setPackages(updated);
+                                    }}
+                                    placeholder="e.g., 4"
+                                    className="w-28 px-3 py-2 text-sm border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none"
+                                    min="0.5"
+                                    step="0.5"
+                                  />
+                                </div>
+                              </div>
+                              <p className="text-xs text-green-600 mt-2">Fixed price for the entire package duration</p>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {/* Pricing badges - show all enabled options */}
+                          {pkg.enable_hourly && pkg.hourly_rate && (
+                            <span className="inline-flex items-center px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded-full">
+                              <DollarSign className="w-3 h-3 mr-1" />
+                              ₱{pkg.hourly_rate.toLocaleString()}/hr
+                            </span>
+                          )}
+                          {pkg.enable_package && pkg.package_price && (
+                            <>
+                              <span className="inline-flex items-center px-2 py-1 text-xs bg-green-100 text-green-700 rounded-full">
+                                <DollarSign className="w-3 h-3 mr-1" />
+                                ₱{pkg.package_price.toLocaleString()} package
+                              </span>
+                              {pkg.duration_minutes && (
+                                <span className="inline-flex items-center px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded-full">
+                                  <Calendar className="w-3 h-3 mr-1" />
+                                  {pkg.duration_minutes / 60}h
+                                </span>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                   {packages.length === 0 && !isLoadingPackages && (
                     <EmptyState
                       type="services"
-                      title="No packages yet"
-                      description="Create service packages to showcase your offerings and start receiving bookings."
+                      title="No services yet"
+                      description="Create service packages or hourly rates to showcase your offerings and start receiving bookings."
                       action={editMode ? (
                         <button
                           onClick={() => {
                             setPackages([{
                               id: null,
-                              title: 'New Package',
-                              description: 'Description of package features and benefits...',
-                              price: 0,
-                              category: 'Photography'
+                              title: 'New Service',
+                              description: 'Description of service features and benefits...',
+                              category: 'Photography',
+                              hourly_rate: 500,
+                              package_price: 2000,
+                              duration_minutes: 240,
+                              enable_hourly: true,
+                              enable_package: true,
                             }]);
                           }}
                           className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2"
                         >
                           <Plus className="w-4 h-4" />
-                          Add Your First Package
+                          Add Your First Service
                         </button>
                       ) : undefined}
                     />

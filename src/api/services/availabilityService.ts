@@ -339,11 +339,12 @@ const availabilityService = {
     slot_duration: number;
     buffer_minutes: number;
   }> {
-    return [1, 2, 3, 4, 5].map(day => ({
+    // 24/7 availability - all days, all hours with 30-min slots
+    return [0, 1, 2, 3, 4, 5, 6].map(day => ({
       day_of_week: day,
-      start_time: '09:00',
-      end_time: '17:00',
-      slot_duration: 60,
+      start_time: '00:00',
+      end_time: '23:30',
+      slot_duration: 30,
       buffer_minutes: 0,
     }));
   },

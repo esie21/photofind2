@@ -304,7 +304,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   try {
     const userId = req.userId;
-    const { title, description, price, category, images } = req.body;
+    const { title, description, price, hourly_price, category, images, pricing_type, duration_minutes } = req.body;
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -319,15 +319,18 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
 
     // Check which columns exist in the services table
     const columnCheck = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
+      SELECT column_name
+      FROM information_schema.columns
       WHERE table_name = 'services'
     `);
-    
+
     const existingColumns = columnCheck.rows.map((r: any) => r.column_name);
     const hasCategory = existingColumns.includes('category');
     const hasImages = existingColumns.includes('images');
     const hasDescription = existingColumns.includes('description');
+    const hasPricingType = existingColumns.includes('pricing_type');
+    const hasDurationMinutes = existingColumns.includes('duration_minutes');
+    const hasHourlyPrice = existingColumns.includes('hourly_price');
 
     // Build dynamic INSERT query based on existing columns
     const columns: string[] = ['provider_id', 'title', 'price'];
@@ -353,6 +356,30 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       columns.push('images');
       placeholders.push(`$${paramIndex}`);
       values.push(images || []);
+      paramIndex++;
+    }
+
+    if (hasPricingType) {
+      columns.push('pricing_type');
+      placeholders.push(`$${paramIndex}`);
+      // Default to 'package' if not specified
+      values.push(pricing_type || 'package');
+      paramIndex++;
+    }
+
+    if (hasDurationMinutes) {
+      columns.push('duration_minutes');
+      placeholders.push(`$${paramIndex}`);
+      // Default to 60 minutes if not specified
+      values.push(duration_minutes || 60);
+      paramIndex++;
+    }
+
+    if (hasHourlyPrice) {
+      columns.push('hourly_price');
+      placeholders.push(`$${paramIndex}`);
+      values.push(hourly_price || null);
+      paramIndex++;
     }
 
     const insertQuery = `
@@ -414,7 +441,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
   try {
     const { id } = req.params;
     const userId = req.userId;
-    const { title, description, price, category, images } = req.body;
+    const { title, description, price, hourly_price, category, images, pricing_type, duration_minutes } = req.body;
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -440,16 +467,19 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
 
     // Check which columns exist in the services table
     const columnCheck = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
+      SELECT column_name
+      FROM information_schema.columns
       WHERE table_name = 'services'
     `);
-    
+
     const existingColumns = columnCheck.rows.map((r: any) => r.column_name);
     const hasCategory = existingColumns.includes('category');
     const hasImages = existingColumns.includes('images');
     const hasDescription = existingColumns.includes('description');
     const hasUpdatedAt = existingColumns.includes('updated_at');
+    const hasPricingType = existingColumns.includes('pricing_type');
+    const hasDurationMinutes = existingColumns.includes('duration_minutes');
+    const hasHourlyPrice = existingColumns.includes('hourly_price');
 
     // Build dynamic UPDATE query based on existing columns
     const updates: string[] = [];
@@ -483,6 +513,24 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     if (hasImages && images !== undefined) {
       updates.push(`images = $${paramIndex}`);
       values.push(images);
+      paramIndex++;
+    }
+
+    if (hasPricingType && pricing_type !== undefined) {
+      updates.push(`pricing_type = $${paramIndex}`);
+      values.push(pricing_type);
+      paramIndex++;
+    }
+
+    if (hasDurationMinutes && duration_minutes !== undefined) {
+      updates.push(`duration_minutes = $${paramIndex}`);
+      values.push(duration_minutes);
+      paramIndex++;
+    }
+
+    if (hasHourlyPrice && hourly_price !== undefined) {
+      updates.push(`hourly_price = $${paramIndex}`);
+      values.push(hourly_price);
       paramIndex++;
     }
 

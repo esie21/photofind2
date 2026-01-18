@@ -4,23 +4,23 @@ import helmet from 'helmet';
 import xss from 'xss';
 
 // ==============================================
-// RATE LIMITING CONFIGURATION
+// RATE LIMITING CONFIGURATION (3x multiplier for development)
 // ==============================================
 
-// General API rate limiter - 100 requests per 15 minutes
+// General API rate limiter - 300 requests per 15 minutes
 export const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100,
+  max: 300,
   message: { error: 'Too many requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
 });
 
-// Strict rate limiter for auth endpoints - 10 requests per 15 minutes
+// Strict rate limiter for auth endpoints - 30 requests per 15 minutes
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10,
+  max: 30,
   message: { error: 'Too many authentication attempts, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -28,60 +28,60 @@ export const authLimiter = rateLimit({
   validate: { xForwardedForHeader: false },
 });
 
-// Login-specific limiter - 5 failed attempts per 15 minutes
+// Login-specific limiter - 15 failed attempts per 15 minutes
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5,
+  max: 15,
   message: { error: 'Too many login attempts. Please try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
 });
 
-// Password reset limiter - 3 requests per hour
+// Password reset limiter - 9 requests per hour
 export const passwordResetLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 3,
+  max: 9,
   message: { error: 'Too many password reset requests. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
 });
 
-// Payment rate limiter - 10 requests per minute
+// Payment rate limiter - 30 requests per minute
 export const paymentLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 10,
+  max: 30,
   message: { error: 'Too many payment requests, please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
 });
 
-// Chat rate limiter - 30 messages per minute
+// Chat rate limiter - 90 messages per minute
 export const chatLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 30,
+  max: 90,
   message: { error: 'Too many messages, please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
 });
 
-// Admin rate limiter - 50 requests per minute
+// Admin rate limiter - 150 requests per minute
 export const adminLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 50,
+  max: 150,
   message: { error: 'Too many admin requests, please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
 });
 
-// File upload limiter - 10 uploads per hour
+// File upload limiter - 30 uploads per hour
 export const uploadLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 10,
+  max: 30,
   message: { error: 'Too many file uploads, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,

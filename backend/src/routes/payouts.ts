@@ -342,12 +342,24 @@ router.patch('/:id/status', verifyToken, async (req: Request & { userId?: string
       });
     }
 
-    // Get wallet for potential refund
-    const walletRes = await dbClient.query(
-      'SELECT * FROM wallets WHERE id::text = $1 FOR UPDATE',
-      [payout.wallet_id]
-    );
-    const wallet = walletRes.rows[0];
+    // Get wallet for potential refund - handle NULL wallet_id
+    let wallet;
+    if (payout.wallet_id) {
+      const walletRes = await dbClient.query(
+        'SELECT * FROM wallets WHERE id::text = $1 FOR UPDATE',
+        [String(payout.wallet_id)]
+      );
+      wallet = walletRes.rows[0];
+    }
+
+    // Fallback: get wallet by provider_id if wallet_id was NULL or not found
+    if (!wallet) {
+      const walletRes = await dbClient.query(
+        'SELECT * FROM wallets WHERE provider_id::text = $1 FOR UPDATE',
+        [String(payout.provider_id)]
+      );
+      wallet = walletRes.rows[0];
+    }
 
     // Handle status-specific actions
     let updates = `status = $1, admin_notes = COALESCE($2, admin_notes), updated_at = CURRENT_TIMESTAMP`;
@@ -359,69 +371,126 @@ router.patch('/:id/status', verifyToken, async (req: Request & { userId?: string
       updateParams.push(rejection_reason || 'Rejected by admin');
       paramIndex++;
 
-      // Refund to available balance
-      const refundAmount = parseFloat(payout.amount);
-      const newAvailableBalance = parseFloat(wallet.available_balance) + refundAmount;
+      // CRITICAL FIX: Check if original deduction exists before refunding
+      const originalDeductionRes = await dbClient.query(
+        `SELECT id, amount FROM transactions
+         WHERE payout_id::text = $1 AND type = 'payout_requested'`,
+        [payoutId]
+      );
+      const originalDeduction = originalDeductionRes.rows[0];
 
-      await dbClient.query(
-        'UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2',
-        [newAvailableBalance, wallet.id]
+      // IDEMPOTENCY CHECK: Check if already refunded
+      const existingRefundRes = await dbClient.query(
+        `SELECT id FROM transactions
+         WHERE payout_id::text = $1 AND type = 'payout_cancelled'`,
+        [payoutId]
       );
 
-      // Record refund transaction
-      await dbClient.query(
-        `INSERT INTO transactions (wallet_id, payout_id, type, amount, balance_after, reference_id, description)
-         VALUES ($1, $2, 'payout_cancelled', $3, $4, $5, $6)`,
-        [
-          wallet.id,
-          payout.id,
-          refundAmount,
-          newAvailableBalance,
-          `payout_rejected_${payout.id}`,
-          `Payout request rejected: ${rejection_reason || 'Rejected by admin'}`
-        ]
-      );
+      if (existingRefundRes.rows[0]) {
+        await dbClient.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Payout has already been refunded',
+          already_refunded: true
+        });
+      }
+
+      // Only refund if original deduction exists
+      if (originalDeduction && wallet) {
+        const refundAmount = Math.abs(parseFloat(originalDeduction.amount));
+        const newAvailableBalance = parseFloat(wallet.available_balance) + refundAmount;
+
+        await dbClient.query(
+          'UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2',
+          [newAvailableBalance, String(wallet.id)]
+        );
+
+        // Record refund transaction
+        await dbClient.query(
+          `INSERT INTO transactions (wallet_id, payout_id, type, amount, balance_after, reference_id, description)
+           VALUES ($1, $2, 'payout_cancelled', $3, $4, $5, $6)`,
+          [
+            String(wallet.id),
+            payout.id,
+            refundAmount,
+            newAvailableBalance,
+            `payout_rejected_${payout.id}`,
+            `Payout request rejected: ${rejection_reason || 'Rejected by admin'}`
+          ]
+        );
+      } else {
+        console.warn(`Payout ${payoutId} rejected but no original deduction found - no refund issued`);
+      }
     } else if (status === 'approved') {
       updates += `, processed_at = CURRENT_TIMESTAMP`;
     } else if (status === 'completed') {
       updates += `, completed_at = CURRENT_TIMESTAMP`;
 
-      // Record completion transaction
-      await dbClient.query(
-        `INSERT INTO transactions (wallet_id, payout_id, type, amount, balance_after, reference_id, description)
-         VALUES ($1, $2, 'payout_completed', $3, $4, $5, $6)`,
-        [
-          wallet.id,
-          payout.id,
-          -parseFloat(payout.amount),
-          parseFloat(wallet.available_balance),
-          `payout_completed_${payout.id}`,
-          `Payout of ${payout.amount} PHP completed via ${payout.payout_method}`
-        ]
-      );
+      // Record completion transaction - balance doesn't change since it was already deducted at request time
+      // The balance_after should reflect the current available balance
+      if (wallet) {
+        await dbClient.query(
+          `INSERT INTO transactions (wallet_id, payout_id, type, amount, balance_after, reference_id, description)
+           VALUES ($1, $2, 'payout_completed', $3, $4, $5, $6)`,
+          [
+            String(wallet.id),
+            payout.id,
+            -parseFloat(payout.amount),
+            parseFloat(wallet.available_balance), // Balance unchanged - already deducted at request
+            `payout_completed_${payout.id}`,
+            `Payout of ${payout.amount} PHP completed via ${payout.payout_method}`
+          ]
+        );
+      }
     } else if (status === 'failed') {
-      // Refund to available balance
-      const refundAmount = parseFloat(payout.amount);
-      const newAvailableBalance = parseFloat(wallet.available_balance) + refundAmount;
+      // CRITICAL FIX: Check if original deduction exists before refunding
+      const originalDeductionRes = await dbClient.query(
+        `SELECT id, amount FROM transactions
+         WHERE payout_id::text = $1 AND type = 'payout_requested'`,
+        [payoutId]
+      );
+      const originalDeduction = originalDeductionRes.rows[0];
 
-      await dbClient.query(
-        'UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2',
-        [newAvailableBalance, wallet.id]
+      // IDEMPOTENCY CHECK: Check if already refunded
+      const existingRefundRes = await dbClient.query(
+        `SELECT id FROM transactions
+         WHERE payout_id::text = $1 AND type = 'payout_cancelled'`,
+        [payoutId]
       );
 
-      // Record refund transaction
-      await dbClient.query(
-        `INSERT INTO transactions (wallet_id, payout_id, type, amount, balance_after, reference_id, description)
-         VALUES ($1, $2, 'payout_cancelled', $3, $4, $5, $6)`,
-        [
-          wallet.id,
-          payout.id,
-          refundAmount,
-          newAvailableBalance,
-          `payout_failed_${payout.id}`,
-          `Payout failed and refunded: ${admin_notes || 'Processing failed'}`
-        ]
-      );
+      if (existingRefundRes.rows[0]) {
+        await dbClient.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Payout has already been refunded',
+          already_refunded: true
+        });
+      }
+
+      // Only refund if original deduction exists
+      if (originalDeduction && wallet) {
+        const refundAmount = Math.abs(parseFloat(originalDeduction.amount));
+        const newAvailableBalance = parseFloat(wallet.available_balance) + refundAmount;
+
+        await dbClient.query(
+          'UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2',
+          [newAvailableBalance, String(wallet.id)]
+        );
+
+        // Record refund transaction
+        await dbClient.query(
+          `INSERT INTO transactions (wallet_id, payout_id, type, amount, balance_after, reference_id, description)
+           VALUES ($1, $2, 'payout_cancelled', $3, $4, $5, $6)`,
+          [
+            String(wallet.id),
+            payout.id,
+            refundAmount,
+            newAvailableBalance,
+            `payout_failed_${payout.id}`,
+            `Payout failed and refunded: ${admin_notes || 'Processing failed'}`
+          ]
+        );
+      } else {
+        console.warn(`Payout ${payoutId} failed but no original deduction found - no refund issued`);
+      }
     }
 
     updateParams.push(payoutId);
@@ -522,39 +591,100 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
       return res.status(400).json({ error: 'Can only cancel pending payout requests' });
     }
 
-    // Get wallet
-    const walletRes = await dbClient.query(
-      'SELECT * FROM wallets WHERE id::text = $1 FOR UPDATE',
-      [payout.wallet_id]
+    // Get wallet - handle NULL wallet_id by falling back to provider_id lookup
+    let wallet;
+    if (payout.wallet_id) {
+      const walletRes = await dbClient.query(
+        'SELECT * FROM wallets WHERE id::text = $1 FOR UPDATE',
+        [String(payout.wallet_id)]
+      );
+      wallet = walletRes.rows[0];
+    }
+
+    // Fallback: get wallet by provider_id if wallet_id was NULL or not found
+    if (!wallet) {
+      const walletRes = await dbClient.query(
+        'SELECT * FROM wallets WHERE provider_id::text = $1 FOR UPDATE',
+        [String(payout.provider_id)]
+      );
+      wallet = walletRes.rows[0];
+    }
+
+    if (!wallet) {
+      await dbClient.query('ROLLBACK');
+      return res.status(404).json({ error: 'Wallet not found for this provider' });
+    }
+
+    // CRITICAL FIX: Check if original deduction transaction exists before refunding
+    const originalDeductionRes = await dbClient.query(
+      `SELECT id, amount FROM transactions
+       WHERE payout_id::text = $1 AND type = 'payout_requested'`,
+      [payoutId]
     );
-    const wallet = walletRes.rows[0];
+    const originalDeduction = originalDeductionRes.rows[0];
 
-    // Refund to available balance
-    const refundAmount = parseFloat(payout.amount);
-    const newAvailableBalance = parseFloat(wallet.available_balance) + refundAmount;
-
-    await dbClient.query(
-      'UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2',
-      [newAvailableBalance, wallet.id]
-    );
-
-    // Update payout status
-    await dbClient.query(
-      `UPDATE payouts SET status = 'rejected', rejection_reason = 'Cancelled by user', updated_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
+    // IDEMPOTENCY CHECK: Check if already refunded
+    const existingRefundRes = await dbClient.query(
+      `SELECT id FROM transactions
+       WHERE payout_id::text = $1 AND type = 'payout_cancelled'`,
       [payoutId]
     );
 
-    // Record refund transaction
+    if (existingRefundRes.rows[0]) {
+      await dbClient.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Payout has already been cancelled and refunded',
+        already_refunded: true
+      });
+    }
+
+    const payoutAmount = parseFloat(payout.amount);
+    let refundAmount = 0;
+    let newAvailableBalance = parseFloat(wallet.available_balance);
+
+    // Only refund if we can verify the original deduction happened
+    if (originalDeduction) {
+      refundAmount = Math.abs(parseFloat(originalDeduction.amount));
+      newAvailableBalance = parseFloat(wallet.available_balance) + refundAmount;
+
+      await dbClient.query(
+        'UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2',
+        [newAvailableBalance, String(wallet.id)]
+      );
+
+      // Record refund transaction
+      await dbClient.query(
+        `INSERT INTO transactions (wallet_id, payout_id, type, amount, balance_after, reference_id, description)
+         VALUES ($1, $2, 'payout_cancelled', $3, $4, $5, $6)`,
+        [
+          String(wallet.id),
+          payout.id,
+          refundAmount,
+          newAvailableBalance,
+          `payout_cancelled_${payout.id}`,
+          role === 'admin'
+            ? `Payout request cancelled by admin`
+            : `Payout request cancelled by user`
+        ]
+      );
+
+      console.log(`Payout ${payoutId} cancelled with refund of ${refundAmount}`);
+    } else {
+      // No original deduction found - just cancel without refund
+      console.warn(`Payout ${payoutId} cancelled but NO original deduction found - no refund issued`);
+    }
+
+    // Update payout status
     await dbClient.query(
-      `INSERT INTO transactions (wallet_id, payout_id, type, amount, balance_after, reference_id, description)
-       VALUES ($1, $2, 'payout_cancelled', $3, $4, $5, $6)`,
+      `UPDATE payouts
+       SET status = 'rejected',
+           rejection_reason = $1,
+           processed_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $2`,
       [
-        wallet.id,
-        payout.id,
-        refundAmount,
-        newAvailableBalance,
-        `payout_cancelled_${payout.id}`,
-        `Payout request cancelled by user`
+        role === 'admin' ? 'Cancelled by admin' : 'Cancelled by user',
+        payoutId
       ]
     );
 
@@ -562,9 +692,12 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
 
     return res.json({
       data: {
-        message: 'Payout request cancelled',
+        message: refundAmount > 0
+          ? 'Payout request cancelled and funds refunded'
+          : 'Payout request cancelled (no funds to refund)',
         refunded_amount: refundAmount,
         new_available_balance: newAvailableBalance,
+        original_deduction_found: !!originalDeduction
       }
     });
   } catch (error: any) {

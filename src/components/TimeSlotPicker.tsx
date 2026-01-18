@@ -179,17 +179,24 @@ export function TimeSlotPicker({
       {/* Hold Timer */}
       {holdingSlot && timeRemaining !== null && (
         <div className={`px-4 py-3 flex items-center justify-between ${
-          timeRemaining <= 60 ? 'bg-red-50' : 'bg-yellow-50'
+          timeRemaining <= 60 ? 'bg-red-50 border-b-2 border-red-200' : timeRemaining <= 120 ? 'bg-amber-50 border-b-2 border-amber-200' : 'bg-yellow-50'
         }`}>
           <div className="flex items-center gap-2">
-            <Timer className={`w-4 h-4 ${timeRemaining <= 60 ? 'text-red-600' : 'text-yellow-600'}`} />
-            <span className={`text-sm font-medium ${timeRemaining <= 60 ? 'text-red-700' : 'text-yellow-700'}`}>
-              Slot held for {formatTimeRemaining(timeRemaining)}
-            </span>
+            <Timer className={`w-4 h-4 ${timeRemaining <= 60 ? 'text-red-600 animate-pulse' : timeRemaining <= 120 ? 'text-amber-600' : 'text-yellow-600'}`} />
+            <div>
+              <span className={`text-sm font-medium ${timeRemaining <= 60 ? 'text-red-700' : timeRemaining <= 120 ? 'text-amber-700' : 'text-yellow-700'}`}>
+                {timeRemaining <= 60 ? 'Hurry! ' : ''}Slot held for {formatTimeRemaining(timeRemaining)}
+              </span>
+              {timeRemaining <= 120 && (
+                <p className={`text-xs ${timeRemaining <= 60 ? 'text-red-600' : 'text-amber-600'}`}>
+                  {timeRemaining <= 60 ? 'Complete booking now to avoid losing this slot!' : 'Finish your booking soon'}
+                </p>
+              )}
+            </div>
           </div>
           <button
             onClick={handleReleaseHold}
-            className="text-sm text-gray-500 hover:text-gray-700"
+            className="text-sm text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-100"
           >
             Release
           </button>
@@ -225,11 +232,20 @@ export function TimeSlotPicker({
               const isSelected = selectedSlotId === slot.id || holdingSlot === slot.id;
               const isHeld = holdingSlot === slot.id;
 
+              // Calculate duration in minutes
+              const startMs = new Date(slot.start).getTime();
+              const endMs = new Date(slot.end).getTime();
+              const durationMins = Math.round((endMs - startMs) / (1000 * 60));
+              const durationLabel = durationMins >= 60
+                ? `${Math.floor(durationMins / 60)}h${durationMins % 60 > 0 ? ` ${durationMins % 60}m` : ''}`
+                : `${durationMins}m`;
+
               return (
                 <button
                   key={slot.id}
                   onClick={() => handleSlotClick(slot)}
                   disabled={holdingSlot !== null && holdingSlot !== slot.id}
+                  title={`${formatSlotTime(slot.start)} - ${formatSlotTime(slot.end)} (${durationLabel})`}
                   className={`
                     relative px-3 py-3 rounded-xl text-sm font-medium transition-all
                     ${isSelected
@@ -239,7 +255,12 @@ export function TimeSlotPicker({
                     ${holdingSlot !== null && holdingSlot !== slot.id ? 'opacity-50 cursor-not-allowed' : ''}
                   `}
                 >
-                  <span>{formatSlotTime(slot.start)}</span>
+                  <div className="flex flex-col items-center">
+                    <span>{formatSlotTime(slot.start)}</span>
+                    <span className={`text-[10px] ${isSelected ? 'text-purple-200' : 'text-gray-400'}`}>
+                      {durationLabel}
+                    </span>
+                  </div>
                   {isHeld && (
                     <CheckCircle className="w-4 h-4 absolute top-1 right-1 text-white" />
                   )}
