@@ -207,10 +207,53 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     return [...slots].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
   };
 
-  // Handle slot toggle (multi-select)
+  // Handle slot toggle - different behavior for hourly vs package
   const handleSlotToggle = (slot: TimeSlot) => {
     const isSelected = selectedSlots.some(s => s.id === slot.id);
 
+    // Package booking: Single click selects start time, auto-fill remaining slots
+    if (bookingType === 'package' && packageDurationMinutes > 0) {
+      if (isSelected) {
+        // Clicking the start slot again clears selection
+        setSelectedSlots([]);
+        return;
+      }
+
+      // Find index of clicked slot in available slots
+      const clickedIndex = availableSlots.findIndex(s => s.id === slot.id);
+      if (clickedIndex === -1) return;
+
+      // Calculate how many slots we need (each slot is 30 minutes)
+      const slotsNeeded = Math.ceil(packageDurationMinutes / 30);
+
+      // Check if we have enough consecutive slots from this point
+      const potentialSlots: TimeSlot[] = [];
+      for (let i = 0; i < slotsNeeded && clickedIndex + i < availableSlots.length; i++) {
+        const currentSlot = availableSlots[clickedIndex + i];
+        // Check if slot is held by another user
+        if (currentSlot.is_held && !heldSlotIds.includes(currentSlot.id)) {
+          break;
+        }
+        potentialSlots.push(currentSlot);
+      }
+
+      // Verify slots are consecutive
+      if (potentialSlots.length < slotsNeeded) {
+        toast.error('Not enough time', `This package requires ${formatDuration(packageDurationMinutes)}. Not enough consecutive slots available from this time.`);
+        return;
+      }
+
+      if (!areSlotsConsecutive(potentialSlots)) {
+        toast.error('Not available', 'The required time slots are not consecutive. Please select another start time.');
+        return;
+      }
+
+      setSelectedSlots(potentialSlots);
+      setStepError(null);
+      return;
+    }
+
+    // Hourly booking: Multi-select consecutive slots manually
     if (isSelected) {
       // Deselect slot
       const newSelection = selectedSlots.filter(s => s.id !== slot.id);
@@ -1087,8 +1130,8 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                           </div>
                           <p className="text-sm text-green-700">
                             {packageDurationMinutes > 0
-                              ? `Select ${requiredSlotsForPackage} consecutive slots (${formatDuration(packageDurationMinutes)}).`
-                              : 'Select your preferred time slots below.'
+                              ? `Select your start time below. Duration: ${formatDuration(packageDurationMinutes)}`
+                              : 'Select your preferred start time below.'
                             }
                           </p>
                         </div>
@@ -1369,14 +1412,16 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                               <Clock className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
                             </div>
                             <div>
-                              <h3 className="text-white font-semibold text-base sm:text-lg">Select Time Slots</h3>
+                              <h3 className="text-white font-semibold text-base sm:text-lg">
+                                {isHourlyPricing ? 'Select Time Slots' : 'Select Start Time'}
+                              </h3>
                               <p className="text-blue-100 text-xs sm:text-sm">
                                 {availableSlots.length > 0
                                   ? isHourlyPricing
-                                    ? `Tap consecutive slots for longer bookings (₱${basePrice.toLocaleString()}/hr)`
+                                    ? `Tap consecutive slots for longer bookings (₱${hourlyRate.toLocaleString()}/hr)`
                                     : packageDurationMinutes > 0
-                                      ? `Select ${requiredSlotsForPackage} consecutive slots (${formatDuration(packageDurationMinutes)} package)`
-                                      : 'Tap consecutive slots for longer bookings'
+                                      ? `Tap your start time • ${formatDuration(packageDurationMinutes)} will be auto-selected`
+                                      : 'Tap your preferred start time'
                                   : 'No slots available'
                                 }
                               </p>
@@ -1435,11 +1480,11 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                 <div className="flex items-center justify-between text-sm">
                                   {isHourlyPricing ? (
                                     <span className="text-blue-600">
-                                      ₱{basePrice.toLocaleString()}/hr × {totalDurationHours.toFixed(1)} hrs
+                                      ₱{hourlyRate.toLocaleString()}/hr × {totalDurationHours.toFixed(1)} hrs
                                     </span>
                                   ) : (
-                                    <span className="text-blue-600">
-                                      Package: {formatDuration(packageDurationMinutes)} ({requiredSlotsForPackage} slots)
+                                    <span className="text-green-600">
+                                      📦 Package: {formatDuration(packageDurationMinutes)}
                                     </span>
                                   )}
                                   <span className="font-semibold text-blue-800">
@@ -1796,23 +1841,23 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                   </div>
                 </div>
 
-                {/* Booking Type */}
-                {bookingType && (
+                {/* Service & Booking Type */}
+                {selectedServiceData && (
                   <div className="pt-4 border-t border-gray-200">
                     <div className="flex justify-between mb-2">
-                      <span className="text-sm text-gray-600">Type</span>
-                      <span className={`text-sm px-2 py-0.5 rounded-full ${
-                        bookingType === 'hourly'
-                          ? 'bg-blue-100 text-blue-700'
-                          : 'bg-green-100 text-green-700'
-                      }`}>
-                        {bookingType === 'hourly' ? '⏱️ Hourly' : '📦 Package'}
-                      </span>
+                      <span className="text-sm text-gray-600">Service</span>
+                      <span className="text-sm text-gray-900 text-right max-w-[60%] truncate">{selectedServiceData.name}</span>
                     </div>
-                    {bookingType === 'package' && selectedServiceData && (
+                    {bookingType && (
                       <div className="flex justify-between">
-                        <span className="text-sm text-gray-600">Package</span>
-                        <span className="text-sm text-gray-900">{selectedServiceData.name}</span>
+                        <span className="text-sm text-gray-600">Pricing</span>
+                        <span className={`text-sm px-2 py-0.5 rounded-full ${
+                          bookingType === 'hourly'
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-green-100 text-green-700'
+                        }`}>
+                          {bookingType === 'hourly' ? '⏱️ Hourly' : '📦 Package'}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -1906,10 +1951,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                             ? `₱${hourlyRate.toLocaleString()}/hr`
                             : selectedServiceData
                               ? `₱${basePrice.toLocaleString()}`
-                              : 'Select a package'
+                              : 'Select a service'
                           }
                         </p>
-                        <p className="text-xs text-gray-400 mt-1">Select time slots to see total</p>
+                        <p className="text-xs text-gray-400 mt-1">
+                          {bookingType === 'hourly' ? 'Select time slots to see total' : 'Select start time to see total'}
+                        </p>
                       </div>
                     )}
                   </div>
@@ -1921,7 +1968,23 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
             <div className="space-y-3">
               {currentStep > 1 && (
                 <button
-                  onClick={() => setCurrentStep(currentStep - 1)}
+                  onClick={() => {
+                    // Reset state when going back from certain steps
+                    const prevStepType = getStepType(currentStep - 1);
+                    if (currentStepType === 'pricingtype') {
+                      // Going back to service selection, reset booking type
+                      setBookingType(null);
+                    } else if (currentStepType === 'datetime') {
+                      // Going back, clear time selection
+                      setSelectedSlots([]);
+                      if (heldSlotIds.length > 0) {
+                        availabilityService.releaseSlots(heldSlotIds).catch(console.error);
+                        setHeldSlotIds([]);
+                        setHoldExpiresAt(null);
+                      }
+                    }
+                    setCurrentStep(currentStep - 1);
+                  }}
                   disabled={isSubmitting}
                   className="w-full py-3 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
