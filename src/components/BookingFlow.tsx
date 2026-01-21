@@ -1160,80 +1160,59 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                   )}
 
                   <div className="space-y-6">
-                    {/* Calendar with Availability - Traditional Design */}
-                    <div className="rounded-2xl overflow-hidden border border-gray-200 bg-white shadow-sm">
+                    {/* Calendar with Availability - Google-like Month Grid */}
+                    <div className="rounded-2xl overflow-hidden border border-gray-200 bg-white shadow-sm max-w-xl mx-auto">
                       {/* Calendar Header */}
-                      <div className="bg-white border-b border-gray-200 px-4 sm:px-6 py-4">
-                        <div className="flex items-center justify-between">
-                          {/* Month Navigation */}
-                          <button
-                            onClick={() => {
-                              const newDate = new Date(currentMonth);
-                              newDate.setMonth(newDate.getMonth() - 1);
-                              const now = new Date();
-                              if (newDate.getFullYear() > now.getFullYear() ||
-                                  (newDate.getFullYear() === now.getFullYear() && newDate.getMonth() >= now.getMonth())) {
+                      <div className="bg-white px-4 sm:px-6 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-base sm:text-lg font-medium text-gray-900">
+                            {currentMonth.toLocaleString('default', { month: 'long' })} {currentMonth.getFullYear()}
+                          </h3>
+
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => {
+                                const newDate = new Date(currentMonth);
+                                newDate.setMonth(newDate.getMonth() - 1);
+                                const now = new Date();
+                                if (newDate.getFullYear() > now.getFullYear() ||
+                                    (newDate.getFullYear() === now.getFullYear() && newDate.getMonth() >= now.getMonth())) {
+                                  setCurrentMonth(newDate);
+                                  // Clear selection when changing months
+                                  if (selectedDay && selectedDay.getMonth() !== newDate.getMonth()) {
+                                    handleDaySelect(undefined as any);
+                                    setSelectedDay(undefined);
+                                  }
+                                }
+                              }}
+                              className="w-9 h-9 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors"
+                              aria-label="Previous month"
+                            >
+                              <ChevronRight className="w-5 h-5 text-gray-600 rotate-180" />
+                            </button>
+
+                            <button
+                              onClick={() => {
+                                const newDate = new Date(currentMonth);
+                                newDate.setMonth(newDate.getMonth() + 1);
                                 setCurrentMonth(newDate);
                                 // Clear selection when changing months
                                 if (selectedDay && selectedDay.getMonth() !== newDate.getMonth()) {
                                   handleDaySelect(undefined as any);
                                   setSelectedDay(undefined);
                                 }
-                              }
-                            }}
-                            className="w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors"
-                          >
-                            <ChevronRight className="w-5 h-5 text-gray-600 rotate-180" />
-                          </button>
-
-                          <h3 className="text-lg sm:text-xl font-semibold text-gray-900">
-                            {currentMonth.toLocaleString('default', { month: 'long' })} {currentMonth.getFullYear()}
-                          </h3>
-
-                          <button
-                            onClick={() => {
-                              const newDate = new Date(currentMonth);
-                              newDate.setMonth(newDate.getMonth() + 1);
-                              setCurrentMonth(newDate);
-                              // Clear selection when changing months
-                              if (selectedDay && selectedDay.getMonth() !== newDate.getMonth()) {
-                                handleDaySelect(undefined as any);
-                                setSelectedDay(undefined);
-                              }
-                            }}
-                            className="w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors"
-                          >
-                            <ChevronRight className="w-5 h-5 text-gray-600" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Selected Date Display */}
-                      {selectedDay && (
-                        <div className="px-4 sm:px-6 py-3 bg-purple-50 border-b border-purple-100">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <Check className="w-4 h-4 text-purple-600" />
-                              <span className="text-purple-700 font-medium text-sm sm:text-base">
-                                {selectedDay.toLocaleDateString('en-US', {
-                                  weekday: 'long',
-                                  month: 'long',
-                                  day: 'numeric'
-                                })}
-                              </span>
-                            </div>
-                            <button
-                              onClick={() => { setSelectedDay(undefined); setSelectedSlots([]); }}
-                              className="text-purple-500 hover:text-purple-700 text-xs sm:text-sm"
+                              }}
+                              className="w-9 h-9 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors"
+                              aria-label="Next month"
                             >
-                              Change
+                              <ChevronRight className="w-5 h-5 text-gray-600" />
                             </button>
                           </div>
                         </div>
-                      )}
+                      </div>
 
                       {/* Calendar Grid */}
-                      <div className="p-2 sm:p-4">
+                      <div className="px-4 sm:px-6 pb-4">
                         {loadingCalendar ? (
                           <div className="flex flex-col items-center justify-center py-12 sm:py-16">
                             <Loader className="w-8 h-8 animate-spin text-purple-600 mb-3" />
@@ -1252,151 +1231,123 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                             </button>
                           </div>
                         ) : (
-                          <div className="border border-gray-200 rounded-lg overflow-hidden">
+                          <div>
                             {/* Day Headers */}
-                            <div className="grid grid-cols-7 bg-gray-50 border-b border-gray-200">
-                              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day, idx) => (
-                                <div
-                                  key={idx}
-                                  className="text-center text-xs sm:text-sm font-semibold text-gray-500 py-2 sm:py-3 border-r border-gray-200 last:border-r-0"
-                                >
-                                  <span className="hidden sm:inline">{day}</span>
-                                  <span className="sm:hidden">{day.charAt(0)}</span>
-                                </div>
+                            <div className="grid grid-cols-7 text-center text-xs font-medium text-gray-500 mb-2">
+                              {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => (
+                                <div key={d} className="py-1">{d}</div>
                               ))}
                             </div>
 
-                            {/* Calendar Days Grid */}
-                            <div className="grid grid-cols-7">
-                              {/* Empty cells for days before month starts */}
-                              {Array.from({ length: new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1).getDay() }).map((_, i) => (
-                                <div key={`empty-${i}`} className="h-14 sm:h-16 md:h-20 border-r border-b border-gray-100 last:border-r-0 bg-gray-50/50" />
-                              ))}
+                            {/* Days */}
+                            <div className="grid grid-cols-7 gap-y-1">
+                              {(() => {
+                                const firstDayOfMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
+                                const leadingDays = firstDayOfMonth.getDay();
+                                const totalDays = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate();
+                                const trailingDays = (7 - ((leadingDays + totalDays) % 7)) % 7;
 
-                              {/* Day cells */}
-                              {Array.from({ length: new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate() }).map((_, i) => {
-                                const day = i + 1;
-                                const status = getDayStatus(day);
-                                const selectable = isDaySelectable(day);
-                                const dayData = getDayData(day);
-                                const dateObj = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), day);
-                                const isSelected = selectedDay?.toDateString() === dateObj.toDateString();
-                                const isToday = new Date().toDateString() === dateObj.toDateString();
+                                const prevMonthLastDay = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 0).getDate();
+                                const todayStr = new Date().toDateString();
 
-                                const getCellBackground = () => {
-                                  if (isSelected) return 'bg-purple-600';
-                                  switch (status) {
-                                    case 'available': return 'bg-white hover:bg-green-50';
-                                    case 'partial': return 'bg-white hover:bg-amber-50';
-                                    case 'booked': return 'bg-red-50/50';
-                                    case 'blocked': return 'bg-gray-100';
-                                    case 'past': return 'bg-gray-50';
-                                    default: return 'bg-white hover:bg-gray-50';
-                                  }
-                                };
+                                const cells: Array<
+                                  | { type: 'outside'; day: number; key: string }
+                                  | { type: 'day'; day: number; key: string }
+                                > = [
+                                  ...Array.from({ length: leadingDays }).map((_, i) => ({
+                                    type: 'outside' as const,
+                                    day: prevMonthLastDay - (leadingDays - 1 - i),
+                                    key: `prev-${i}`,
+                                  })),
+                                  ...Array.from({ length: totalDays }).map((_, i) => ({
+                                    type: 'day' as const,
+                                    day: i + 1,
+                                    key: `day-${i + 1}`,
+                                  })),
+                                  ...Array.from({ length: trailingDays }).map((_, i) => ({
+                                    type: 'outside' as const,
+                                    day: i + 1,
+                                    key: `next-${i}`,
+                                  })),
+                                ];
 
-                                const getTextColor = () => {
-                                  if (isSelected) return 'text-white';
-                                  switch (status) {
-                                    case 'available': return 'text-gray-900';
-                                    case 'partial': return 'text-gray-900';
-                                    case 'booked': return 'text-red-300';
-                                    case 'blocked': return 'text-gray-300';
-                                    case 'past': return 'text-gray-300';
-                                    default: return 'text-gray-700';
-                                  }
-                                };
+                                const renderCurrentMonthDay = (day: number) => {
+                                  const status = getDayStatus(day);
+                                  const selectable = isDaySelectable(day);
+                                  const dayData = getDayData(day);
+                                  const dateObj = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), day);
+                                  const isSelected = selectedDay?.toDateString() === dateObj.toDateString();
+                                  const isToday = todayStr === dateObj.toDateString();
 
-                                const getStatusIndicator = () => {
-                                  if (isSelected || status === 'past') return null;
-                                  switch (status) {
-                                    case 'available':
-                                      return <div className="w-2 h-2 rounded-full bg-green-500" />;
-                                    case 'partial':
-                                      return <div className="w-2 h-2 rounded-full bg-amber-500" />;
-                                    case 'booked':
-                                      return <div className="w-2 h-0.5 bg-red-300 rounded" />;
-                                    case 'blocked':
-                                      return <div className="w-2 h-0.5 bg-gray-400 rounded" />;
-                                    default:
-                                      return null;
-                                  }
-                                };
+                                  const showUnavailable = status === 'booked' || status === 'blocked';
 
-                                return (
-                                  <button
-                                    key={day}
-                                    onClick={() => {
-                                      if (selectable) {
-                                        handleDaySelect(dateObj);
+                                  return (
+                                    <button
+                                      key={`d-${day}`}
+                                      onClick={() => selectable && handleDaySelect(dateObj)}
+                                      disabled={!selectable}
+                                      className={`
+                                        relative h-10 sm:h-11 bg-transparent flex items-center justify-center
+                                        transition-colors
+                                        ${selectable ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}
+                                      `}
+                                      title={
+                                        status === 'blocked' ? 'Provider unavailable' :
+                                        status === 'booked' ? 'Fully booked' :
+                                        status === 'past' ? 'Past date' :
+                                        dayData?.available_count ? `${dayData.available_count} slot${dayData.available_count !== 1 ? 's' : ''} available` :
+                                        'Check availability'
                                       }
-                                    }}
-                                    disabled={!selectable}
-                                    className={`
-                                      relative h-14 sm:h-16 md:h-20 border-r border-b border-gray-100 last:border-r-0
-                                      flex flex-col items-center justify-start pt-1.5 sm:pt-2
-                                      transition-colors
-                                      ${getCellBackground()}
-                                      ${selectable ? 'cursor-pointer' : 'cursor-not-allowed'}
-                                    `}
-                                    title={
-                                      status === 'blocked' ? 'Provider unavailable' :
-                                      status === 'booked' ? 'Fully booked' :
-                                      status === 'past' ? 'Past date' :
-                                      dayData?.available_count ? `${dayData.available_count} slot${dayData.available_count !== 1 ? 's' : ''} available` :
-                                      'Check availability'
-                                    }
-                                  >
-                                    {/* Day number */}
-                                    <span className={`
-                                      text-sm sm:text-base font-medium
-                                      ${isSelected ? 'w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-white/20 flex items-center justify-center' : ''}
-                                      ${getTextColor()}
-                                      ${isToday && !isSelected ? 'w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center' : ''}
-                                    `}>
-                                      {day}
-                                    </span>
-
-                                    {/* Slot count */}
-                                    {dayData && dayData.available_count > 0 && status !== 'past' && (
-                                      <span className={`
-                                        text-[10px] sm:text-xs mt-0.5
-                                        ${isSelected ? 'text-purple-200' : 'text-gray-500'}
-                                      `}>
-                                        {dayData.available_count} {dayData.available_count === 1 ? 'slot' : 'slots'}
+                                    >
+                                      <span
+                                        className={`
+                                          inline-flex items-center justify-center
+                                          w-9 h-9 rounded-full text-sm font-medium
+                                          ${isSelected
+                                            ? 'bg-blue-600 text-white'
+                                            : isToday
+                                              ? 'border border-blue-600 text-blue-600'
+                                              : 'text-gray-900'
+                                          }
+                                          ${!isSelected && selectable ? 'hover:bg-gray-100' : ''}
+                                        `}
+                                      >
+                                        {day}
                                       </span>
-                                    )}
+                                    </button>
+                                  );
+                                };
 
-                                    {/* Status indicator dot */}
-                                    <div className="absolute bottom-1 sm:bottom-2 left-1/2 -translate-x-1/2">
-                                      {getStatusIndicator()}
-                                    </div>
-                                  </button>
-                                );
-                              })}
+                                return cells.map((cell) => {
+                                  if (cell.type === 'outside') {
+                                    return (
+                                      <div
+                                        key={cell.key}
+                                        className="h-10 sm:h-11 bg-transparent flex items-center justify-center text-sm text-gray-300 select-none"
+                                        aria-hidden="true"
+                                      >
+                                        {cell.day}
+                                      </div>
+                                    );
+                                  }
+                                  return renderCurrentMonthDay(cell.day);
+                                });
+                              })()}
                             </div>
                           </div>
                         )}
                       </div>
 
                       {/* Legend */}
-                      <div className="px-3 sm:px-4 pb-3 sm:pb-4">
-                        <div className="flex flex-wrap items-center justify-center gap-x-4 sm:gap-x-6 gap-y-2 text-xs sm:text-sm text-gray-500">
-                          <div className="flex items-center gap-1.5">
-                            <div className="w-2 h-2 rounded-full bg-green-500" />
+                      <div className="px-4 sm:px-6 pb-4">
+                        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-gray-500">
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-emerald-500" />
                             <span>Available</span>
                           </div>
-                          <div className="flex items-center gap-1.5">
-                            <div className="w-2 h-2 rounded-full bg-amber-500" />
-                            <span>Partial</span>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <div className="w-2 h-0.5 bg-red-300 rounded" />
-                            <span>Full</span>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <div className="w-2 h-0.5 bg-gray-400 rounded" />
-                            <span>Closed</span>
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-gray-300" />
+                            <span>Unavailable</span>
                           </div>
                         </div>
                       </div>

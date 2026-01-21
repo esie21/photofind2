@@ -649,6 +649,11 @@
     display: grid;
   }
 
+  /* Missing utility in generated CSS: used by booking calendar */
+  .grid-cols-7 {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+
   .hidden {
     display: none;
   }
