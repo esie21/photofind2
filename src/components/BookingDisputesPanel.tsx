@@ -29,8 +29,10 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
     setError(null);
     try {
       const data = await bookingService.getDisputedBookings();
+      console.log('Loaded disputes:', data.length, data); // Debug log
       setDisputes(data);
     } catch (err: any) {
+      console.error('Error loading disputes:', err);
       setError(err?.message || 'Failed to load disputes');
     } finally {
       setLoading(false);
@@ -143,6 +145,9 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
         </div>
       ) : (
         <div className="space-y-4">
+          <div className="bg-yellow-50 p-4 rounded-xl">
+            <p className="text-yellow-800">Debug: Found {disputes.length} disputes</p>
+          </div>
           {disputes.map((dispute) => (
             <div
               key={dispute.id}
@@ -164,13 +169,13 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                       <div className="flex items-center gap-2">
                         <User className="w-4 h-4 text-gray-400" />
                         <span className="text-gray-600">
-                          <span className="font-medium">Client:</span> {dispute.client_name}
+                          <span className="font-medium">Client:</span> {dispute.client_name || 'Unknown Client'}
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
                         <User className="w-4 h-4 text-gray-400" />
                         <span className="text-gray-600">
-                          <span className="font-medium">Provider:</span> {dispute.provider_name}
+                          <span className="font-medium">Provider:</span> {dispute.provider_name || 'Unknown Provider'}
                         </span>
                       </div>
                     </div>
@@ -274,7 +279,7 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                       setResolvedInFavorOf('client');
                       setShowResolveModal(true);
                     }}
-                    className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors text-sm font-medium"
+                    className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors text-sm font-medium border-2 border-red-500"
                   >
                     Resolve for Client
                   </button>
@@ -315,7 +320,7 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                   </div>
                   <div>
                     <p className="text-gray-500">Provider</p>
-                    <p className="font-medium">{selectedDispute.provider_name}</p>
+                    <p className="font-medium">{selectedDispute.provider_name || 'Unknown Provider'}</p>
                     <p className="text-gray-400 text-xs">{selectedDispute.provider_email}</p>
                   </div>
                 </div>

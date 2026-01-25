@@ -590,7 +590,8 @@ router.get('/disputed', verifyToken, async (req: Request & { userId?: string }, 
        FROM bookings b
        LEFT JOIN services s ON s.id = b.service_id
        LEFT JOIN users u1 ON u1.id = b.client_id
-       LEFT JOIN users u2 ON u2.id = b.provider_id
+       LEFT JOIN providers p ON p.id = b.provider_id
+       LEFT JOIN users u2 ON u2.id = p.user_id
        WHERE b.dispute_raised = TRUE OR b.status = 'disputed'
        ORDER BY b.updated_at DESC`
     );
@@ -1858,8 +1859,10 @@ router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string 
     }
 
     // Resolve client user ID (handle clients table FK)
+    // Use SAVEPOINT to prevent transaction abort if table doesn't exist
     let clientUserId = String(booking.client_id);
     try {
+      await client.query('SAVEPOINT resolve_client_user');
       const clientCheck = await client.query(
         `SELECT user_id FROM clients WHERE id::text = $1`,
         [String(booking.client_id)]
@@ -1867,13 +1870,20 @@ router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string 
       if (clientCheck.rows[0]?.user_id) {
         clientUserId = String(clientCheck.rows[0].user_id);
       }
+      await client.query('RELEASE SAVEPOINT resolve_client_user');
     } catch (e) {
       // clients table doesn't exist or client_id is already a user ID
+      // Rollback to savepoint to restore transaction to good state
+      await client.query('ROLLBACK TO SAVEPOINT resolve_client_user').catch(() => {
+        // If savepoint doesn't exist, transaction might already be aborted
+      });
     }
 
     // Resolve provider user ID (handle providers table FK)
+    // Use SAVEPOINT to prevent transaction abort if table doesn't exist
     let providerUserId = String(booking.provider_id);
     try {
+      await client.query('SAVEPOINT resolve_provider_user');
       const providerCheck = await client.query(
         `SELECT user_id FROM providers WHERE id::text = $1`,
         [String(booking.provider_id)]
@@ -1881,8 +1891,13 @@ router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string 
       if (providerCheck.rows[0]?.user_id) {
         providerUserId = String(providerCheck.rows[0].user_id);
       }
+      await client.query('RELEASE SAVEPOINT resolve_provider_user');
     } catch (e) {
       // providers table doesn't exist or provider_id is already a user ID
+      // Rollback to savepoint to restore transaction to good state
+      await client.query('ROLLBACK TO SAVEPOINT resolve_provider_user').catch(() => {
+        // If savepoint doesn't exist, transaction might already be aborted
+      });
     }
 
     // Check if user is the client
@@ -1913,6 +1928,15 @@ router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string 
 
     if (confirmed) {
       // Client confirms completion
+      // Verify transaction is still valid before proceeding
+      try {
+        await client.query('SELECT 1');
+      } catch (txError: any) {
+        // Transaction is aborted, rollback and return error
+        await client.query('ROLLBACK').catch(() => {});
+        return res.status(500).json({ error: 'Transaction error. Please try again.' });
+      }
+
       await client.query(
         `UPDATE bookings
          SET status = 'completed',
@@ -2136,10 +2160,22 @@ router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string 
         message: 'Dispute has been raised and admin has been notified'
       });
     }
-  } catch (error) {
-    await client.query('ROLLBACK');
+  } catch (error: any) {
+    // Ensure transaction is rolled back
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      // Transaction might already be rolled back or connection lost
+      console.error('Error during rollback:', rollbackError);
+    }
     console.error('Error confirming booking:', error);
-    return res.status(500).json({ error: 'Failed to process confirmation' });
+    
+    // Provide more specific error message
+    const errorMessage = error?.code === '25P02' 
+      ? 'Transaction error. Please try again.'
+      : error?.message || 'Failed to process confirmation';
+    
+    return res.status(500).json({ error: errorMessage });
   } finally {
     client.release();
   }

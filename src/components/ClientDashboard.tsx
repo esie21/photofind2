@@ -104,6 +104,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
           image: b.provider_image || b.image || '',
           provider_completed_at: b.provider_completed_at,
           completion_notes: b.completion_notes,
+          total_price: b.total_price || b.price || 0,
         };
       });
       setMyBookings(mapped);
@@ -472,6 +473,8 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                             <span>{booking.date}</span>
                             <Clock className="w-3 h-3 ml-1" />
                             <span>{booking.time}</span>
+                            <DollarSign className="w-3 h-3" />
+                            <span>{booking.total_price}</span>
                           </div>
                           <div className="mt-2 flex flex-wrap items-center gap-2">
                             <span className={`inline-block px-2 py-1 text-xs rounded-full ${
