@@ -135,6 +135,29 @@ async function autoCompletePastBookings(providerId?: string) {
   }
 }
 
+async function autoCancelOverduePendingBookings(providerId?: string) {
+  try {
+    const baseQuery = `
+      UPDATE bookings
+      SET status = 'cancelled',
+          cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE status = 'pending'
+        AND start_date IS NOT NULL
+        AND start_date <= CURRENT_TIMESTAMP
+    `;
+
+    if (providerId) {
+      await pool.query(`${baseQuery} AND provider_id::text = $1`, [providerId]);
+    } else {
+      await pool.query(baseQuery);
+    }
+  } catch (e) {
+    console.log('autoCancelOverduePendingBookings error (non-fatal):', e);
+  }
+}
+
+
 async function ensureBookingChatExists(bookingId: string, clientId: string, providerId: string): Promise<number | null> {
   const existing = await pool.query('SELECT id FROM chats WHERE booking_id::text = $1', [bookingId]);
   if (existing.rows[0]) return existing.rows[0].id as number;
@@ -164,6 +187,7 @@ router.get('/', verifyToken, async (req: Request & { userId?: string }, res: Res
   if (role !== 'admin') return res.status(403).json({ error: 'Access denied' });
 
   try {
+    await autoCancelOverduePendingBookings();
     await autoCompletePastBookings();
     const q = `
       SELECT b.*, s.title as service_title, u1.name as client_name, u2.name as provider_name
@@ -387,6 +411,7 @@ router.get('/provider/my', verifyToken, async (req: Request & { userId?: string 
   if (role !== 'provider' && role !== 'admin') return res.status(403).json({ error: 'Access denied' });
 
   try {
+    await autoCancelOverduePendingBookings(providerId);
     await autoCompletePastBookings(providerId);
 
     // Check what tables exist
@@ -478,6 +503,7 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
   if (!clientId) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
+    await autoCancelOverduePendingBookings();
     // Check what tables exist
     const tablesCheck = await pool.query(`
       SELECT table_name FROM information_schema.tables
@@ -582,19 +608,38 @@ router.get('/disputed', verifyToken, async (req: Request & { userId?: string }, 
   if (role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
 
   try {
-    const { rows } = await pool.query(
-      `SELECT b.*,
-              s.title as service_title,
-              u1.name as client_name, u1.email as client_email,
-              u2.name as provider_name, u2.email as provider_email
-       FROM bookings b
-       LEFT JOIN services s ON s.id = b.service_id
-       LEFT JOIN users u1 ON u1.id = b.client_id
-       LEFT JOIN providers p ON p.id = b.provider_id
-       LEFT JOIN users u2 ON u2.id = p.user_id
-       WHERE b.dispute_raised = TRUE OR b.status = 'disputed'
-       ORDER BY b.updated_at DESC`
-    );
+    const tablesCheck = await pool.query(`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name IN ('providers', 'clients')
+    `);
+    const existingTables = tablesCheck.rows.map((r: any) => r.table_name);
+    const hasProvidersTable = existingTables.includes('providers');
+    const hasClientsTable = existingTables.includes('clients');
+
+    const clientJoin = hasClientsTable
+      ? `LEFT JOIN clients c ON c.id = b.client_id
+         LEFT JOIN users u1 ON u1.id = c.user_id`
+      : `LEFT JOIN users u1 ON u1.id = b.client_id`;
+
+    const providerJoin = hasProvidersTable
+      ? `LEFT JOIN providers p ON p.id = b.provider_id
+         LEFT JOIN users u2 ON u2.id = p.user_id`
+      : `LEFT JOIN users u2 ON u2.id = b.provider_id`;
+
+    const query = `
+      SELECT b.*,
+             s.title as service_title,
+             u1.name as client_name, u1.email as client_email,
+             u2.name as provider_name, u2.email as provider_email
+      FROM bookings b
+      LEFT JOIN services s ON s.id::text = b.service_id::text
+      ${clientJoin}
+      ${providerJoin}
+      WHERE b.dispute_raised = TRUE OR b.status = 'disputed'
+      ORDER BY b.updated_at DESC
+    `;
+
+    const { rows } = await pool.query(query);
 
     if (rows.length === 0) {
       return res.json({ data: [] });
@@ -764,6 +809,18 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
   if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
 
   try {
+    await pool.query(
+      `UPDATE bookings
+       SET status = 'cancelled',
+           cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $1
+         AND status = 'pending'
+         AND start_date IS NOT NULL
+         AND start_date <= CURRENT_TIMESTAMP`,
+      [bookingId]
+    );
+
     // Check what tables exist
     const tablesCheck = await pool.query(`
       SELECT table_name FROM information_schema.tables
@@ -2279,7 +2336,9 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
     let clientUserId = String(booking.client_id);
     let providerUserId = String(booking.provider_id);
 
-    // Check if providers table exists and resolve provider user ID
+    // Resolve provider user ID from providers table if present.
+    // Use SAVEPOINT so missing tables (or other errors) don't abort the transaction.
+    await dbClient.query('SAVEPOINT sp_resolve_provider_user');
     try {
       const providerRes = await dbClient.query(
         `SELECT user_id FROM providers WHERE id::text = $1`,
@@ -2288,11 +2347,17 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
       if (providerRes.rows[0]?.user_id) {
         providerUserId = String(providerRes.rows[0].user_id);
       }
-    } catch (e) {
-      // providers table doesn't exist, use provider_id directly
+    } catch (_e) {
+      await dbClient.query('ROLLBACK TO SAVEPOINT sp_resolve_provider_user');
+    } finally {
+      try {
+        await dbClient.query('RELEASE SAVEPOINT sp_resolve_provider_user');
+      } catch (_e) {
+      }
     }
 
-    // Check if clients table exists and resolve client user ID
+    // Resolve client user ID from clients table if present.
+    await dbClient.query('SAVEPOINT sp_resolve_client_user');
     try {
       const clientRes = await dbClient.query(
         `SELECT user_id FROM clients WHERE id::text = $1`,
@@ -2301,8 +2366,13 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
       if (clientRes.rows[0]?.user_id) {
         clientUserId = String(clientRes.rows[0].user_id);
       }
-    } catch (e) {
-      // clients table doesn't exist, use client_id directly
+    } catch (_e) {
+      await dbClient.query('ROLLBACK TO SAVEPOINT sp_resolve_client_user');
+    } finally {
+      try {
+        await dbClient.query('RELEASE SAVEPOINT sp_resolve_client_user');
+      } catch (_e) {
+      }
     }
 
     // Get payment info
@@ -2328,12 +2398,18 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
            dispute_resolution = $2,
            dispute_resolved_at = CURRENT_TIMESTAMP,
            dispute_resolved_by = $3,
-           completed_at = CASE WHEN $1 = 'completed' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE completed_at END,
-           cancelled_at = CASE WHEN $1 = 'cancelled' THEN CURRENT_TIMESTAMP ELSE cancelled_at END,
-           updated_at = CURRENT_TIMESTAMP
+           completed_at = CASE 
+              WHEN $1::varchar = 'completed' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE completed_at 
+           END,
+           cancelled_at = CASE
+              WHEN $1::varchar = 'cancelled' THEN CURRENT_TIMESTAMP ELSE cancelled_at END,
+              updated_at = CURRENT_TIMESTAMP
        WHERE id::text = $4`,
+       
       [finalStatus, resolution.trim(), currentUserId, bookingId]
+      
     );
+    
 
     let paymentReleased = false;
     let releasedAmount = 0;

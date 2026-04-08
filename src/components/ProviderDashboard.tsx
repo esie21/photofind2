@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
-import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw } from 'lucide-react';
+import { useState, useRef, useEffect, useMemo } from 'react';
+import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle } from 'lucide-react';
 
 // Category options for providers and services
 const CATEGORY_OPTIONS = [
@@ -61,20 +61,26 @@ export function ProviderDashboard() {
   const [rescheduleBooking, setRescheduleBooking] = useState<any>(null);
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [completeBookingData, setCompleteBookingData] = useState<any>(null);
+  const [recentBookingFilter, setRecentBookingFilter] = useState<'all' | 'upcoming' | 'completed' | 'cancelled'>('all');
+  const [allBookingFilter, setAllBookingFilter] = useState<'all' | 'upcoming' | 'completed' | 'cancelled'>('all');
+  const [recentBookingPage, setRecentBookingPage] = useState(1);
+  const [allBookingPage, setAllBookingPage] = useState(1);
+  const recentBookingItemsPerPage = 5;
+  const allBookingItemsPerPage = 10;
   const [formState, setFormState] = useState<any>({
-  name: user?.name || 'Sarah Johnson',
-  title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
-  bio: user?.bio || '',
-  location: user?.location || '',
-  category: user?.category || 'Photography',
-  years_experience: user?.years_experience || 10,
-  profile_image: user?.profile_image
-    ? getUploadUrl(user.profile_image)
-    : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
-  portfolio_images: (user?.portfolio_images || []).map(
-    (img: string) => getUploadUrl(img)
-  ),
-});
+    name: user?.name || 'Sarah Johnson',
+    title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
+    bio: user?.bio || '',
+    location: user?.location || '',
+    category: user?.category || 'Photography',
+    years_experience: user?.years_experience || 10,
+    profile_image: user?.profile_image
+      ? getUploadUrl(user.profile_image)
+      : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
+    portfolio_images: (user?.portfolio_images || []).map(
+      (img: string) => getUploadUrl(img)
+    ),
+  });
 
 
   useEffect(() => {
@@ -113,37 +119,37 @@ export function ProviderDashboard() {
   })();
 
   // Sync formState when user changes
-useEffect(() => {
-  if (!user) return;
+  useEffect(() => {
+    if (!user) return;
 
-  setFormState({
-    name: user.name || 'Sarah Johnson',
-    title: user.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
-    bio: user.bio || '',
-    location: user.location || '',
-    category: user.category || 'Photography',
-    years_experience: user.years_experience || 10,
-    profile_image: user.profile_image
-      ? getUploadUrl(user.profile_image)
-      : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
-    portfolio_images: (user.portfolio_images || []).map(
-      (img: string) => getUploadUrl(img)
-    ),
-  });
-}, [user]);
+    setFormState({
+      name: user.name || 'Sarah Johnson',
+      title: user.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
+      bio: user.bio || '',
+      location: user.location || '',
+      category: user.category || 'Photography',
+      years_experience: user.years_experience || 10,
+      profile_image: user.profile_image
+        ? getUploadUrl(user.profile_image)
+        : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
+      portfolio_images: (user.portfolio_images || []).map(
+        (img: string) => getUploadUrl(img)
+      ),
+    });
+  }, [user]);
 
   // Load services/packages for the provider
   useEffect(() => {
     const loadPackages = async () => {
       if (!user || user.role !== 'provider') return;
-      
+
       setIsLoadingPackages(true);
       try {
         const allServices = await serviceService.getAllServices();
         console.log('All services loaded:', allServices.length);
         console.log('Current user ID:', user.id);
         console.log('Sample service:', allServices[0]);
-        
+
         // Filter services for current provider (handle both snake_case and camelCase)
         const providerServices = allServices.filter((service: any) => {
           const serviceUserId = String(service.providerId || service.provider_id || '');
@@ -159,9 +165,9 @@ useEffect(() => {
           }
           return matches;
         });
-        
+
         console.log('Filtered provider services:', providerServices.length);
-        
+
         if (providerServices.length > 0) {
           setPackages(providerServices.map((s: any) => ({
             id: s.id,
@@ -212,7 +218,7 @@ useEffect(() => {
           const providerServices = allServices.filter(
             (service: any) => String(service.providerId || service.provider_id) === String(user.id)
           );
-          
+
           if (providerServices.length > 0) {
             setPackages(providerServices.map((s: any) => ({
               id: s.id,
@@ -331,6 +337,49 @@ useEffect(() => {
 
   const bookingRequests = providerBookings;
 
+  const getBookingCategory = (status: string) => {
+    if (status === 'completed') return 'completed';
+    if (['cancelled', 'rejected', 'disputed'].includes(status)) return 'cancelled';
+    return 'upcoming';
+  };
+
+  const recentFilteredBookings = useMemo(() => {
+    const sorted = [...bookingRequests].sort((a, b) => {
+      const aDate = new Date(a.start_date || a.date).getTime();
+      const bDate = new Date(b.start_date || b.date).getTime();
+      return bDate - aDate;
+    });
+    if (recentBookingFilter === 'all') return sorted;
+    return sorted.filter((booking) => getBookingCategory(booking.status) === recentBookingFilter);
+  }, [bookingRequests, recentBookingFilter]);
+
+  const recentTotalPages = Math.max(1, Math.ceil(recentFilteredBookings.length / recentBookingItemsPerPage));
+  const safeRecentPage = Math.min(recentBookingPage, recentTotalPages);
+  const recentPaginatedBookings = useMemo(() => {
+    const start = (safeRecentPage - 1) * recentBookingItemsPerPage;
+    return recentFilteredBookings.slice(start, start + recentBookingItemsPerPage);
+  }, [recentFilteredBookings, safeRecentPage]);
+
+  const allFilteredBookings = useMemo(() => {
+    if (allBookingFilter === 'all') return bookingRequests;
+    return bookingRequests.filter((booking) => getBookingCategory(booking.status) === allBookingFilter);
+  }, [bookingRequests, allBookingFilter]);
+
+  const allTotalPages = Math.max(1, Math.ceil(allFilteredBookings.length / allBookingItemsPerPage));
+  const safeAllPage = Math.min(allBookingPage, allTotalPages);
+  const allPaginatedBookings = useMemo(() => {
+    const start = (safeAllPage - 1) * allBookingItemsPerPage;
+    return allFilteredBookings.slice(start, start + allBookingItemsPerPage);
+  }, [allFilteredBookings, safeAllPage]);
+
+  useEffect(() => {
+    setRecentBookingPage(1);
+  }, [recentBookingFilter]);
+
+  useEffect(() => {
+    setAllBookingPage(1);
+  }, [allBookingFilter]);
+
   const portfolioImages = [
     'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080',
     'https://images.unsplash.com/photo-1643264623879-bb85ea39c62a?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMHBob3RvZ3JhcGhlciUyMHByb2Zlc3Npb25hbHxlbnwxfHx8fDE3NjQ0MDc5NTR8MA&ixlib=rb-4.1.0&q=80&w=1080',
@@ -354,11 +403,10 @@ useEffect(() => {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as any)}
-              className={`px-6 py-3 rounded-xl whitespace-nowrap transition-all ${
-                activeTab === tab.id
-                  ? 'bg-purple-600 text-white'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
+              className={`px-6 py-3 rounded-xl whitespace-nowrap transition-all ${activeTab === tab.id
+                ? 'bg-purple-600 text-white'
+                : 'text-gray-600 hover:bg-gray-100'
+                }`}
             >
               {tab.label}
             </button>
@@ -389,9 +437,23 @@ useEffect(() => {
 
             {/* Booking Requests */}
             <div className="bg-white rounded-2xl p-6 shadow-sm">
-              <div className="flex items-center justify-between mb-6">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
                 <h2 className="text-gray-900">Recent Booking Requests</h2>
-                <button className="text-sm text-purple-600 hover:text-purple-700">View all</button>
+                <div className="flex items-center gap-2">
+                  {(['all', 'upcoming', 'completed', 'cancelled'] as const).map((filter) => (
+                    <button
+                      key={filter}
+                      onClick={() => setRecentBookingFilter(filter)}
+                      className={`px-3 py-1.5 rounded-lg text-sm capitalize transition-colors ${
+                        recentBookingFilter === filter
+                          ? 'bg-purple-600 text-white'
+                          : 'border border-gray-200 text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      {filter}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div className="space-y-4">
@@ -407,13 +469,13 @@ useEffect(() => {
                     onRetry={fetchBookings}
                     retrying={isLoadingBookings}
                   />
-                ) : bookingRequests.length === 0 ? (
+                ) : recentFilteredBookings.length === 0 ? (
                   <EmptyState
                     type="bookings"
                     title="No booking requests"
                     description="New booking requests from clients will appear here."
                   />
-                ) : bookingRequests.map((booking) => (
+                ) : recentPaginatedBookings.map((booking) => (
                   <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
                     <div className="flex flex-col sm:flex-row gap-4">
                       <ImageWithFallback
@@ -474,7 +536,7 @@ useEffect(() => {
                               <XCircle className="w-4 h-4" />
                               Decline
                             </button>
-                            <button 
+                            <button
                               onClick={() => {
                                 setSelectedBookingId(booking.id);
                                 setShowChat(true);
@@ -489,27 +551,27 @@ useEffect(() => {
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm">
                               {booking.status === 'awaiting_confirmation' ? 'Awaiting Confirmation' :
-                               booking.status === 'disputed' ? 'Disputed' :
-                               booking.status === 'completed' ? 'Completed' : 'Confirmed'}
+                                booking.status === 'disputed' ? 'Disputed' :
+                                  booking.status === 'completed' ? 'Completed' : 'Confirmed'}
                             </span>
                             {['accepted', 'confirmed'].includes(booking.status) &&
-                             new Date(booking.start_date || booking.date) <= new Date() && (
-                              <button
-                                onClick={() => {
-                                  setCompleteBookingData({
-                                    id: String(booking.id),
-                                    service_title: booking.service || 'Service',
-                                    client_name: booking.client || 'Client',
-                                    start_date: booking.start_date || booking.date,
-                                  });
-                                  setShowCompleteModal(true);
-                                }}
-                                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center gap-2"
-                              >
-                                <CheckCircle className="w-4 h-4" />
-                                Mark Complete
-                              </button>
-                            )}
+                              new Date(booking.start_date || booking.date) <= new Date() && (
+                                <button
+                                  onClick={() => {
+                                    setCompleteBookingData({
+                                      id: String(booking.id),
+                                      service_title: booking.service || 'Service',
+                                      client_name: booking.client || 'Client',
+                                      start_date: booking.start_date || booking.date,
+                                    });
+                                    setShowCompleteModal(true);
+                                  }}
+                                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center gap-2"
+                                >
+                                  <CheckCircle className="w-4 h-4" />
+                                  Mark Complete
+                                </button>
+                              )}
                             {['pending', 'accepted', 'confirmed'].includes(booking.status) && (
                               <button
                                 onClick={() => {
@@ -545,6 +607,45 @@ useEffect(() => {
                   </div>
                 ))}
               </div>
+              {!isLoadingBookings && !bookingsError && recentFilteredBookings.length > 0 && (
+                <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <p className="text-sm text-gray-600">
+                    Showing {(safeRecentPage - 1) * recentBookingItemsPerPage + 1}-
+                    {(safeRecentPage - 1) * recentBookingItemsPerPage + recentPaginatedBookings.length} of {recentFilteredBookings.length}
+                  </p>
+                  {recentTotalPages > 1 && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        onClick={() => setRecentBookingPage((p) => Math.max(1, p - 1))}
+                        disabled={safeRecentPage === 1}
+                        className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                      >
+                        Previous
+                      </button>
+                      {Array.from({ length: recentTotalPages }, (_, i) => i + 1).map((page) => (
+                        <button
+                          key={page}
+                          onClick={() => setRecentBookingPage(page)}
+                          className={`w-9 h-9 rounded-lg text-sm ${
+                            safeRecentPage === page
+                              ? 'bg-purple-600 text-white'
+                              : 'border border-gray-200 text-gray-700 hover:bg-gray-50'
+                          }`}
+                        >
+                          {page}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setRecentBookingPage((p) => Math.min(recentTotalPages, p + 1))}
+                        disabled={safeRecentPage === recentTotalPages}
+                        className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -723,11 +824,10 @@ useEffect(() => {
                     {upcomingBookings.slice(0, 10).map((booking) => (
                       <span
                         key={booking.id}
-                        className={`px-3 py-2 rounded-lg text-sm ${
-                          booking.status === 'pending'
-                            ? 'bg-yellow-100 text-yellow-700'
-                            : 'bg-purple-100 text-purple-700'
-                        }`}
+                        className={`px-3 py-2 rounded-lg text-sm ${booking.status === 'pending'
+                          ? 'bg-yellow-100 text-yellow-700'
+                          : 'bg-purple-100 text-purple-700'
+                          }`}
                       >
                         {booking.date} - {booking.client}
                       </span>
@@ -778,7 +878,7 @@ useEffect(() => {
                           console.log('Saving profile payload', { payload, userId: user.id });
                           const res = await userService.updateUser(user.id, payload);
                           console.log('Update response', res);
-                          
+
                           // Save packages/services
                           if (packages.length > 0) {
                             try {
@@ -787,7 +887,7 @@ useEffect(() => {
                                   // Determine pricing type based on enabled options
                                   const pricingType = pkg.enable_hourly && pkg.enable_package ? 'both'
                                     : pkg.enable_hourly ? 'hourly'
-                                    : 'package';
+                                      : 'package';
 
                                   // Use package_price as primary price for backward compatibility
                                   const primaryPrice = pkg.enable_package ? pkg.package_price : pkg.hourly_rate;
@@ -836,7 +936,7 @@ useEffect(() => {
                               // Continue even if packages fail to save
                             }
                           }
-                          
+
                           await refreshUser();
                           setEditMode(false);
                         } catch (err) {
@@ -941,9 +1041,9 @@ useEffect(() => {
 
                 <div>
                   <label htmlFor="profile-bio" className="block text-sm text-gray-700 mb-2">Bio</label>
-                    <textarea
-                      id="profile-bio"
-                      name="bio"
+                  <textarea
+                    id="profile-bio"
+                    name="bio"
                     value={formState.bio}
                     onChange={(e) => setFormState((s: any) => ({ ...s, bio: e.target.value }))}
                     rows={4}
@@ -1222,11 +1322,10 @@ useEffect(() => {
                             <label className="block text-xs font-medium text-gray-700 mb-2">Pricing Options (select one or both)</label>
                             <div className="flex gap-2">
                               <label
-                                className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2 ${
-                                  pkg.enable_hourly
-                                    ? 'bg-blue-600 text-white'
-                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                }`}
+                                className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2 ${pkg.enable_hourly
+                                  ? 'bg-blue-600 text-white'
+                                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                  }`}
                               >
                                 <input
                                   type="checkbox"
@@ -1245,11 +1344,10 @@ useEffect(() => {
                                 ⏱️ Hourly
                               </label>
                               <label
-                                className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2 ${
-                                  pkg.enable_package
-                                    ? 'bg-green-600 text-white'
-                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                }`}
+                                className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2 ${pkg.enable_package
+                                  ? 'bg-green-600 text-white'
+                                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                  }`}
                               >
                                 <input
                                   type="checkbox"
@@ -1445,173 +1543,241 @@ useEffect(() => {
             })()}
 
             <div className="bg-white rounded-2xl p-6 shadow-sm">
-            <h2 className="text-gray-900 mb-6">All Bookings</h2>
-            {isLoadingBookings ? (
-              <div className="space-y-4">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <BookingCardSkeleton key={i} />
-                ))}
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+                <h2 className="text-gray-900">All Bookings</h2>
+                <div className="flex items-center gap-2">
+                  {(['all', 'upcoming', 'completed', 'cancelled'] as const).map((filter) => (
+                    <button
+                      key={filter}
+                      onClick={() => setAllBookingFilter(filter)}
+                      className={`px-3 py-1.5 rounded-lg text-sm capitalize transition-colors ${
+                        allBookingFilter === filter
+                          ? 'bg-purple-600 text-white'
+                          : 'border border-gray-200 text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      {filter}
+                    </button>
+                  ))}
+                </div>
               </div>
-            ) : bookingsError ? (
-              <ErrorState
-                type="network"
-                title="Failed to load bookings"
-                message={bookingsError}
-                onRetry={fetchBookings}
-                retrying={isLoadingBookings}
-              />
-            ) : bookingRequests.length === 0 ? (
-              <EmptyState
-                type="bookings"
-                title="No bookings yet"
-                description="When clients book your services, they'll appear here."
-              />
-            ) : (
-              <div className="space-y-4">
-                {bookingRequests.map((booking) => {
-                  const statusStyles: Record<string, string> = {
-                    pending: 'bg-yellow-100 text-yellow-700',
-                    accepted: 'bg-green-100 text-green-700',
-                    confirmed: 'bg-green-100 text-green-700',
-                    awaiting_confirmation: 'bg-orange-100 text-orange-700',
-                    completed: 'bg-blue-100 text-blue-700',
-                    cancelled: 'bg-gray-100 text-gray-700',
-                    rejected: 'bg-red-100 text-red-700',
-                    disputed: 'bg-red-100 text-red-700',
-                  };
-                  const statusLabels: Record<string, string> = {
-                    awaiting_confirmation: 'Awaiting Client Confirmation',
-                    disputed: 'Disputed - Under Review',
-                  };
-                  return (
-                    <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
-                      <div className="flex flex-col sm:flex-row gap-4">
-                        <ImageWithFallback
-                          src={booking.image}
-                          alt={booking.client}
-                          className="w-full sm:w-20 h-20 object-cover rounded-lg"
-                        />
-                        <div className="flex-1">
-                          <div className="flex items-start justify-between mb-2">
-                            <div>
-                              <h3 className="text-gray-900 font-medium">{booking.client}</h3>
-                              <p className="text-sm text-gray-600">{booking.service || 'Service'}</p>
+              {isLoadingBookings ? (
+                <div className="space-y-4">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <BookingCardSkeleton key={i} />
+                  ))}
+                </div>
+              ) : bookingsError ? (
+                <ErrorState
+                  type="network"
+                  title="Failed to load bookings"
+                  message={bookingsError}
+                  onRetry={fetchBookings}
+                  retrying={isLoadingBookings}
+                />
+              ) : allFilteredBookings.length === 0 ? (
+                <EmptyState
+                  type="bookings"
+                  title="No bookings yet"
+                  description="When clients book your services, they'll appear here."
+                />
+              ) : (
+                <div className="space-y-4">
+                  {allPaginatedBookings.map((booking) => {
+                    const statusStyles: Record<string, string> = {
+                      pending: 'bg-yellow-100 text-yellow-700',
+                      accepted: 'bg-green-100 text-green-700',
+                      confirmed: 'bg-green-100 text-green-700',
+                      awaiting_confirmation: 'bg-orange-100 text-orange-700',
+                      completed: 'bg-blue-100 text-blue-700',
+                      cancelled: 'bg-gray-100 text-gray-700',
+                      rejected: 'bg-red-100 text-red-700',
+                      disputed: 'bg-red-100 text-red-700',
+                    };
+                    const statusLabels: Record<string, string> = {
+                      awaiting_confirmation: 'Awaiting Client Confirmation',
+                      disputed: 'Disputed - Under Review',
+                    };
+                    return (
+                      <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
+                        <div className="flex flex-col sm:flex-row gap-4">
+                          <ImageWithFallback
+                            src={booking.image}
+                            alt={booking.client}
+                            className="w-full sm:w-20 h-20 object-cover rounded-lg"
+                          />
+                          <div className="flex-1">
+                            <div className="flex items-start justify-between mb-2">
+                              <div>
+                                <h3 className="text-gray-900 font-medium">{booking.client}</h3>
+                                <p className="text-sm text-gray-600">{booking.service || 'Service'}</p>
+                              </div>
+                              <span className={`px-3 py-1 rounded-full text-sm ${statusStyles[booking.status] || 'bg-gray-100 text-gray-700'}`}>
+                                {statusLabels[booking.status] || booking.status.replace('_', ' ')}
+                              </span>
                             </div>
-                            <span className={`px-3 py-1 rounded-full text-sm ${statusStyles[booking.status] || 'bg-gray-100 text-gray-700'}`}>
-                              {statusLabels[booking.status] || booking.status.replace('_', ' ')}
-                            </span>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600 mb-3">
-                            <div className="flex items-center gap-1">
-                              <Calendar className="w-4 h-4" />
-                              <span>{booking.date}</span>
-                            </div>
-                            <span>{booking.time}</span>
-                            <span className="text-purple-600 font-medium">${booking.amount?.toLocaleString()}</span>
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            {booking.status === 'pending' && (
-                              <>
-                                <button
-                                  onClick={async () => {
-                                    try {
-                                      await bookingService.updateBooking(String(booking.id), { status: 'accepted' } as any);
-                                      setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'accepted' } : b));
-                                      toast.success('Booking accepted', `Booking with ${booking.client} has been confirmed.`);
-                                    } catch (e) {
-                                      console.error('Failed to accept booking', e);
-                                      toast.error('Failed to accept', 'Please try again.');
-                                    }
-                                  }}
-                                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm flex items-center gap-2"
-                                >
-                                  <CheckCircle className="w-4 h-4" />
-                                  Accept
-                                </button>
-                                <button
-                                  onClick={async () => {
-                                    try {
-                                      await bookingService.updateBooking(String(booking.id), { status: 'rejected' } as any);
-                                      setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'rejected' } : b));
-                                      toast.info('Booking declined', 'The client has been notified.');
-                                    } catch (e) {
-                                      console.error('Failed to reject booking', e);
-                                      toast.error('Failed to decline', 'Please try again.');
-                                    }
-                                  }}
-                                  className="px-4 py-2 border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm flex items-center gap-2"
-                                >
-                                  <XCircle className="w-4 h-4" />
-                                  Decline
-                                </button>
-                              </>
-                            )}
-                            {['accepted', 'confirmed'].includes(booking.status) &&
-                             new Date(booking.start_date || booking.date) <= new Date() && (
-                              <button
-                                onClick={() => {
-                                  setCompleteBookingData({
-                                    id: String(booking.id),
-                                    service_title: booking.service || 'Service',
-                                    client_name: booking.client || 'Client',
-                                    start_date: booking.start_date || booking.date,
-                                  });
-                                  setShowCompleteModal(true);
-                                }}
-                                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center gap-2"
-                              >
-                                <CheckCircle className="w-4 h-4" />
-                                Mark Complete
-                              </button>
-                            )}
-                            {['pending', 'accepted', 'confirmed'].includes(booking.status) && (
-                              <button
-                                onClick={() => {
-                                  setRescheduleBooking({
-                                    id: booking.id,
-                                    service: booking.service,
-                                    client: booking.client,
-                                    date: booking.date,
-                                    time: booking.time,
-                                  });
-                                  setShowRescheduleModal(true);
-                                }}
-                                className="px-4 py-2 border border-orange-500 text-orange-600 rounded-lg hover:bg-orange-50 transition-colors text-sm flex items-center gap-2"
-                              >
-                                <RefreshCw className="w-4 h-4" />
-                                Reschedule
-                              </button>
-                            )}
-                            {booking.status === 'awaiting_confirmation' && (
-                              <span className="px-3 py-2 text-orange-600 text-sm flex items-center gap-1">
+                            <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600 mb-3">
+                              <div className="flex items-center gap-1">
                                 <Calendar className="w-4 h-4" />
-                                Waiting for client to confirm (48h timeout)
-                              </span>
-                            )}
-                            {booking.status === 'disputed' && (
-                              <span className="px-3 py-2 text-red-600 text-sm flex items-center gap-1">
-                                <XCircle className="w-4 h-4" />
-                                Under admin review
-                              </span>
-                            )}
-                            <button
-                              onClick={() => {
-                                setSelectedBookingId(booking.id);
-                                setShowChat(true);
-                              }}
-                              className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
-                            >
-                              <MessageSquare className="w-4 h-4" />
-                              Message
-                            </button>
+                                <span>{booking.date}</span>
+                              </div>
+                              <span>{booking.time}</span>
+                              <span className="text-purple-600 font-medium">${booking.amount?.toLocaleString()}</span>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {booking.status === 'pending' && (
+                                <>
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        await bookingService.updateBooking(String(booking.id), { status: 'accepted' } as any);
+                                        setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'accepted' } : b));
+                                        toast.success('Booking accepted', `Booking with ${booking.client} has been confirmed.`);
+                                      } catch (e) {
+                                        console.error('Failed to accept booking', e);
+                                        toast.error('Failed to accept', 'Please try again.');
+                                      }
+                                    }}
+                                    className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm flex items-center gap-2"
+                                  >
+                                    <CheckCircle className="w-4 h-4" />
+                                    Accept
+                                  </button>
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        await bookingService.updateBooking(String(booking.id), { status: 'rejected' } as any);
+                                        setProviderBookings((prev) => prev.map((b: any) => b.id === booking.id ? { ...b, status: 'rejected' } : b));
+                                        toast.info('Booking declined', 'The client has been notified.');
+                                      } catch (e) {
+                                        console.error('Failed to reject booking', e);
+                                        toast.error('Failed to decline', 'Please try again.');
+                                      }
+                                    }}
+                                    className="px-4 py-2 border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm flex items-center gap-2"
+                                  >
+                                    <XCircle className="w-4 h-4" />
+                                    Decline
+                                  </button>
+                                </>
+                              )}
+                              {['accepted', 'confirmed'].includes(booking.status) &&
+                                new Date(booking.start_date || booking.date) <= new Date() && (
+                                  <button
+                                    onClick={() => {
+                                      setCompleteBookingData({
+                                        id: String(booking.id),
+                                        service_title: booking.service || 'Service',
+                                        client_name: booking.client || 'Client',
+                                        start_date: booking.start_date || booking.date,
+                                      });
+                                      setShowCompleteModal(true);
+                                    }}
+                                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center gap-2"
+                                  >
+                                    <CheckCircle className="w-4 h-4" />
+                                    Mark Complete
+                                  </button>
+                                )}
+                              {['pending', 'accepted', 'confirmed'].includes(booking.status) && (
+                                <button
+                                  onClick={() => {
+                                    setRescheduleBooking({
+                                      id: booking.id,
+                                      service: booking.service,
+                                      client: booking.client,
+                                      date: booking.date,
+                                      time: booking.time,
+                                    });
+                                    setShowRescheduleModal(true);
+                                  }}
+                                  className="px-4 py-2 border border-orange-500 text-orange-600 rounded-lg hover:bg-orange-50 transition-colors text-sm flex items-center gap-2"
+                                >
+                                  <RefreshCw className="w-4 h-4" />
+                                  Reschedule
+                                </button>
+                              )}
+                              {booking.status === 'awaiting_confirmation' && (
+                                <span className="px-3 py-2 text-orange-600 text-sm flex items-center gap-1">
+                                  <Calendar className="w-4 h-4" />
+                                  Waiting for client to confirm (48h timeout)
+                                </span>
+                              )}
+                              {booking.status === 'disputed' && (
+                                <div className="w-full mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                                  <div className="flex items-start gap-2">
+                                    <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                                    <div>
+                                      <h4 className="text-sm font-semibold text-red-800">Dispute Raised</h4>
+                                      <p className="text-sm text-red-700 mt-1">
+                                        {booking.dispute_reason
+                                          ? `Client Reason: "${booking.dispute_reason}"`
+                                          : 'The client has disputed this booking. An admin will review it shortly.'}
+                                      </p>
+                                      <p className="text-xs text-red-600 mt-2">
+                                        Status: Under Admin Review. You will be notified of the resolution.
+                                      </p>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                              <button
+                                onClick={() => {
+                                  setSelectedBookingId(booking.id);
+                                  setShowChat(true);
+                                }}
+                                className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
+                              >
+                                <MessageSquare className="w-4 h-4" />
+                                Message
+                              </button>
+                            </div>
                           </div>
                         </div>
                       </div>
+                    );
+                  })}
+                </div>
+              )}
+              {!isLoadingBookings && !bookingsError && allFilteredBookings.length > 0 && (
+                <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <p className="text-sm text-gray-600">
+                    Showing {(safeAllPage - 1) * allBookingItemsPerPage + 1}-
+                    {(safeAllPage - 1) * allBookingItemsPerPage + allPaginatedBookings.length} of {allFilteredBookings.length}
+                  </p>
+                  {allTotalPages > 1 && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        onClick={() => setAllBookingPage((p) => Math.max(1, p - 1))}
+                        disabled={safeAllPage === 1}
+                        className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                      >
+                        Previous
+                      </button>
+                      {Array.from({ length: allTotalPages }, (_, i) => i + 1).map((page) => (
+                        <button
+                          key={page}
+                          onClick={() => setAllBookingPage(page)}
+                          className={`w-9 h-9 rounded-lg text-sm ${
+                            safeAllPage === page
+                              ? 'bg-purple-600 text-white'
+                              : 'border border-gray-200 text-gray-700 hover:bg-gray-50'
+                          }`}
+                        >
+                          {page}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setAllBookingPage((p) => Math.min(allTotalPages, p + 1))}
+                        disabled={safeAllPage === allTotalPages}
+                        className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                      >
+                        Next
+                      </button>
                     </div>
-                  );
-                })}
-              </div>
-            )}
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}

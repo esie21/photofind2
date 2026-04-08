@@ -180,12 +180,12 @@ export function LandingPage({ onViewChange }: LandingPageProps) {
             >
               Find a Professional
             </button>
-            <button 
+            {/*<button 
               onClick={() => onViewChange('provider')}
               className="px-8 py-3 bg-white text-purple-600 rounded-xl border-2 border-purple-600 hover:bg-purple-50 transition-colors"
             >
               Join as Creator
-            </button>
+            </button>*/}
           </div>
         </div>
       </section>

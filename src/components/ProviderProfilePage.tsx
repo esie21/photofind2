@@ -37,6 +37,9 @@ interface Service {
   duration_minutes: number;
   category: string;
   images: string[];
+  hourly_rate?: number;
+  hourly_price?: number;
+  package_price?: number;
 }
 
 export function ProviderProfilePage({ providerId, onStartBooking, onBack }: ProviderProfilePageProps) {
@@ -99,8 +102,19 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
 
       // Fetch services
       try {
-        const servicesData = await serviceService.getProviderServices(id!);
-        setServices(servicesData || []);
+        const servicesData = await serviceService.getServicesByProvider(id!);
+        const normalizedServices = (servicesData || []).map((service: any) => ({
+          ...service,
+          // Keep backward compatibility with legacy `price`
+          price:
+            Number(service.price) ||
+            Number(service.package_price) ||
+            Number(service.hourly_rate) ||
+            Number(service.hourly_price) ||
+            0,
+          duration_minutes: Number(service.duration_minutes) || 60,
+        }));
+        setServices(normalizedServices);
       } catch (e) {
         console.error('Failed to fetch services:', e);
         setServices([]);

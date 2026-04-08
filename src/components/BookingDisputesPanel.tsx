@@ -29,7 +29,6 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
     setError(null);
     try {
       const data = await bookingService.getDisputedBookings();
-      console.log('Loaded disputes:', data.length, data); // Debug log
       setDisputes(data);
     } catch (err: any) {
       console.error('Error loading disputes:', err);
@@ -52,16 +51,21 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
         resolvedInFavorOf,
         effectiveRefundPct
       );
+      
+      // Close modal and reset state first
+      setShowResolveModal(false);
+      setResolution('');
+      setRefundPercentage(100);
+      
       // Show success result
       setResolutionResult({
         message: result.message,
         details: result.details
       });
+      
+      // Reload disputes and notify parent
       await loadDisputes();
-      setShowResolveModal(false);
       setSelectedDispute(null);
-      setResolution('');
-      setRefundPercentage(100);
       onRefresh?.();
     } catch (err: any) {
       alert(err?.message || 'Failed to resolve dispute');
@@ -145,9 +149,6 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
         </div>
       ) : (
         <div className="space-y-4">
-          <div className="bg-yellow-50 p-4 rounded-xl">
-            <p className="text-yellow-800">Debug: Found {disputes.length} disputes</p>
-          </div>
           {disputes.map((dispute) => (
             <div
               key={dispute.id}
@@ -279,7 +280,7 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                       setResolvedInFavorOf('client');
                       setShowResolveModal(true);
                     }}
-                    className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors text-sm font-medium border-2 border-red-500"
+                    className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors text-sm font-medium"
                   >
                     Resolve for Client
                   </button>

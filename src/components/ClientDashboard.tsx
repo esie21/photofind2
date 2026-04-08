@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Search, SlidersHorizontal, Star, MapPin, Calendar, MessageSquare, Clock, ChevronRight, Filter, DollarSign, RefreshCw } from 'lucide-react';
+import { Search, SlidersHorizontal, Star, MapPin, Calendar, MessageSquare, Clock, ChevronRight, Filter, DollarSign, RefreshCw, AlertCircle } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { ChatInterface } from './ChatInterface';
 import { ProviderCardSkeleton, BookingCardSkeleton } from './ui/skeleton';
@@ -181,7 +181,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                 >
                   Search
                 </button>
-                <button 
+                <button
                   onClick={() => setShowFilters(!showFilters)}
                   className="px-6 py-3 border border-gray-200 rounded-xl hover:bg-gray-50 flex items-center gap-2 justify-center"
                 >
@@ -195,7 +195,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                 <div className="pt-4 border-t border-gray-200 grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-sm text-gray-700 mb-2">Category</label>
-                    <select 
+                    <select
                       value={selectedCategory}
                       onChange={(e) => setSelectedCategory(e.target.value)}
                       className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
@@ -209,7 +209,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                   </div>
                   <div>
                     <label className="block text-sm text-gray-700 mb-2">Sort By</label>
-                    <select 
+                    <select
                       value={sortBy}
                       onChange={(e) => setSortBy(e.target.value)}
                       className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
@@ -235,7 +235,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
             {/* Service Providers Grid */}
             <div className="space-y-4">
               <h2 className="text-gray-900">Available Professionals</h2>
-              
+
               <div className="grid grid-cols-1 gap-4">
                 {loadingProviders ? (
                   <>
@@ -326,19 +326,19 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                         </div>
 
                         <div className="flex flex-wrap gap-2">
-                          <button 
+                          <button
                             onClick={() => handleViewProfile(provider)}
                             className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm"
                           >
                             View Profile
                           </button>
-                          <button 
+                          <button
                             onClick={() => onStartBooking(provider)}
                             className="px-4 py-2 border border-purple-600 text-purple-600 rounded-lg hover:bg-purple-50 transition-colors text-sm"
                           >
                             Book Now
                           </button>
-                          <button 
+                          <button
                             onClick={() => handleSendMessage(provider)}
                             className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
                           >
@@ -349,25 +349,25 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                       </div>
                     </div>
                   </div>
-                ))) }
-                  {/* Pagination */}
-                  <div className="flex items-center justify-between mt-4">
-                    <button
-                      onClick={() => setPage((p) => Math.max(1, p - 1))}
-                      disabled={page <= 1 || loadingProviders}
-                      className="px-3 py-2 border rounded-md"
-                    >
-                      Prev
-                    </button>
-                    <div className="text-sm text-gray-600">{totalPages ? `Page ${page} of ${totalPages}` : `Page ${page}`}</div>
-                    <button
-                      onClick={() => setPage((p) => p + 1)}
-                      className="px-3 py-2 border rounded-md"
-                      disabled={isLastPage || loadingProviders}
-                    >
-                      Next
-                    </button>
-                  </div>
+                )))}
+                {/* Pagination */}
+                <div className="flex items-center justify-between mt-4">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1 || loadingProviders}
+                    className="px-3 py-2 border rounded-md"
+                  >
+                    Prev
+                  </button>
+                  <div className="text-sm text-gray-600">{totalPages ? `Page ${page} of ${totalPages}` : `Page ${page}`}</div>
+                  <button
+                    onClick={() => setPage((p) => p + 1)}
+                    className="px-3 py-2 border rounded-md"
+                    disabled={isLastPage || loadingProviders}
+                  >
+                    Next
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -477,19 +477,18 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                             <span>{booking.total_price}</span>
                           </div>
                           <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <span className={`inline-block px-2 py-1 text-xs rounded-full ${
-                              booking.status === 'confirmed' || booking.status === 'accepted'
-                                ? 'bg-green-100 text-green-700'
-                                : booking.status === 'completed'
+                            <span className={`inline-block px-2 py-1 text-xs rounded-full ${booking.status === 'confirmed' || booking.status === 'accepted'
+                              ? 'bg-green-100 text-green-700'
+                              : booking.status === 'completed'
                                 ? 'bg-blue-100 text-blue-700'
                                 : booking.status === 'cancelled' || booking.status === 'rejected'
-                                ? 'bg-red-100 text-red-700'
-                                : booking.status === 'awaiting_confirmation'
-                                ? 'bg-orange-100 text-orange-700'
-                                : booking.status === 'disputed'
-                                ? 'bg-red-100 text-red-700'
-                                : 'bg-yellow-100 text-yellow-700'
-                            }`}>
+                                  ? 'bg-red-100 text-red-700'
+                                  : booking.status === 'awaiting_confirmation'
+                                    ? 'bg-orange-100 text-orange-700'
+                                    : booking.status === 'disputed'
+                                      ? 'bg-red-100 text-red-700'
+                                      : 'bg-yellow-100 text-yellow-700'
+                              }`}>
                               {booking.status === 'awaiting_confirmation' ? 'Awaiting Your Confirmation' : booking.status}
                             </span>
                             <button
@@ -546,10 +545,22 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                               </button>
                             )}
                             {booking.status === 'disputed' && (
-                              <span className="px-2 py-1 text-xs text-red-600 flex items-center gap-1">
-                                <Clock className="w-3 h-3" />
-                                Under Review
-                              </span>
+                              <div className="w-full mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                                <div className="flex items-start gap-2">
+                                  <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                                  <div>
+                                    <h4 className="text-sm font-semibold text-red-800">Dispute Under Review</h4>
+                                    <p className="text-sm text-red-700 mt-1">
+                                      {booking.dispute_reason
+                                        ? `Your Reason: "${booking.dispute_reason}"`
+                                        : 'You have disputed this booking. An admin will review it shortly.'}
+                                    </p>
+                                    <p className="text-xs text-red-600 mt-2">
+                                      Admins will analyze the evidence and notify you of the resolution.
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
                             )}
                             {booking.status === 'completed' && !reviewedBookingIds.has(String(booking.id)) && (
                               <button
@@ -659,18 +670,18 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                 alt={selectedProvider.name}
                 className="w-full h-full object-cover"
               />
-              <button 
+              <button
                 onClick={() => setSelectedProvider(null)}
                 className="absolute top-4 right-4 w-10 h-10 bg-white rounded-full flex items-center justify-center shadow-lg hover:bg-gray-100"
               >
                 ×
               </button>
             </div>
-            
+
             <div className="p-6">
               <h2 className="text-gray-900 mb-2">{selectedProvider.name}</h2>
               <p className="text-gray-600 mb-4">{selectedProvider.service}</p>
-              
+
               <div className="flex items-center gap-4 mb-6">
                 <div className="flex items-center gap-1">
                   <Star className="w-5 h-5 fill-yellow-400 text-yellow-400" />
@@ -686,8 +697,8 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
               <div className="border-t border-gray-200 pt-6 mb-6">
                 <h3 className="text-gray-900 mb-3">About</h3>
                 <p className="text-gray-600 text-sm leading-relaxed">
-                  Professional photographer with over 10 years of experience specializing in weddings, 
-                  portraits, and events. Passionate about capturing authentic moments and creating 
+                  Professional photographer with over 10 years of experience specializing in weddings,
+                  portraits, and events. Passionate about capturing authentic moments and creating
                   timeless memories for my clients.
                 </p>
               </div>
@@ -703,13 +714,13 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
               </div>
 
               <div className="flex gap-3">
-                <button 
+                <button
                   onClick={() => onStartBooking(selectedProvider)}
                   className="flex-1 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors"
                 >
                   Book Now
                 </button>
-                <button 
+                <button
                   onClick={() => {
                     setShowChat(true);
                   }}

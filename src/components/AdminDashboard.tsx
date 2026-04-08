@@ -8,7 +8,7 @@ import adminService, {
   MetricsOverview, ChartDataPoint, CategoryMetric,
   AdminUser, PendingVerification, AdminReview, AdminDispute, AuditLog
 } from '../api/services/adminService';
-import { Users, DollarSign, TrendingUp, AlertCircle, Search, Filter, Eye, X, CheckCircle, XCircle, Clock, Shield, FileText } from 'lucide-react';
+import { Users, DollarSign, TrendingUp, AlertCircle, Search, Filter, Eye, X, CheckCircle, XCircle, Clock, Shield, FileText, Download } from 'lucide-react';
 import { BookingDisputesPanel } from './BookingDisputesPanel';
 
 type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit';
@@ -70,7 +70,7 @@ export function AdminDashboard() {
       loadTabData();
     }
   }, [activeTab, chartPeriod, userSearch, userRoleFilter, userStatusFilter, userPage,
-      reviewStatusFilter, reviewPage, disputeStatusFilter, disputePriorityFilter, disputePage, auditPage, user]);
+    reviewStatusFilter, reviewPage, disputeStatusFilter, disputePriorityFilter, disputePage, auditPage, user]);
 
   const loadTabData = async () => {
     setLoading(true);
@@ -212,6 +212,60 @@ export function AdminDashboard() {
     }
   };
 
+  const downloadCSV = (data: any[], filename: string) => {
+    if (data.length === 0) {
+      alert('No data to export');
+      return;
+    }
+
+    // Get headers from first object
+    const headers = Object.keys(data[0]);
+
+    // Create CSV content
+    const csvContent = [
+      headers.join(','), // Header row
+      ...data.map(row =>
+        headers.map(header => {
+          const value = row[header];
+          // Handle null/undefined
+          if (value === null || value === undefined) return '';
+          // Escape quotes and wrap in quotes if contains comma, quote, or newline
+          const stringValue = String(value);
+          if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+            return `"${stringValue.replace(/"/g, '""')}"`;
+          }
+          return stringValue;
+        }).join(',')
+      )
+    ].join('\n');
+
+    // Create blob and download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleExportUsers = () => {
+    const exportData = users.map(u => ({
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      role: u.role,
+      verified: u.is_verified ? 'Yes' : 'No',
+      bookings: u.booking_count,
+      rating: u.avg_rating ? parseFloat(String(u.avg_rating)).toFixed(1) : 'N/A',
+      joined: formatDate(u.created_at),
+      status: u.deleted_at ? 'Deleted' : 'Active'
+    }));
+    downloadCSV(exportData, `users-export-${new Date().toISOString().split('T')[0]}.csv`);
+  };
+
   const handleResolveDispute = async () => {
     if (!showResolveModal) return;
     try {
@@ -306,11 +360,10 @@ export function AdminDashboard() {
               <button
                 key={period}
                 onClick={() => setChartPeriod(period)}
-                className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                  chartPeriod === period
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${chartPeriod === period
                     ? 'bg-purple-600 text-white'
                     : 'text-gray-600 hover:bg-gray-100'
-                }`}
+                  }`}
               >
                 {period.charAt(0).toUpperCase() + period.slice(1)}
               </button>
@@ -327,7 +380,7 @@ export function AdminDashboard() {
               <LineChart data={revenueChart}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                 <XAxis dataKey="date" tick={{ fontSize: 12 }} />
-                <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `$${(v/1000).toFixed(0)}k`} />
+                <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
                 <Tooltip formatter={(value: number) => formatCurrency(value)} />
                 <Legend />
                 <Line type="monotone" dataKey="revenue" name="Revenue" stroke="#8b5cf6" strokeWidth={2} dot={false} />
@@ -429,6 +482,13 @@ export function AdminDashboard() {
           <option value="active">Active</option>
           <option value="deleted">Deleted</option>
         </select>
+        <button
+          onClick={handleExportUsers}
+          className="px-4 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 transition-colors flex items-center gap-2 font-medium"
+        >
+          <Download className="w-5 h-5" />
+          Export CSV
+        </button>
       </div>
 
       {/* Users Table */}
@@ -465,11 +525,10 @@ export function AdminDashboard() {
                     </div>
                   </td>
                   <td className="py-4 px-6">
-                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                      u.role === 'admin' ? 'bg-purple-100 text-purple-700' :
-                      u.role === 'provider' ? 'bg-blue-100 text-blue-700' :
-                      'bg-gray-100 text-gray-700'
-                    }`}>
+                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${u.role === 'admin' ? 'bg-purple-100 text-purple-700' :
+                        u.role === 'provider' ? 'bg-blue-100 text-blue-700' :
+                          'bg-gray-100 text-gray-700'
+                      }`}>
                       {u.role}
                     </span>
                   </td>
@@ -488,7 +547,7 @@ export function AdminDashboard() {
                   </td>
                   <td className="py-4 px-6 text-sm text-gray-600">{formatDate(u.created_at)}</td>
                   <td className="py-4 px-6">
-                    {u.deleted_at ? (
+                    {/*{u.deleted_at ? (
                       <button onClick={() => handleRestoreUser(u.id)} className="text-green-600 hover:text-green-700 text-sm font-medium">
                         Restore
                       </button>
@@ -496,7 +555,7 @@ export function AdminDashboard() {
                       <button onClick={() => handleDeleteUser(u.id)} className="text-red-600 hover:text-red-700 text-sm font-medium">
                         Delete
                       </button>
-                    )}
+                    )}*/}
                   </td>
                 </tr>
               ))}
@@ -621,10 +680,9 @@ export function AdminDashboard() {
       {/* Reviews List */}
       <div className="space-y-4">
         {reviews.map((review) => (
-          <div key={review.id} className={`bg-white rounded-2xl shadow-sm p-6 ${
-            review.moderation_status === 'flagged' ? 'border-l-4 border-red-500' :
-            review.moderation_status === 'pending' ? 'border-l-4 border-yellow-500' : ''
-          }`}>
+          <div key={review.id} className={`bg-white rounded-2xl shadow-sm p-6 ${review.moderation_status === 'flagged' ? 'border-l-4 border-red-500' :
+              review.moderation_status === 'pending' ? 'border-l-4 border-yellow-500' : ''
+            }`}>
             <div className="flex justify-between items-start">
               <div>
                 <div className="flex items-center gap-2 text-sm">
@@ -639,12 +697,11 @@ export function AdminDashboard() {
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-yellow-500 font-medium">{'★'.repeat(review.rating)}{'☆'.repeat(5 - review.rating)}</span>
-                <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                  review.moderation_status === 'approved' ? 'bg-green-100 text-green-700' :
-                  review.moderation_status === 'rejected' ? 'bg-red-100 text-red-700' :
-                  review.moderation_status === 'flagged' ? 'bg-orange-100 text-orange-700' :
-                  'bg-yellow-100 text-yellow-700'
-                }`}>
+                <span className={`px-2 py-1 text-xs font-medium rounded-full ${review.moderation_status === 'approved' ? 'bg-green-100 text-green-700' :
+                    review.moderation_status === 'rejected' ? 'bg-red-100 text-red-700' :
+                      review.moderation_status === 'flagged' ? 'bg-orange-100 text-orange-700' :
+                        'bg-yellow-100 text-yellow-700'
+                  }`}>
                   {review.moderation_status}
                 </span>
               </div>
@@ -728,12 +785,11 @@ export function AdminDashboard() {
       {/* Disputes List */}
       <div className="space-y-4">
         {disputes.map((dispute) => (
-          <div key={dispute.id} className={`bg-white rounded-2xl shadow-sm p-6 border-l-4 ${
-            dispute.priority === 'urgent' ? 'border-red-500' :
-            dispute.priority === 'high' ? 'border-orange-500' :
-            dispute.priority === 'normal' ? 'border-blue-500' :
-            'border-gray-300'
-          }`}>
+          <div key={dispute.id} className={`bg-white rounded-2xl shadow-sm p-6 border-l-4 ${dispute.priority === 'urgent' ? 'border-red-500' :
+              dispute.priority === 'high' ? 'border-orange-500' :
+                dispute.priority === 'normal' ? 'border-blue-500' :
+                  'border-gray-300'
+            }`}>
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="font-medium text-lg text-gray-900">{dispute.title}</h3>
@@ -743,21 +799,19 @@ export function AdminDashboard() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                  dispute.priority === 'urgent' ? 'bg-red-100 text-red-700' :
-                  dispute.priority === 'high' ? 'bg-orange-100 text-orange-700' :
-                  dispute.priority === 'normal' ? 'bg-blue-100 text-blue-700' :
-                  'bg-gray-100 text-gray-700'
-                }`}>
+                <span className={`px-2 py-1 text-xs font-medium rounded-full ${dispute.priority === 'urgent' ? 'bg-red-100 text-red-700' :
+                    dispute.priority === 'high' ? 'bg-orange-100 text-orange-700' :
+                      dispute.priority === 'normal' ? 'bg-blue-100 text-blue-700' :
+                        'bg-gray-100 text-gray-700'
+                  }`}>
                   {dispute.priority}
                 </span>
-                <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                  dispute.status === 'open' ? 'bg-yellow-100 text-yellow-700' :
-                  dispute.status === 'under_review' ? 'bg-blue-100 text-blue-700' :
-                  dispute.status === 'escalated' ? 'bg-red-100 text-red-700' :
-                  dispute.status === 'resolved' ? 'bg-green-100 text-green-700' :
-                  'bg-gray-100 text-gray-700'
-                }`}>
+                <span className={`px-2 py-1 text-xs font-medium rounded-full ${dispute.status === 'open' ? 'bg-yellow-100 text-yellow-700' :
+                    dispute.status === 'under_review' ? 'bg-blue-100 text-blue-700' :
+                      dispute.status === 'escalated' ? 'bg-red-100 text-red-700' :
+                        dispute.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                          'bg-gray-100 text-gray-700'
+                  }`}>
                   {dispute.status.replace('_', ' ')}
                 </span>
               </div>
@@ -836,12 +890,11 @@ export function AdminDashboard() {
                     <div className="text-xs text-gray-500">{log.user_email || '-'}</div>
                   </td>
                   <td className="py-4 px-6">
-                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                      log.action.includes('delete') ? 'bg-red-100 text-red-700' :
-                      log.action.includes('create') ? 'bg-green-100 text-green-700' :
-                      log.action.includes('update') || log.action.includes('verify') ? 'bg-blue-100 text-blue-700' :
-                      'bg-gray-100 text-gray-700'
-                    }`}>
+                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${log.action.includes('delete') ? 'bg-red-100 text-red-700' :
+                        log.action.includes('create') ? 'bg-green-100 text-green-700' :
+                          log.action.includes('update') || log.action.includes('verify') ? 'bg-blue-100 text-blue-700' :
+                            'bg-gray-100 text-gray-700'
+                      }`}>
                       {log.action}
                     </span>
                   </td>
@@ -895,11 +948,10 @@ export function AdminDashboard() {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`px-6 py-3 rounded-xl whitespace-nowrap transition-all text-sm font-medium ${
-                activeTab === tab.id
+              className={`px-6 py-3 rounded-xl whitespace-nowrap transition-all text-sm font-medium ${activeTab === tab.id
                   ? 'bg-purple-600 text-white'
                   : 'text-gray-600 hover:bg-gray-100'
-              }`}
+                }`}
             >
               {tab.label}
             </button>
