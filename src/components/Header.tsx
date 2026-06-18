@@ -6,7 +6,7 @@ import { MobileNav } from './MobileNav';
 import { Notification } from '../api/services/notificationService';
 
 interface HeaderProps {
-  onViewChange: (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin') => void;
+  onViewChange: (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'messages') => void;
   currentView: string;
   onAuthClick: (mode: 'login' | 'signup') => void;
   onNotificationNavigate?: (notification: Notification) => void;
@@ -58,6 +58,12 @@ export function Header({ onViewChange, currentView, onAuthClick, onNotificationN
                   Admin
                 </button>
                 )}
+                <button
+                  onClick={() => onViewChange('messages')}
+                  className={`text-sm ${currentView === 'messages' ? 'text-purple-600' : 'text-gray-600 hover:text-gray-900'}`}
+                >
+                  Messages
+                </button>
               </nav>
             )}
           </div>

@@ -11,6 +11,7 @@ import { ProviderProfilePage } from './components/ProviderProfilePage';
 import { BookingFlow } from './components/BookingFlow';
 import { AdminDashboard } from './components/AdminDashboard';
 import { ChatInterface } from './components/ChatInterface';
+import { MessagesPage } from './components/MessagesPage';
 import { Notification } from './api/services/notificationService';
 import chatService from './api/services/chatService';
 
@@ -22,7 +23,7 @@ interface ChatContext {
 }
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'reset-password'>('landing');
+  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'messages' | 'reset-password'>('landing');
   const { user } = useAuth();
   const [bookingContext, setBookingContext] = useState<{ providerId?: string; providerName?: string; providerImage?: string; serviceId?: string } | null>(null);
   const [dashboardKey, setDashboardKey] = useState(0);
@@ -67,7 +68,7 @@ export default function App() {
   const [showForgotPasswordModal, setShowForgotPasswordModal] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
 
-  const handleViewChange = (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile') => {
+  const handleViewChange = (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'messages') => {
     // If trying to route to admin, ensure user is admin
     if (view === 'admin') {
       if (!user || user.role !== 'admin') {
@@ -269,6 +270,7 @@ export default function App() {
           onViewProvider={handleViewProviderProfile}
         />}
         {currentView === 'provider' && <ProviderDashboard />}
+        {currentView === 'messages' && <MessagesPage />}
         {currentView === 'booking' && (
           <BookingFlow
             onComplete={() => {

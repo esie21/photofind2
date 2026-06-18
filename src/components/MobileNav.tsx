@@ -1,17 +1,17 @@
-import { X, Home, Search, Calendar, User, Settings, LogOut, Shield, LayoutDashboard } from 'lucide-react';
+import { X, Home, Search, LogOut, Shield, LayoutDashboard, MessageSquare } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 interface MobileNavProps {
   isOpen: boolean;
   onClose: () => void;
-  onViewChange: (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin') => void;
+  onViewChange: (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'messages') => void;
   currentView: string;
 }
 
 export function MobileNav({ isOpen, onClose, onViewChange, currentView }: MobileNavProps) {
   const { user, logout } = useAuth();
 
-  const handleNavigate = (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin') => {
+  const handleNavigate = (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'messages') => {
     onViewChange(view);
     onClose();
   };
@@ -121,6 +121,18 @@ export function MobileNav({ isOpen, onClose, onViewChange, currentView }: Mobile
                   <span className="font-medium">Admin Panel</span>
                 </button>
               )}
+
+              <button
+                onClick={() => handleNavigate('messages')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-colors ${
+                  currentView === 'messages'
+                    ? 'bg-purple-50 text-purple-600'
+                    : 'text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                <MessageSquare className="w-5 h-5" />
+                <span className="font-medium">Messages</span>
+              </button>
             </>
           )}
         </nav>

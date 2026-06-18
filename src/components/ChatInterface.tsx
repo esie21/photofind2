@@ -22,6 +22,7 @@ export function ChatInterface({ provider, bookingId: bookingIdProp, onClose }: C
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const otherTypingTimeoutRef = useRef<number | null>(null);
@@ -248,15 +249,19 @@ const participantId = useMemo(() => {
   const handleSend = async () => {
     if (!user || sending) return;
     const trimmed = message.trim();
-    if (!trimmed) return;
+    if (!trimmed && !pendingFile) return;
 
     setSending(true);
     try {
       let res;
       if (bookingId) {
-        res = await chatService.sendMessage({ bookingId, content: trimmed });
+        res = await chatService.sendMessage({ bookingId, content: trimmed || undefined, file: pendingFile || undefined });
       } else if (participantId) {
-        res = await chatService.sendDirectMessage({ recipientId: String(participantId), content: trimmed });
+        res = await chatService.sendDirectMessage({
+          recipientId: String(participantId),
+          content: trimmed || undefined,
+          file: pendingFile || undefined,
+        });
       } else {
         setError('Unable to send message. No recipient.');
         setSending(false);
@@ -268,6 +273,7 @@ const participantId = useMemo(() => {
         return [...prev, res.data];
       });
       setMessage('');
+      setPendingFile(null);
     } catch (err: any) {
       setError(err?.message || 'Failed to send message.');
     } finally {
@@ -316,6 +322,27 @@ const participantId = useMemo(() => {
     typingCooldownRef.current = window.setTimeout(() => {
       socket.emit('chat:typing', { bookingId, isTyping: false });
     }, 800);
+  };
+
+  const renderContentWithLinks = (text: string) => {
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const parts = text.split(urlRegex);
+    return parts.map((part, index) => {
+      if (/^https?:\/\/[^\s]+$/.test(part)) {
+        return (
+          <a
+            key={`${part}-${index}`}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline break-all"
+          >
+            {part}
+          </a>
+        );
+      }
+      return <span key={`${index}-${part}`}>{part}</span>;
+    });
   };
 
   return (
@@ -383,9 +410,16 @@ const participantId = useMemo(() => {
                       <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                     ) : (
                       <>
-                        {msg.content && <p className="text-sm whitespace-pre-wrap">{msg.content}</p>}
+                        {msg.content && (
+                          <p className="text-sm whitespace-pre-wrap break-words">
+                            {renderContentWithLinks(msg.content)}
+                          </p>
+                        )}
                         {attachmentUrl && msg.attachment_type === 'image' && (
                           <img src={attachmentUrl} alt={msg.attachment_name || 'attachment'} className="mt-2 max-h-56 rounded-xl" />
+                        )}
+                        {attachmentUrl && msg.attachment_type === 'video' && (
+                          <video src={attachmentUrl} controls className="mt-2 max-h-64 rounded-xl w-full" />
                         )}
                         {attachmentUrl && msg.attachment_type === 'file' && (
                           <a
@@ -443,7 +477,7 @@ const participantId = useMemo(() => {
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) {
-                  handleUpload(file);
+                  setPendingFile(file);
                 }
                 if (fileInputRef.current) fileInputRef.current.value = '';
               }}
@@ -470,10 +504,22 @@ const participantId = useMemo(() => {
                 rows={1}
                 disabled={!user || sending || loading}
               />
+              {pendingFile && (
+                <div className="mt-2 text-xs text-gray-600 flex items-center justify-between gap-2">
+                  <span className="truncate">Attached: {pendingFile.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => setPendingFile(null)}
+                    className="text-red-600 hover:text-red-700"
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
             </div>
             <button
               onClick={handleSend}
-              disabled={!user || sending || loading || !canSend}
+              disabled={!user || sending || loading || !canSend || (!message.trim() && !pendingFile)}
               className="p-3 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white transition-colors"
             >
               {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}

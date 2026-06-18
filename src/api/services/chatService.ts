@@ -1,7 +1,7 @@
 import { apiClient } from '../client';
 import { API_CONFIG } from '../config';
 
-export type ChatAttachmentType = 'image' | 'file' | null;
+export type ChatAttachmentType = 'image' | 'video' | 'file' | null;
 
 export interface BookingChatMessage {
   id: number;

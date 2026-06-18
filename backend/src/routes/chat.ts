@@ -37,8 +37,9 @@ function getUploadsRoot() {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const bookingId = (req as any).body?.booking_id || (req as any).query?.booking_id;
-    const safeBookingId = String(bookingId || 'unknown');
-    const uploadPath = path.resolve(getUploadsRoot(), `chats/${safeBookingId}`);
+    const recipientId = (req as any).params?.recipientId;
+    const folder = bookingId ? `booking-${String(bookingId)}` : recipientId ? `direct-${String(recipientId)}` : 'misc';
+    const uploadPath = path.resolve(getUploadsRoot(), `chats/${folder}`);
     fs.mkdirSync(uploadPath, { recursive: true });
     cb(null, uploadPath);
   },
@@ -49,6 +50,29 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage });
+
+function getAttachmentMeta(file: any) {
+  if (!file) {
+    return { attachmentUrl: null, attachmentName: null, attachmentType: null };
+  }
+
+  const absolutePath = path.resolve(String(file.path || ''));
+  const uploadsRoot = getUploadsRoot();
+  const relativePath = path.relative(uploadsRoot, absolutePath).replace(/\\/g, '/');
+  const mime = String(file.mimetype || '');
+
+  const attachmentType = mime.startsWith('image/')
+    ? 'image'
+    : mime.startsWith('video/')
+      ? 'video'
+      : 'file';
+
+  return {
+    attachmentUrl: relativePath || null,
+    attachmentName: file.originalname || null,
+    attachmentType,
+  };
+}
 
 let chatsSchemaMode: 'client_provider' | 'user_a_b' | null = null;
 
@@ -293,13 +317,7 @@ router.post('/send', verifyToken, upload.single('file'), async (req: AuthedReque
 
     const chat = await ensureBookingChatExists(booking);
 
-    const attachmentUrl = file ? `chats/${bookingId}/${file.filename}` : null;
-    const attachmentName = file ? file.originalname : null;
-    const attachmentType = file
-      ? file.mimetype.startsWith('image/')
-        ? 'image'
-        : 'file'
-      : null;
+    const { attachmentUrl, attachmentName, attachmentType } = getAttachmentMeta(file);
 
     const insert = await pool.query(
       `
@@ -543,11 +561,7 @@ router.post('/direct/:recipientId/send', verifyToken, upload.single('file'), asy
     // Create or get chat
     const chat = await ensureDirectChat(currentUserId, recipientId);
 
-    const attachmentUrl = file ? `chats/direct/${chat.id}/${file.filename}` : null;
-    const attachmentName = file ? file.originalname : null;
-    const attachmentType = file
-      ? file.mimetype.startsWith('image/') ? 'image' : 'file'
-      : null;
+    const { attachmentUrl, attachmentName, attachmentType } = getAttachmentMeta(file);
 
     // Insert message
     const insert = await pool.query(

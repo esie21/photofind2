@@ -43,8 +43,13 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
   const [rescheduleBooking, setRescheduleBooking] = useState<any>(null);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [confirmBookingData, setConfirmBookingData] = useState<any>(null);
+  const [showAllUpcoming, setShowAllUpcoming] = useState(false);
 
   const upcomingBookings = myBookings;
+  const maxUpcomingToShow = 10;
+  const displayedUpcomingBookings = showAllUpcoming
+    ? upcomingBookings
+    : upcomingBookings.slice(0, maxUpcomingToShow);
 
   const fetchProviders = async () => {
     setLoadingProviders(true);
@@ -425,7 +430,14 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
             <div className="bg-white rounded-2xl p-6 shadow-sm">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-gray-900">Upcoming Bookings</h3>
-                <button className="text-sm text-purple-600 hover:text-purple-700">View all</button>
+                {upcomingBookings.length > maxUpcomingToShow && (
+                  <button
+                    onClick={() => setShowAllUpcoming((prev) => !prev)}
+                    className="text-sm text-purple-600 hover:text-purple-700"
+                  >
+                    {showAllUpcoming ? 'Show less' : 'View all'}
+                  </button>
+                )}
               </div>
 
               <div className="space-y-3">
@@ -457,7 +469,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                     description="Book a service to get started!"
                   />
                 ) : (
-                  upcomingBookings.map((booking) => (
+                  displayedUpcomingBookings.map((booking) => (
                     <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
                       <div className="flex gap-3">
                         <ImageWithFallback
@@ -584,6 +596,13 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                   ))
                 )}
               </div>
+              {!loadingBookings && !bookingsError && upcomingBookings.length > maxUpcomingToShow && (
+                <p className="mt-3 text-xs text-gray-500 text-center">
+                  {showAllUpcoming
+                    ? `Showing all ${upcomingBookings.length} bookings`
+                    : `Showing first ${maxUpcomingToShow} bookings (+${upcomingBookings.length - maxUpcomingToShow} more)`}
+                </p>
+              )}
             </div>
 
             {/* Quick Actions */}
