@@ -6,12 +6,13 @@ import {
 import { useAuth } from '../context/AuthContext';
 import adminService, {
   MetricsOverview, ChartDataPoint, CategoryMetric,
-  AdminUser, PendingVerification, AdminReview, AdminDispute, AuditLog
+  AdminUser, PendingVerification, AdminReview, AdminDispute, AuditLog, AdminSupportTicket
 } from '../api/services/adminService';
-import { Users, DollarSign, TrendingUp, AlertCircle, Search, Filter, Eye, X, CheckCircle, XCircle, Clock, Shield, FileText, Download } from 'lucide-react';
+import { Users, PhilippinePeso, TrendingUp, AlertCircle, Search, Filter, Eye, X, CheckCircle, XCircle, Clock, Shield, FileText, Download, MessageSquare } from 'lucide-react';
 import { BookingDisputesPanel } from './BookingDisputesPanel';
+import { getUploadUrl } from '../api/config';
 
-type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit';
+type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit' | 'support';
 
 export function AdminDashboard() {
   const { user } = useAuth();
@@ -37,6 +38,8 @@ export function AdminDashboard() {
 
   // Verifications state
   const [pendingVerifications, setPendingVerifications] = useState<PendingVerification[]>([]);
+  const [verificationsTotal, setVerificationsTotal] = useState(0);
+  const [verificationPage, setVerificationPage] = useState(0);
 
   // Reviews state
   const [reviews, setReviews] = useState<AdminReview[]>([]);
@@ -56,11 +59,22 @@ export function AdminDashboard() {
   const [auditLogsTotal, setAuditLogsTotal] = useState(0);
   const [auditPage, setAuditPage] = useState(0);
 
+  // Support tickets state
+  const [supportTickets, setSupportTickets] = useState<AdminSupportTicket[]>([]);
+  const [supportTicketsTotal, setSupportTicketsTotal] = useState(0);
+  const [supportStatusFilter, setSupportStatusFilter] = useState('open');
+  const [supportPage, setSupportPage] = useState(0);
+  const [showSupportReplyModal, setShowSupportReplyModal] = useState<AdminSupportTicket | null>(null);
+  const [supportReplyText, setSupportReplyText] = useState('');
+  const [supportReplyStatus, setSupportReplyStatus] = useState('resolved');
+
   // Modal states
   const [showRejectModal, setShowRejectModal] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [showResolveModal, setShowResolveModal] = useState<AdminDispute | null>(null);
   const [resolution, setResolution] = useState({ text: '', type: 'no_action', refundAmount: 0 });
+  const [showReviewActionModal, setShowReviewActionModal] = useState<{ id: string; action: 'reject' | 'flag' | 'delete' } | null>(null);
+  const [reviewActionReason, setReviewActionReason] = useState('');
 
   const ITEMS_PER_PAGE = 20;
   const COLORS = ['#8b5cf6', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899'];
@@ -69,8 +83,9 @@ export function AdminDashboard() {
     if (user?.role === 'admin') {
       loadTabData();
     }
-  }, [activeTab, chartPeriod, userSearch, userRoleFilter, userStatusFilter, userPage,
-    reviewStatusFilter, reviewPage, disputeStatusFilter, disputePriorityFilter, disputePage, auditPage, user]);
+  }, [activeTab, chartPeriod, userSearch, userRoleFilter, userStatusFilter, userPage, verificationPage,
+    reviewStatusFilter, reviewPage, disputeStatusFilter, disputePriorityFilter, disputePage, auditPage,
+    supportStatusFilter, supportPage, user]);
 
   const loadTabData = async () => {
     setLoading(true);
@@ -83,6 +98,7 @@ export function AdminDashboard() {
         case 'reviews': await loadReviewsData(); break;
         case 'disputes': await loadDisputesData(); break;
         case 'audit': await loadAuditData(); break;
+        case 'support': await loadSupportTicketsData(); break;
       }
     } catch (err: any) {
       setError(err.message || 'Failed to load data');
@@ -119,8 +135,12 @@ export function AdminDashboard() {
   };
 
   const loadVerificationsData = async () => {
-    const data = await adminService.getPendingVerifications();
-    setPendingVerifications(data);
+    const resp = await adminService.getPendingVerifications({
+      limit: ITEMS_PER_PAGE,
+      offset: verificationPage * ITEMS_PER_PAGE,
+    });
+    setPendingVerifications(resp.data);
+    setVerificationsTotal(resp.meta.total);
   };
 
   const loadReviewsData = async () => {
@@ -153,8 +173,19 @@ export function AdminDashboard() {
     setAuditLogsTotal(resp.meta.total);
   };
 
+  const loadSupportTicketsData = async () => {
+    const resp = await adminService.getSupportTickets({
+      status: supportStatusFilter !== 'all' ? supportStatusFilter : undefined,
+      limit: ITEMS_PER_PAGE,
+      offset: supportPage * ITEMS_PER_PAGE,
+    });
+    setSupportTickets(resp.data);
+    setSupportTicketsTotal(resp.meta.total);
+  };
+
   // Action handlers
   const handleVerifyProvider = async (id: string) => {
+    if (!confirm('Approve this provider? They will be marked Verified and get a Verified badge visible to clients.')) return;
     try {
       await adminService.verifyProvider(id);
       await loadVerificationsData();
@@ -179,6 +210,62 @@ export function AdminDashboard() {
     try {
       await adminService.moderateReview(id, action);
       await loadReviewsData();
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const openReviewActionModal = (id: string, action: 'reject' | 'flag' | 'delete') => {
+    setShowReviewActionModal({ id, action });
+    setReviewActionReason('');
+  };
+
+  const handleReviewActionConfirm = async () => {
+    if (!showReviewActionModal) return;
+    const { id, action } = showReviewActionModal;
+    try {
+      if (action === 'delete') {
+        await adminService.deleteReview(id, reviewActionReason || undefined);
+      } else {
+        await adminService.moderateReview(id, action, reviewActionReason || undefined);
+      }
+      setShowReviewActionModal(null);
+      setReviewActionReason('');
+      await loadReviewsData();
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleSupportStatusChange = async (id: string, status: string) => {
+    try {
+      await adminService.updateSupportTicket(id, { status });
+      await loadSupportTicketsData();
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const openSupportReplyModal = (ticket: AdminSupportTicket) => {
+    setShowSupportReplyModal(ticket);
+    setSupportReplyText('');
+    setSupportReplyStatus('resolved');
+  };
+
+  const handleSupportReplyConfirm = async () => {
+    if (!showSupportReplyModal) return;
+    if (!supportReplyText.trim()) {
+      alert('Please write a reply before sending.');
+      return;
+    }
+    try {
+      await adminService.updateSupportTicket(showSupportReplyModal.id, {
+        admin_reply: supportReplyText.trim(),
+        status: supportReplyStatus,
+      });
+      setShowSupportReplyModal(null);
+      setSupportReplyText('');
+      await loadSupportTicketsData();
     } catch (err: any) {
       alert(err.message);
     }
@@ -282,7 +369,7 @@ export function AdminDashboard() {
     }
   };
 
-  const formatCurrency = (amount: number) => `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const formatCurrency = (amount: number) => `₱${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const formatDate = (date: string) => new Date(date).toLocaleDateString();
   const formatDateTime = (date: string) => new Date(date).toLocaleString();
 
@@ -324,7 +411,7 @@ export function AdminDashboard() {
     return (
       <div className="space-y-6">
         {/* Pending Actions Alert */}
-        {(metrics.pendingActions.verifications > 0 || metrics.pendingActions.disputes > 0 || metrics.pendingActions.reviews > 0) && (
+        {(metrics.pendingActions.verifications > 0 || metrics.pendingActions.disputes > 0 || metrics.pendingActions.reviews > 0 || metrics.pendingActions.supportTickets > 0) && (
           <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-r-xl">
             <div className="flex items-center">
               <AlertCircle className="h-5 w-5 text-yellow-400 mr-3" />
@@ -332,7 +419,8 @@ export function AdminDashboard() {
                 <strong>Pending Actions: </strong>
                 {metrics.pendingActions.verifications > 0 && <span className="mr-3">{metrics.pendingActions.verifications} verifications</span>}
                 {metrics.pendingActions.disputes > 0 && <span className="mr-3">{metrics.pendingActions.disputes} disputes</span>}
-                {metrics.pendingActions.reviews > 0 && <span>{metrics.pendingActions.reviews} reviews</span>}
+                {metrics.pendingActions.reviews > 0 && <span className="mr-3">{metrics.pendingActions.reviews} reviews</span>}
+                {metrics.pendingActions.supportTickets > 0 && <span>{metrics.pendingActions.supportTickets} support tickets</span>}
               </div>
             </div>
           </div>
@@ -342,7 +430,7 @@ export function AdminDashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {renderMetricCard('Total Users', metrics.users.total.toLocaleString(), `${metrics.users.thisMonth} this month`, metrics.users.growth, Users, 'blue')}
           {renderMetricCard('Total Providers', metrics.providers.total.toLocaleString(), `${metrics.providers.verified} verified`, undefined, Users, 'purple')}
-          {renderMetricCard('Total Revenue', formatCurrency(metrics.revenue.total), `${formatCurrency(metrics.revenue.thisMonth)} this month`, metrics.revenue.growth, DollarSign, 'green')}
+          {renderMetricCard('Total Revenue', formatCurrency(metrics.revenue.total), `${formatCurrency(metrics.revenue.thisMonth)} this month`, metrics.revenue.growth, PhilippinePeso, 'green')}
           {renderMetricCard('Platform Commission', formatCurrency(metrics.revenue.commission), undefined, undefined, TrendingUp, 'indigo')}
         </div>
 
@@ -380,7 +468,7 @@ export function AdminDashboard() {
               <LineChart data={revenueChart}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                 <XAxis dataKey="date" tick={{ fontSize: 12 }} />
-                <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
+                <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `₱${(v / 1000).toFixed(0)}k`} />
                 <Tooltip formatter={(value: number) => formatCurrency(value)} />
                 <Legend />
                 <Line type="monotone" dataKey="revenue" name="Revenue" stroke="#8b5cf6" strokeWidth={2} dot={false} />
@@ -594,7 +682,7 @@ export function AdminDashboard() {
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold text-gray-900">Pending Provider Verifications</h2>
         <span className="px-3 py-1 bg-yellow-100 text-yellow-700 rounded-full text-sm font-medium">
-          {pendingVerifications.length} pending
+          {verificationsTotal} pending
         </span>
       </div>
 
@@ -637,6 +725,33 @@ export function AdminDashboard() {
                 <p className="mt-3 text-sm text-gray-600 line-clamp-2">{provider.bio}</p>
               )}
               <p className="mt-2 text-xs text-gray-400">Applied: {formatDate(provider.created_at)}</p>
+
+              {/* Submitted verification documents */}
+              <div className="mt-3">
+                <p className="text-xs font-medium text-gray-500 mb-1.5">Submitted Documents</p>
+                {Array.isArray(provider.verification_documents) && provider.verification_documents.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {provider.verification_documents.map((doc: { path: string; original_name: string }, index: number) => (
+                      <a
+                        key={index}
+                        href={getUploadUrl(doc.path)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 border border-gray-200 rounded-lg text-xs text-gray-700 hover:bg-gray-50"
+                      >
+                        <FileText className="w-3.5 h-3.5 text-gray-400" />
+                        <span className="truncate max-w-[140px]">{doc.original_name}</span>
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-amber-600 flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    No documents submitted
+                  </p>
+                )}
+              </div>
+
               <div className="mt-4 flex gap-2">
                 <button
                   onClick={() => handleVerifyProvider(provider.id)}
@@ -655,6 +770,19 @@ export function AdminDashboard() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Pagination */}
+      {verificationsTotal > 0 && (
+        <div className="flex justify-between items-center">
+          <p className="text-sm text-gray-500">
+            Showing {Math.min(verificationPage * ITEMS_PER_PAGE + 1, verificationsTotal)} to {Math.min((verificationPage + 1) * ITEMS_PER_PAGE, verificationsTotal)} of {verificationsTotal}
+          </p>
+          <div className="flex gap-2">
+            <button onClick={() => setVerificationPage(p => Math.max(0, p - 1))} disabled={verificationPage === 0} className="px-4 py-2 border border-gray-200 rounded-lg disabled:opacity-50 hover:bg-gray-50">Previous</button>
+            <button onClick={() => setVerificationPage(p => p + 1)} disabled={(verificationPage + 1) * ITEMS_PER_PAGE >= verificationsTotal} className="px-4 py-2 border border-gray-200 rounded-lg disabled:opacity-50 hover:bg-gray-50">Next</button>
+          </div>
         </div>
       )}
     </div>
@@ -712,32 +840,45 @@ export function AdminDashboard() {
                 <span className="font-medium">Reason:</span> {review.moderation_reason}
               </p>
             )}
-            {(review.moderation_status === 'pending' || review.moderation_status === 'flagged') && (
-              <div className="mt-4 flex gap-2">
+            <div className="mt-4 flex flex-wrap gap-2">
+              {review.moderation_status !== 'approved' && (
                 <button
                   onClick={() => handleModerateReview(review.id, 'approve')}
                   className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium"
                 >
                   Approve
                 </button>
+              )}
+              {review.moderation_status !== 'rejected' && (
                 <button
-                  onClick={() => handleModerateReview(review.id, 'reject')}
+                  onClick={() => openReviewActionModal(review.id, 'reject')}
                   className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium"
                 >
                   Reject
                 </button>
-                {review.moderation_status === 'pending' && (
-                  <button
-                    onClick={() => handleModerateReview(review.id, 'flag')}
-                    className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 text-sm font-medium"
-                  >
-                    Flag
-                  </button>
-                )}
-              </div>
-            )}
+              )}
+              {review.moderation_status !== 'flagged' && (
+                <button
+                  onClick={() => openReviewActionModal(review.id, 'flag')}
+                  className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 text-sm font-medium"
+                >
+                  Flag
+                </button>
+              )}
+              <button
+                onClick={() => openReviewActionModal(review.id, 'delete')}
+                className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-sm font-medium"
+              >
+                Delete
+              </button>
+            </div>
           </div>
         ))}
+        {reviews.length === 0 && (
+          <div className="bg-white rounded-2xl shadow-sm p-12 text-center text-gray-500">
+            No reviews found for this filter.
+          </div>
+        )}
       </div>
 
       {/* Pagination */}
@@ -923,6 +1064,107 @@ export function AdminDashboard() {
     </div>
   );
 
+  const SUPPORT_STATUS_BADGE: Record<string, { label: string; className: string }> = {
+    open: { label: 'Open', className: 'bg-yellow-100 text-yellow-700' },
+    in_progress: { label: 'In Progress', className: 'bg-blue-100 text-blue-700' },
+    resolved: { label: 'Resolved', className: 'bg-green-100 text-green-700' },
+  };
+
+  const renderSupport = () => (
+    <div className="space-y-4">
+      {/* Filters */}
+      <div className="bg-white rounded-2xl p-4 shadow-sm flex gap-4">
+        <select
+          value={supportStatusFilter}
+          onChange={(e) => { setSupportStatusFilter(e.target.value); setSupportPage(0); }}
+          className="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none"
+        >
+          <option value="all">All Tickets</option>
+          <option value="open">Open</option>
+          <option value="in_progress">In Progress</option>
+          <option value="resolved">Resolved</option>
+        </select>
+      </div>
+
+      {/* Tickets list */}
+      <div className="space-y-4">
+        {supportTickets.map((ticket) => {
+          const badge = SUPPORT_STATUS_BADGE[ticket.status] || SUPPORT_STATUS_BADGE.open;
+          return (
+            <div key={ticket.id} className="bg-white rounded-2xl shadow-sm p-6">
+              <div className="flex justify-between items-start gap-4">
+                <div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-medium text-gray-900">{ticket.subject}</span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {ticket.user_name} ({ticket.user_email}) • {ticket.user_role}
+                    {ticket.service_title && ` • re: ${ticket.service_title}`}
+                    {' • '}{formatDate(ticket.created_at)}
+                  </p>
+                </div>
+                <span className={`px-2 py-1 text-xs font-medium rounded-full flex-shrink-0 ${badge.className}`}>
+                  {badge.label}
+                </span>
+              </div>
+              <p className="mt-3 text-gray-700 whitespace-pre-wrap">{ticket.message}</p>
+              {ticket.admin_reply && (
+                <div className="mt-3 bg-purple-50 rounded-lg p-3">
+                  <p className="text-xs font-medium text-purple-700 mb-1">
+                    Your reply {ticket.replied_at ? `• ${formatDate(ticket.replied_at)}` : ''}
+                  </p>
+                  <p className="text-sm text-purple-900 whitespace-pre-wrap">{ticket.admin_reply}</p>
+                </div>
+              )}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  onClick={() => openSupportReplyModal(ticket)}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium"
+                >
+                  {ticket.admin_reply ? 'Reply again' : 'Reply'}
+                </button>
+                {ticket.status !== 'in_progress' && ticket.status !== 'resolved' && (
+                  <button
+                    onClick={() => handleSupportStatusChange(ticket.id, 'in_progress')}
+                    className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-sm font-medium"
+                  >
+                    Mark In Progress
+                  </button>
+                )}
+                {ticket.status !== 'resolved' && (
+                  <button
+                    onClick={() => handleSupportStatusChange(ticket.id, 'resolved')}
+                    className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-sm font-medium"
+                  >
+                    Mark Resolved
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        {supportTickets.length === 0 && (
+          <div className="bg-white rounded-2xl shadow-sm p-12 text-center text-gray-500">
+            No support tickets found for this filter.
+          </div>
+        )}
+      </div>
+
+      {/* Pagination */}
+      {supportTicketsTotal > 0 && (
+        <div className="flex justify-between items-center">
+          <p className="text-sm text-gray-500">
+            Showing {Math.min(supportPage * ITEMS_PER_PAGE + 1, supportTicketsTotal)} to {Math.min((supportPage + 1) * ITEMS_PER_PAGE, supportTicketsTotal)} of {supportTicketsTotal}
+          </p>
+          <div className="flex gap-2">
+            <button onClick={() => setSupportPage(p => Math.max(0, p - 1))} disabled={supportPage === 0} className="px-4 py-2 border border-gray-200 rounded-lg disabled:opacity-50 hover:bg-gray-50">Previous</button>
+            <button onClick={() => setSupportPage(p => p + 1)} disabled={(supportPage + 1) * ITEMS_PER_PAGE >= supportTicketsTotal} className="px-4 py-2 border border-gray-200 rounded-lg disabled:opacity-50 hover:bg-gray-50">Next</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   const tabs: { id: TabType; label: string }[] = [
     { id: 'overview', label: 'Overview' },
     { id: 'users', label: 'Users' },
@@ -931,6 +1173,7 @@ export function AdminDashboard() {
     { id: 'booking_disputes', label: 'Booking Disputes' },
     { id: 'disputes', label: 'Disputes' },
     { id: 'audit', label: 'Audit Logs' },
+    { id: 'support', label: 'Support' },
   ];
 
   return (
@@ -977,6 +1220,7 @@ export function AdminDashboard() {
             {activeTab === 'booking_disputes' && <BookingDisputesPanel onRefresh={loadTabData} />}
             {activeTab === 'disputes' && renderDisputes()}
             {activeTab === 'audit' && renderAuditLogs()}
+            {activeTab === 'support' && renderSupport()}
           </>
         )}
       </div>
@@ -1000,6 +1244,77 @@ export function AdminDashboard() {
             <div className="mt-4 flex justify-end gap-3">
               <button onClick={() => { setShowRejectModal(null); setRejectReason(''); }} className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
               <button onClick={handleRejectProvider} className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Reject</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Review Action Modal (Reject / Flag / Delete) */}
+      {showReviewActionModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-medium text-gray-900">
+                {showReviewActionModal.action === 'reject' ? 'Reject Review' :
+                  showReviewActionModal.action === 'flag' ? 'Flag Review' : 'Delete Review'}
+              </h3>
+              <button onClick={() => { setShowReviewActionModal(null); setReviewActionReason(''); }} className="text-gray-400 hover:text-gray-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <textarea
+              value={reviewActionReason}
+              onChange={(e) => setReviewActionReason(e.target.value)}
+              placeholder="Reason (optional)..."
+              className="w-full border border-gray-200 rounded-xl p-3 h-32 focus:ring-2 focus:ring-purple-500 outline-none"
+            />
+            <div className="mt-4 flex justify-end gap-3">
+              <button onClick={() => { setShowReviewActionModal(null); setReviewActionReason(''); }} className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+              <button
+                onClick={handleReviewActionConfirm}
+                className={`px-4 py-2 text-white rounded-lg ${showReviewActionModal.action === 'flag' ? 'bg-orange-600 hover:bg-orange-700' : 'bg-red-600 hover:bg-red-700'}`}
+              >
+                {showReviewActionModal.action === 'reject' ? 'Reject' : showReviewActionModal.action === 'flag' ? 'Flag' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Support Ticket Reply Modal */}
+      {showSupportReplyModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-lg w-full">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-medium text-gray-900">Reply to "{showSupportReplyModal.subject}"</h3>
+              <button onClick={() => { setShowSupportReplyModal(null); setSupportReplyText(''); }} className="text-gray-400 hover:text-gray-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="bg-gray-50 rounded-xl p-3 mb-4 text-sm text-gray-600 max-h-32 overflow-y-auto whitespace-pre-wrap">
+              {showSupportReplyModal.message}
+            </div>
+            <textarea
+              value={supportReplyText}
+              onChange={(e) => setSupportReplyText(e.target.value)}
+              placeholder="Write your reply..."
+              className="w-full border border-gray-200 rounded-xl p-3 h-32 focus:ring-2 focus:ring-purple-500 outline-none"
+            />
+            <div className="mt-3">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Set status to</label>
+              <select
+                value={supportReplyStatus}
+                onChange={(e) => setSupportReplyStatus(e.target.value)}
+                className="w-full border border-gray-200 rounded-xl p-3 focus:ring-2 focus:ring-purple-500 outline-none"
+              >
+                <option value="resolved">Resolved</option>
+                <option value="in_progress">In Progress</option>
+                <option value="open">Open</option>
+              </select>
+            </div>
+            <div className="mt-4 flex justify-end gap-3">
+              <button onClick={() => { setShowSupportReplyModal(null); setSupportReplyText(''); }} className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+              <button onClick={handleSupportReplyConfirm} className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">Send Reply</button>
             </div>
           </div>
         </div>

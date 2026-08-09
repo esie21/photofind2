@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Search, Camera, Video, Palette, Sparkles, Star, MapPin, ChevronRight, ChevronLeft, CalendarDays } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import userService from '../api/services/userService';
+import { CATEGORY_OPTIONS } from '../constants/categories';
 
 // Category configuration with icons, colors, and images
 const CATEGORY_CONFIG: Record<string, { icon: any; color: string; image: string }> = {
@@ -52,14 +53,14 @@ const CATEGORY_CONFIG: Record<string, { icon: any; color: string; image: string 
   },
 };
 
-// Main categories to display (order matters)
-const MAIN_CATEGORIES = ['Photography', 'Videography', 'Makeup Artist', 'Design', 'Event Organizer'];
-
 interface LandingPageProps {
   onViewChange: (view: 'client' | 'provider') => void;
+  onSearch: (query: string) => void;
+  onCategorySelect?: (category: string) => void;
 }
 
-export function LandingPage({ onViewChange }: LandingPageProps) {
+export function LandingPage({ onViewChange, onSearch, onCategorySelect }: LandingPageProps) {
+  const [searchQuery, setSearchQuery] = useState('');
   const [currentSlide, setCurrentSlide] = useState(0);
   const [categoryStats, setCategoryStats] = useState<{ name: string; count: number }[]>([]);
   const [totalProviders, setTotalProviders] = useState(0);
@@ -83,8 +84,10 @@ export function LandingPage({ onViewChange }: LandingPageProps) {
     })();
   }, []);
 
-  // Build categories array with real counts - only show categories that have providers
-  const categories = MAIN_CATEGORIES
+  // Build categories array with real counts - only show categories that have providers.
+  // Sourced from the full CATEGORY_OPTIONS list (same one providers pick from) so a
+  // provider's chosen category always has a chance to appear here, not just the first few.
+  const categories = CATEGORY_OPTIONS
     .map((name) => {
       const stats = categoryStats.find((c) => c.name === name);
       const config = CATEGORY_CONFIG[name] || {
@@ -152,20 +155,15 @@ export function LandingPage({ onViewChange }: LandingPageProps) {
               <Search className="w-5 h-5 text-gray-400" />
               <input
                 type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') onSearch(searchQuery); }}
                 placeholder="What service are you looking for?"
                 className="flex-1 outline-none text-gray-900 placeholder:text-gray-400"
               />
             </div>
-            <div className="flex-1 flex items-center gap-3 px-4 border-t sm:border-t-0 sm:border-l border-gray-200 pt-2 sm:pt-0">
-              <MapPin className="w-5 h-5 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Location"
-                className="flex-1 outline-none text-gray-900 placeholder:text-gray-400"
-              />
-            </div>
-            <button 
-              onClick={() => onViewChange('client')}
+            <button
+              onClick={() => onSearch(searchQuery)}
               className="px-6 py-3 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-xl hover:from-purple-700 hover:to-pink-700 transition-all"
             >
               Search
@@ -277,7 +275,7 @@ export function LandingPage({ onViewChange }: LandingPageProps) {
                           <MapPin className="w-4 h-4" />
                           <span>{provider.location}</span>
                         </div>
-                        <span className="text-purple-600">{provider.featured_service?.price ? `$${provider.featured_service.price}/hr` : provider.price || ''}</span>
+                        <span className="text-purple-600">{provider.featured_service?.price ? `₱${provider.featured_service.price}/hr` : provider.price || ''}</span>
                       </div>
                       <div className="mt-3 text-sm text-gray-500">
                         {provider.reviews || (provider.featured_service ? '' : '')} {provider.reviews ? 'reviews' : ''}
@@ -321,7 +319,10 @@ export function LandingPage({ onViewChange }: LandingPageProps) {
                 return (
                   <button
                     key={index}
-                    onClick={() => onViewChange('client')}
+                    onClick={() => {
+                      if (onCategorySelect) onCategorySelect(category.name);
+                      onViewChange('client');
+                    }}
                     className="group relative overflow-hidden rounded-2xl bg-gray-50 hover:shadow-xl transition-all duration-300"
                   >
                     <div className="relative h-48 overflow-hidden">

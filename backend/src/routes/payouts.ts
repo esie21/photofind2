@@ -2,11 +2,9 @@ import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
+import { MINIMUM_PAYOUT_AMOUNT } from '../config/payoutConfig';
 
 const router = express.Router();
-
-// Minimum payout amount
-const MINIMUM_PAYOUT_AMOUNT = parseFloat(process.env.MINIMUM_PAYOUT_AMOUNT || '500'); // 500 PHP
 
 // Request a payout
 router.post('/request', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
@@ -325,13 +323,19 @@ router.patch('/:id/status', verifyToken, async (req: Request & { userId?: string
     const currentStatus = payout.status;
 
     // Validate status transitions
+    // Note: 'failed' has no outgoing transitions here. A prior "retry" path back to
+    // 'pending' was unreachable anyway ('pending' isn't in validStatuses above), and
+    // wiring it up isn't as simple as allowing the status change - 'failed' already
+    // refunds the held amount back to available_balance, so resuming at 'pending'
+    // without re-deducting it would let the provider collect the payout twice once
+    // it's later approved and completed. A real retry needs its own deduction step.
     const validTransitions: Record<string, string[]> = {
       'pending': ['approved', 'rejected'],
       'approved': ['processing', 'rejected'],
       'processing': ['completed', 'failed'],
       'rejected': [],
       'completed': [],
-      'failed': ['pending'], // Allow retry
+      'failed': [],
     };
 
     if (!validTransitions[currentStatus]?.includes(status)) {

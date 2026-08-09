@@ -3,6 +3,7 @@ import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import crypto from 'crypto';
 import { notificationService } from '../services/notificationService';
+import { ensureProviderWallet } from '../services/walletService';
 
 const router = express.Router();
 
@@ -14,9 +15,6 @@ const PAYMONGO_API_URL = 'https://api.paymongo.com/v1';
 
 // Commission rate (configurable)
 const PLATFORM_COMMISSION_RATE = parseFloat(process.env.PLATFORM_COMMISSION_RATE || '0.15'); // 15%
-
-// Minimum payout amount
-const MINIMUM_PAYOUT_AMOUNT = parseFloat(process.env.MINIMUM_PAYOUT_AMOUNT || '500'); // 500 PHP
 
 // PayMongo API response types
 interface PayMongoError {
@@ -75,25 +73,6 @@ async function paymongoRequest(endpoint: string, method: string, data?: any, ide
   }
 
   return result;
-}
-
-// Helper to ensure provider has a wallet
-async function ensureProviderWallet(providerId: string): Promise<string> {
-  const existing = await pool.query(
-    'SELECT id FROM wallets WHERE provider_id::text = $1',
-    [providerId]
-  );
-
-  if (existing.rows[0]) {
-    return existing.rows[0].id;
-  }
-
-  const created = await pool.query(
-    'INSERT INTO wallets (provider_id) VALUES ($1) RETURNING id',
-    [providerId]
-  );
-
-  return created.rows[0].id;
 }
 
 // Generate idempotency key for payment - deterministic to prevent duplicate payments
@@ -388,88 +367,101 @@ router.post('/confirm', verifyToken, async (req: Request & { userId?: string }, 
     const paymentIntent = result.data;
     const status = paymentIntent.attributes.status;
 
-    if (status === 'succeeded' && payment.status !== 'succeeded') {
+    if (status === 'succeeded') {
       await dbClient.query('BEGIN');
 
-      // Update payment status
-      await dbClient.query(
-        `UPDATE payments
-         SET status = 'succeeded',
-             paid_at = CURRENT_TIMESTAMP,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id::text = $1`,
+      // Re-fetch and lock the payment row. The PayMongo webhook may be processing
+      // this exact payment concurrently (it typically fires right around when the
+      // client's browser calls this endpoint after checkout) — locking and
+      // re-checking status here, instead of trusting the unlocked read above,
+      // ensures only one of the two paths ever credits the wallet.
+      const lockedRes = await dbClient.query(
+        'SELECT * FROM payments WHERE id::text = $1 FOR UPDATE',
         [payment.id]
       );
+      const lockedPayment = lockedRes.rows[0];
 
-      // Update booking payment status
-      await dbClient.query(
-        `UPDATE bookings SET payment_status = 'paid', updated_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
-        [payment.booking_id]
-      );
-
-      // Credit provider wallet (to pending balance until service completion)
-      const walletId = await ensureProviderWallet(String(payment.provider_id));
-
-      // Lock wallet row to prevent race conditions with concurrent payments
-      const walletLockRes = await dbClient.query(
-        'SELECT id, pending_balance FROM wallets WHERE id::text = $1 FOR UPDATE',
-        [walletId]
-      );
-
-      if (!walletLockRes.rows[0]) {
-        await dbClient.query('ROLLBACK');
-        return res.status(500).json({ error: 'Wallet not found' });
-      }
-
-      const currentPending = parseFloat(walletLockRes.rows[0].pending_balance) || 0;
-      const newPending = currentPending + parseFloat(payment.net_provider_amount);
-
-      // Add to pending balance
-      await dbClient.query(
-        `UPDATE wallets
-         SET pending_balance = $1, updated_at = CURRENT_TIMESTAMP
-         WHERE id::text = $2`,
-        [newPending, walletId]
-      );
-
-      // Use newly calculated balance for transaction record
-      const walletRes = { rows: [{ pending_balance: newPending }] };
-
-      // Record transaction
-      await dbClient.query(
-        `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
-         VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
-        [
-          walletId,
-          payment.id,
-          payment.net_provider_amount,
-          walletRes.rows[0].pending_balance,
-          payment_intent_id,
-          `Payment received for booking #${payment.booking_id} (after ${PLATFORM_COMMISSION_RATE * 100}% commission)`
-        ]
-      );
-
-      await dbClient.query('COMMIT');
-
-      // Notify provider of payment received
-      try {
-        const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [payment.client_id]);
-        const bookingInfo = await pool.query(
-          `SELECT s.title FROM bookings b LEFT JOIN services s ON s.id::text = b.service_id::text WHERE b.id::text = $1`,
-          [payment.booking_id]
+      if (lockedPayment && lockedPayment.status !== 'succeeded') {
+        // Update payment status
+        await dbClient.query(
+          `UPDATE payments
+           SET status = 'succeeded',
+               paid_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id::text = $1`,
+          [lockedPayment.id]
         );
-        const clientName = clientInfo.rows[0]?.name || 'Client';
-        const serviceTitle = bookingInfo.rows[0]?.title || 'service';
 
-        await notificationService.notifyPaymentReceived(
-          String(payment.provider_id),
-          String(payment.client_id),
-          parseFloat(payment.net_provider_amount),
-          clientName,
-          String(payment.booking_id)
+        // Update booking payment status
+        await dbClient.query(
+          `UPDATE bookings SET payment_status = 'paid', updated_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
+          [lockedPayment.booking_id]
         );
-      } catch (notifError) {
-        console.error('Failed to send payment notification:', notifError);
+
+        // Credit provider wallet (to pending balance until service completion)
+        const walletId = await ensureProviderWallet(String(lockedPayment.provider_id));
+
+        // Lock wallet row to prevent race conditions with concurrent payments
+        const walletLockRes = await dbClient.query(
+          'SELECT id, pending_balance FROM wallets WHERE id::text = $1 FOR UPDATE',
+          [walletId]
+        );
+
+        if (!walletLockRes.rows[0]) {
+          await dbClient.query('ROLLBACK');
+          return res.status(500).json({ error: 'Wallet not found' });
+        }
+
+        const currentPending = parseFloat(walletLockRes.rows[0].pending_balance) || 0;
+        const newPending = currentPending + parseFloat(lockedPayment.net_provider_amount);
+
+        // Add to pending balance
+        await dbClient.query(
+          `UPDATE wallets
+           SET pending_balance = $1, updated_at = CURRENT_TIMESTAMP
+           WHERE id::text = $2`,
+          [newPending, walletId]
+        );
+
+        // Record transaction
+        await dbClient.query(
+          `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
+           VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
+          [
+            walletId,
+            lockedPayment.id,
+            lockedPayment.net_provider_amount,
+            newPending,
+            payment_intent_id,
+            `Payment received for booking #${lockedPayment.booking_id} (after ${PLATFORM_COMMISSION_RATE * 100}% commission)`
+          ]
+        );
+
+        await dbClient.query('COMMIT');
+
+        // Notify provider of payment received
+        try {
+          const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [lockedPayment.client_id]);
+          const bookingInfo = await pool.query(
+            `SELECT s.title FROM bookings b LEFT JOIN services s ON s.id::text = b.service_id::text WHERE b.id::text = $1`,
+            [lockedPayment.booking_id]
+          );
+          const clientName = clientInfo.rows[0]?.name || 'Client';
+          const serviceTitle = bookingInfo.rows[0]?.title || 'service';
+
+          await notificationService.notifyPaymentReceived(
+            String(lockedPayment.provider_id),
+            String(lockedPayment.client_id),
+            parseFloat(lockedPayment.net_provider_amount),
+            clientName,
+            String(lockedPayment.booking_id)
+          );
+        } catch (notifError) {
+          console.error('Failed to send payment notification:', notifError);
+        }
+      } else {
+        // Already credited by the webhook (or a prior confirm call) - nothing to do.
+        await dbClient.query('COMMIT');
       }
     } else if (status === 'failed') {
       await dbClient.query(
@@ -564,8 +556,11 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
 
       await dbClient.query('BEGIN');
 
+      // Lock the payment row - the client's /confirm call may be processing this
+      // exact payment concurrently. Whichever of the two gets here first wins;
+      // the other will see status = 'succeeded' below and skip crediting.
       const paymentRes = await dbClient.query(
-        'SELECT * FROM payments WHERE paymongo_payment_intent_id = $1',
+        'SELECT * FROM payments WHERE paymongo_payment_intent_id = $1 FOR UPDATE',
         [paymentIntentId]
       );
 

@@ -44,6 +44,7 @@ export const API_CONFIG = {
       SIGNUP: '/auth/signup',
       LOGOUT: '/auth/logout',
       ME: '/auth/me',
+      GOOGLE: '/auth/google',
     },
     // Users endpoints
     USERS: {
@@ -53,6 +54,7 @@ export const API_CONFIG = {
       DELETE: (id: string) => `/users/${id}`,
       UPLOAD_PROFILE: (id: string) => `/users/${id}/upload/profile`,
       UPLOAD_PORTFOLIO: (id: string) => `/users/${id}/upload/portfolio`,
+      UPLOAD_VERIFICATION: (id: string) => `/users/${id}/upload/verification`,
     },
     // Providers endpoints
     PROVIDERS: {
@@ -73,6 +75,8 @@ export const API_CONFIG = {
       EVIDENCE: (id: string) => `/bookings/${id}/evidence`,
       RESOLVE_DISPUTE: (id: string) => `/bookings/${id}/resolve-dispute`,
       RESCHEDULE: (id: string) => `/bookings/${id}/reschedule`,
+      RESCHEDULE_APPROVE: (id: string) => `/bookings/${id}/reschedule/approve`,
+      RESCHEDULE_REJECT: (id: string) => `/bookings/${id}/reschedule/reject`,
     },
     AVAILABILITY: {
       PROVIDER_SLOTS: (providerId: string | number) => `/availability/providers/${providerId}/slots`,

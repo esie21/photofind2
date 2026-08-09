@@ -8,14 +8,15 @@ const router = Router();
 router.get('/', async (req: Request, res: Response) => {
   try {
     const q = (req.query.q as string) || '';
+    const category = (req.query.category as string) || '';
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 12));
     const offset = (page - 1) * limit;
     // We want to select providers and include a featured service (first service by created_at)
     const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const searchClause = q ? `AND (u.name ILIKE $1 OR s.title ILIKE $1)` : '';
-    const values: any[] = [];
-    if (q) values.push(`%${q}%`);
+    // Match against ANY service the provider offers, not just the one featured on
+    // their card — the featured service is picked separately below (most recent by
+    // default, but the matching one is preferred when there's a search query).
     // Detect which service columns exist to build SQL dynamically
     const colRes = await pool.query(`
       SELECT column_name FROM information_schema.columns
@@ -28,6 +29,24 @@ router.get('/', async (req: Request, res: Response) => {
     const hasDescription = existingCols.includes('description');
     const hasCreatedAt = existingCols.includes('created_at');
 
+    const values: any[] = [];
+    const whereClauses: string[] = [];
+    if (q) {
+      values.push(`%${q}%`);
+      whereClauses.push(`(u.name ILIKE $${values.length} OR EXISTS (SELECT 1 FROM services sq WHERE sq.provider_id = u.id AND sq.title ILIKE $${values.length}))`);
+    }
+    if (category) {
+      // A provider matches either by their primary category or by offering a
+      // service tagged with that category — a provider's headline category
+      // and their individual services' categories can differ.
+      values.push(category);
+      const serviceCategoryMatch = hasCategory
+        ? ` OR EXISTS (SELECT 1 FROM services sc WHERE sc.provider_id = u.id AND sc.category = $${values.length})`
+        : '';
+      whereClauses.push(`(u.category = $${values.length}${serviceCategoryMatch})`);
+    }
+    const searchClause = whereClauses.length ? `AND ${whereClauses.join(' AND ')}` : '';
+
     const serviceSelectParts = [`id`, `title`, `price`];
     if (hasCategory) serviceSelectParts.push('category');
     if (hasImages) serviceSelectParts.push('images');
@@ -36,17 +55,20 @@ router.get('/', async (req: Request, res: Response) => {
 
     const serviceSelect = serviceSelectParts.map((c) => `s.${c} AS service_${c}`).join(', ');
     const orderByService = hasCreatedAt ? 'created_at DESC' : 'id DESC';
+    // When searching, feature whichever service actually matched the query (so the
+    // card shows why this provider matched) instead of always the most recent one.
+    const featuredOrderBy = q ? `(title ILIKE $1) DESC, ${orderByService}` : orderByService;
     console.debug('serviceSelectParts:', serviceSelectParts, 'orderByService:', orderByService);
 
     // Use LATERAL join to fetch featured service
-    const sql = `SELECT u.id, u.email, u.name, u.role, u.profile_image, u.portfolio_images, u.bio, u.years_experience, u.location, u.rating, u.review_count,
+    const sql = `SELECT u.id, u.email, u.name, u.role, u.profile_image, u.portfolio_images, u.bio, u.years_experience, u.location, u.rating, u.review_count, u.is_verified,
       ${serviceSelect}
       FROM users u
       LEFT JOIN LATERAL (
         SELECT ${serviceSelectParts.join(', ')}
         FROM services
         WHERE services.provider_id = u.id
-        ORDER BY ${orderByService}
+        ORDER BY ${featuredOrderBy}
         LIMIT 1
       ) s ON true
       WHERE u.role = 'provider' ${searchClause}
@@ -56,7 +78,6 @@ router.get('/', async (req: Request, res: Response) => {
     const result = await pool.query(sql, values);
     // Get total count for pagination meta
     const countSql = `SELECT COUNT(DISTINCT u.id) as total FROM users u
-      LEFT JOIN services s ON s.provider_id = u.id
       WHERE u.role = 'provider' ${searchClause}`;
     const countResult = await pool.query(countSql, values);
     const total = Number(countResult.rows[0]?.total || 0);
@@ -80,6 +101,7 @@ router.get('/', async (req: Request, res: Response) => {
       location: r.location,
       rating: parseFloat(r.rating) || 0,
       review_count: parseInt(r.review_count) || 0,
+      is_verified: !!r.is_verified,
       featured_service: r.service_id ? {
         id: r.service_id,
         title: r.service_title,

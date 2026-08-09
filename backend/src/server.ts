@@ -1,7 +1,7 @@
+import './loadEnv';
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
 import { testConnection, initializeTables } from './config/database';
 import { pool } from './config/database';
 import authRoutes from './routes/auth';
@@ -19,6 +19,7 @@ import walletRoutes from './routes/wallet';
 import payoutsRoutes from './routes/payouts';
 import notificationsRoutes from './routes/notifications';
 import reviewsRoutes from './routes/reviews';
+import supportRoutes from './routes/support';
 import { notificationService } from './services/notificationService';
 import path from 'path';
 import http from 'http';
@@ -37,8 +38,6 @@ import {
   xssSanitizer,
   csrfTokenSetter,
 } from './middleware/security';
-
-dotenv.config();
 
 const app: Express = express();
 
@@ -136,6 +135,7 @@ app.use('/api/availability', availabilityRoutes);
 app.use('/api/services', servicesRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/reviews', reviewsRoutes);
+app.use('/api/support', supportRoutes);
 
 // Register debug routes only in non-production
 if (process.env.NODE_ENV !== 'production') {

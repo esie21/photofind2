@@ -20,6 +20,9 @@ export interface Booking {
   original_start_date?: string | null;
   original_end_date?: string | null;
   reschedule_count?: number;
+  reschedule_pending_approval?: boolean;
+  reschedule_previous_start_date?: string | null;
+  reschedule_previous_end_date?: string | null;
   // Dual confirmation fields
   provider_completed_at?: string | null;
   client_confirmed_at?: string | null;
@@ -110,6 +113,26 @@ const bookingService = {
     return apiClient.put<{ data: Booking; message: string }>(
       API_CONFIG.ENDPOINTS.BOOKINGS.RESCHEDULE(id),
       data
+    );
+  },
+
+  /**
+   * Confirm a reschedule proposed by the other party
+   */
+  async approveReschedule(id: string): Promise<{ data: Booking; message: string }> {
+    return apiClient.put<{ data: Booking; message: string }>(
+      (API_CONFIG.ENDPOINTS.BOOKINGS as any).RESCHEDULE_APPROVE(id),
+      {}
+    );
+  },
+
+  /**
+   * Decline a reschedule proposed by the other party; reverts to the original time
+   */
+  async rejectReschedule(id: string): Promise<{ data: Booking; message: string }> {
+    return apiClient.put<{ data: Booking; message: string }>(
+      (API_CONFIG.ENDPOINTS.BOOKINGS as any).RESCHEDULE_REJECT(id),
+      {}
     );
   },
 

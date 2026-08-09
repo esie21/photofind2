@@ -7,6 +7,7 @@ interface AuthContextProps {
   token: string | null;
   login: (email: string, password: string) => Promise<User>;
   signup: (data: { email: string; password: string; name: string; role: 'client' | 'provider' | 'admin' }) => Promise<User>;
+  loginWithGoogle: (data: { credential: string; role?: 'client' | 'provider'; intent: 'login' | 'signup' }) => Promise<{ user?: User; needsRole?: boolean; profile?: { email: string; name: string; picture?: string | null } }>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<User | null>;
 }
@@ -59,6 +60,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return user;
   };
 
+  const loginWithGoogle = async (data: { credential: string; role?: 'client' | 'provider'; intent: 'login' | 'signup' }) => {
+    const response = await authService.loginWithGoogle(data);
+    if (response.needsRole) {
+      return {
+        needsRole: true,
+        profile: response.profile,
+      };
+    }
+    if (!response.token || !response.user) {
+      throw new Error('Google sign-in failed');
+    }
+    authService.setToken(response.token);
+    setToken(response.token);
+    const user = normalizeUserImages(response.user);
+    setUser(user);
+    return { user };
+  };
+
   const logout = async () => {
     await authService.logout();
     setToken(null);
@@ -77,7 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, signup, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, token, login, signup, loginWithGoogle, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

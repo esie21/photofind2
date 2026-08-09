@@ -1,19 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Upload, Calendar, DollarSign, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle } from 'lucide-react';
-
-// Category options for providers and services
-const CATEGORY_OPTIONS = [
-  'Photography',
-  'Videography',
-  'Makeup Artist',
-  'Design',
-  'Event Organizer',
-  'Wedding Photography',
-  'Portrait Photography',
-  'Event Photography',
-  'Commercial Photography',
-  'Other',
-];
+import { Upload, Calendar, PhilippinePeso, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle, ShieldCheck, FileText } from 'lucide-react';
+import { CATEGORY_OPTIONS } from '../constants/categories';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
@@ -31,15 +18,31 @@ import { WalletDashboard } from './WalletDashboard';
 import { RescheduleModal } from './RescheduleModal';
 import { CompleteBookingModal } from './CompleteBookingModal';
 
-export function ProviderDashboard() {
+type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
+
+interface ProviderDashboardProps {
+  initialTab?: ProviderTab;
+  tabRequestId?: number;
+}
+
+export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboardProps = {}) {
   const BASE_URL = ((import.meta as any).env?.VITE_API_URL as string) || 'http://localhost:3001/api';
-  const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews'>('overview');
+  const [activeTab, setActiveTab] = useState<ProviderTab>(initialTab || 'overview');
+
+  // Jump to a specific tab whenever the account menu requests one, even if
+  // this dashboard is already mounted (tabRequestId changes on every request).
+  useEffect(() => {
+    if (initialTab) setActiveTab(initialTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabRequestId]);
   const [showChat, setShowChat] = useState(false);
   const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
   const { user, refreshUser } = useAuth();
   const toast = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const portfolioFileRef = useRef<HTMLInputElement | null>(null);
+  const verificationFileRef = useRef<HTMLInputElement | null>(null);
+  const [uploadingVerification, setUploadingVerification] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [packages, setPackages] = useState<any[]>([]);
   const [isLoadingPackages, setIsLoadingPackages] = useState(false);
@@ -69,7 +72,7 @@ export function ProviderDashboard() {
   const allBookingItemsPerPage = 10;
   const [formState, setFormState] = useState<any>({
     name: user?.name || 'Sarah Johnson',
-    title: user?.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
+    title: user?.title || '',
     bio: user?.bio || '',
     location: user?.location || '',
     category: user?.category || 'Photography',
@@ -112,7 +115,7 @@ export function ProviderDashboard() {
 
     return [
       { label: 'Upcoming Bookings', value: String(upcomingBookings), change: `${pendingBookings} pending`, icon: Calendar, color: 'purple' },
-      { label: 'Earnings (30d)', value: `$${recentEarnings.toLocaleString()}`, change: 'Last 30 days', icon: DollarSign, color: 'green' },
+      { label: 'Earnings (30d)', value: `₱${recentEarnings.toLocaleString()}`, change: 'Last 30 days', icon: PhilippinePeso, color: 'green' },
       { label: 'Completed Bookings', value: String(completedBookings), change: 'All time', icon: TrendingUp, color: 'blue' },
       { label: 'Total Bookings', value: String(providerBookings.length), change: 'All statuses', icon: Star, color: 'yellow' },
     ];
@@ -124,7 +127,7 @@ export function ProviderDashboard() {
 
     setFormState({
       name: user.name || 'Sarah Johnson',
-      title: user.role === 'provider' ? 'Wedding & Portrait Photographer' : '',
+      title: user.title || '',
       bio: user.bio || '',
       location: user.location || '',
       category: user.category || 'Photography',
@@ -253,8 +256,10 @@ export function ProviderDashboard() {
       const data = await bookingService.getMyProviderBookings();
       const mapped = (data || []).map((b: any) => {
         const start = b.start_date ? new Date(b.start_date) : b.startDate ? new Date(b.startDate) : null;
-        const date = start ? start.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) : '';
-        const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+        // Always render in Manila time so bookings show consistently regardless
+        // of the viewer's device timezone.
+        const date = start ? start.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'Asia/Manila' }) : '';
+        const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Manila' }) : '';
 
         // Handle client image URL
         let clientImage = b.client_image;
@@ -273,9 +278,12 @@ export function ProviderDashboard() {
           date,
           time,
           start_date: b.start_date,
+          end_date: b.end_date,
           amount: Number(b.total_price || b.totalPrice || 0),
           status: b.status,
           image: clientImage,
+          reschedule_pending_approval: b.reschedule_pending_approval,
+          rescheduled_by: b.rescheduled_by,
         };
       });
       setProviderBookings(mapped);
@@ -284,6 +292,34 @@ export function ProviderDashboard() {
       setProviderBookings([]);
     } finally {
       setIsLoadingBookings(false);
+    }
+  };
+
+  const [reschedulingId, setReschedulingId] = useState<string | null>(null);
+
+  const handleApproveReschedule = async (bookingId: string) => {
+    setReschedulingId(bookingId);
+    try {
+      await bookingService.approveReschedule(String(bookingId));
+      toast.success('New time confirmed', 'The proposed time is now the confirmed booking time.');
+      fetchBookings();
+    } catch (e: any) {
+      toast.error('Failed to confirm', e?.message || 'Could not confirm the new time.');
+    } finally {
+      setReschedulingId(null);
+    }
+  };
+
+  const handleRejectReschedule = async (bookingId: string) => {
+    setReschedulingId(bookingId);
+    try {
+      await bookingService.rejectReschedule(String(bookingId));
+      toast.info('Reverted to original time', 'The proposed time was declined.');
+      fetchBookings();
+    } catch (e: any) {
+      toast.error('Failed to decline', e?.message || 'Could not decline the new time.');
+    } finally {
+      setReschedulingId(null);
     }
   };
 
@@ -490,7 +526,7 @@ export function ProviderDashboard() {
                             <p className="text-sm text-gray-600">{booking.service || 'Service'}</p>
                           </div>
                           <div className="text-right">
-                            <div className="text-purple-600">${booking.amount}</div>
+                            <div className="text-purple-600">₱{booking.amount}</div>
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600 mb-3">
@@ -572,7 +608,32 @@ export function ProviderDashboard() {
                                   Mark Complete
                                 </button>
                               )}
-                            {['pending', 'accepted', 'confirmed'].includes(booking.status) && (
+                            {booking.reschedule_pending_approval ? (
+                              String(booking.rescheduled_by) === String(user?.id) ? (
+                                <span className="px-3 py-2 text-orange-600 text-sm flex items-center gap-1">
+                                  <RefreshCw className="w-4 h-4" />
+                                  Awaiting client confirmation
+                                </span>
+                              ) : (
+                                <>
+                                  <button
+                                    onClick={() => handleApproveReschedule(String(booking.id))}
+                                    disabled={reschedulingId === String(booking.id)}
+                                    className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm flex items-center gap-2 disabled:opacity-50"
+                                  >
+                                    <CheckCircle className="w-4 h-4" />
+                                    Confirm New Time
+                                  </button>
+                                  <button
+                                    onClick={() => handleRejectReschedule(String(booking.id))}
+                                    disabled={reschedulingId === String(booking.id)}
+                                    className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2 disabled:opacity-50"
+                                  >
+                                    Keep Original Time
+                                  </button>
+                                </>
+                              )
+                            ) : ['pending', 'accepted', 'confirmed'].includes(booking.status) && (
                               <button
                                 onClick={() => {
                                   setRescheduleBooking({
@@ -581,6 +642,8 @@ export function ProviderDashboard() {
                                     client: booking.client,
                                     date: booking.date,
                                     time: booking.time,
+                                    start_date: booking.start_date,
+                                    end_date: booking.end_date,
                                   });
                                   setShowRescheduleModal(true);
                                 }}
@@ -868,6 +931,7 @@ export function ProviderDashboard() {
                           // Save profile information
                           const payload: any = {
                             name: formState.name,
+                            title: formState.title,
                             bio: formState.bio,
                             years_experience: formState.years_experience,
                             location: formState.location,
@@ -952,6 +1016,7 @@ export function ProviderDashboard() {
                         setFormState((s: any) => ({
                           ...s,
                           name: user?.name || s.name,
+                          title: (user as any)?.title || s.title,
                           bio: (user as any)?.bio || s.bio,
                           years_experience: (user as any)?.years_experience || s.years_experience,
                           location: (user as any)?.location || s.location,
@@ -1104,6 +1169,94 @@ export function ProviderDashboard() {
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* Verification */}
+            <div className="bg-white rounded-2xl p-6 shadow-sm">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-gray-900 flex items-center gap-2">
+                  <ShieldCheck className="w-5 h-5 text-purple-600" />
+                  Verification
+                </h2>
+                {(() => {
+                  const status = (user as any)?.verification_status || 'unsubmitted';
+                  const badge: Record<string, { label: string; className: string }> = {
+                    unsubmitted: { label: 'Not submitted', className: 'bg-gray-100 text-gray-600' },
+                    pending: { label: 'Pending review', className: 'bg-yellow-100 text-yellow-700' },
+                    approved: { label: 'Verified', className: 'bg-green-100 text-green-700' },
+                    rejected: { label: 'Rejected', className: 'bg-red-100 text-red-700' },
+                  };
+                  const { label, className } = badge[status] || { label: status, className: 'bg-gray-100 text-gray-600' };
+                  return (
+                    <span className={`px-3 py-1 text-xs font-medium rounded-full ${className}`}>
+                      {label}
+                    </span>
+                  );
+                })()}
+              </div>
+
+              <p className="text-sm text-gray-500 mb-4">
+                {(user as any)?.verification_status === 'approved'
+                  ? 'Your account is verified. Clients see a Verified badge on your profile.'
+                  : (user as any)?.verification_status === 'pending'
+                    ? 'Your documents are under review. This usually takes 1-2 business days.'
+                    : (user as any)?.verification_status === 'rejected'
+                      ? 'Your last submission was not approved. Upload updated documents to submit again.'
+                      : 'Submit a government ID or business permit to get a Verified badge clients can see on your profile.'}
+              </p>
+
+              {Array.isArray((user as any)?.verification_documents) && (user as any).verification_documents.length > 0 && (
+                <div className="mb-4 space-y-2">
+                  {(user as any).verification_documents.map((doc: { path: string; original_name: string; uploaded_at: string }, index: number) => (
+                    <a
+                      key={index}
+                      href={getUploadUrl(doc.path)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                      <FileText className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                      <span className="truncate">{doc.original_name}</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+
+              <input
+                type="file"
+                ref={verificationFileRef}
+                name="documents"
+                accept="image/*,application/pdf"
+                multiple
+                className="hidden"
+                onChange={async (e) => {
+                  const files = Array.from(e.target.files || []);
+                  if (!user || files.length === 0) return;
+                  setUploadingVerification(true);
+                  try {
+                    await userService.uploadVerificationDocuments(user.id, files);
+                    await refreshUser();
+                    toast.success('Documents submitted', 'Your verification documents have been submitted for review.');
+                  } catch (err: any) {
+                    console.error('Verification document upload failed', err);
+                    toast.error('Upload failed', err?.message || 'Failed to upload verification documents');
+                  } finally {
+                    setUploadingVerification(false);
+                    if (verificationFileRef.current) verificationFileRef.current.value = '';
+                  }
+                }}
+              />
+              <button
+                onClick={() => { if (editMode) verificationFileRef.current?.click(); }}
+                disabled={!editMode || uploadingVerification}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Upload className="w-4 h-4" />
+                {uploadingVerification ? 'Uploading...' : 'Upload Documents'}
+              </button>
+              {!editMode && (
+                <p className="text-xs text-gray-400 mt-2">Click "Edit Profile" above to upload documents.</p>
+              )}
             </div>
 
             {/* Portfolio */}
@@ -1431,14 +1584,14 @@ export function ProviderDashboard() {
                           {/* Pricing badges - show all enabled options */}
                           {pkg.enable_hourly && pkg.hourly_rate && (
                             <span className="inline-flex items-center px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded-full">
-                              <DollarSign className="w-3 h-3 mr-1" />
+                              <PhilippinePeso className="w-3 h-3 mr-1" />
                               ₱{pkg.hourly_rate.toLocaleString()}/hr
                             </span>
                           )}
                           {pkg.enable_package && pkg.package_price && (
                             <>
                               <span className="inline-flex items-center px-2 py-1 text-xs bg-green-100 text-green-700 rounded-full">
-                                <DollarSign className="w-3 h-3 mr-1" />
+                                <PhilippinePeso className="w-3 h-3 mr-1" />
                                 ₱{pkg.package_price.toLocaleString()} package
                               </span>
                               {pkg.duration_minutes && (
@@ -1622,7 +1775,7 @@ export function ProviderDashboard() {
                                 <span>{booking.date}</span>
                               </div>
                               <span>{booking.time}</span>
-                              <span className="text-purple-600 font-medium">${booking.amount?.toLocaleString()}</span>
+                              <span className="text-purple-600 font-medium">₱{booking.amount?.toLocaleString()}</span>
                             </div>
                             <div className="flex flex-wrap gap-2">
                               {booking.status === 'pending' && (
@@ -1907,6 +2060,7 @@ export function ProviderDashboard() {
       {/* Reschedule Modal */}
       {showRescheduleModal && rescheduleBooking && (
         <RescheduleModal
+          providerId={String(user?.id)}
           booking={rescheduleBooking}
           onClose={() => {
             setShowRescheduleModal(false);

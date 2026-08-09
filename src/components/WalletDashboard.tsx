@@ -199,7 +199,7 @@ export function WalletDashboard() {
       <div className="flex justify-end">
         <button
           onClick={() => setShowPayoutForm(true)}
-          disabled={(wallet?.available_balance || 0) < 500}
+          disabled={(wallet?.available_balance || 0) < (wallet?.minimum_payout_amount ?? 500)}
           className="px-6 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
         >
           <ArrowUpRight className="w-5 h-5" />
@@ -413,6 +413,7 @@ export function WalletDashboard() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <PayoutRequestForm
             availableBalance={wallet.available_balance}
+            minimumPayout={wallet.minimum_payout_amount ?? 500}
             onSuccess={handlePayoutSuccess}
             onCancel={() => setShowPayoutForm(false)}
           />

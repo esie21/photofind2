@@ -226,9 +226,18 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     if (!clientUserIdStr) return res.status(400).json({ error: 'Invalid client ID' });
     if (!providerUserIdStr || !serviceIdStr) return res.status(400).json({ error: 'Invalid provider_id or service_id' });
 
-    // Validate service exists and get its price
+    // Validate service exists and get its price (column-safe for older schemas)
+    const columnCheck = await pool.query(`
+      SELECT column_name FROM information_schema.columns WHERE table_name = 'services'
+    `);
+    const serviceColumns = columnCheck.rows.map((r: { column_name: string }) => r.column_name);
+    const pricingCols = ['id', 'price', 'pricing_type', 'duration_minutes'];
+    if (serviceColumns.includes('package_price')) pricingCols.push('package_price');
+    if (serviceColumns.includes('hourly_rate')) pricingCols.push('hourly_rate');
+    if (serviceColumns.includes('hourly_price')) pricingCols.push('hourly_price');
+
     const serviceCheck = await pool.query(
-      'SELECT id, price, pricing_type, duration_minutes FROM services WHERE id::text = $1',
+      `SELECT ${pricingCols.join(', ')} FROM services WHERE id::text = $1`,
       [serviceIdStr]
     );
     if (serviceCheck.rows.length === 0) {
@@ -236,19 +245,49 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     }
     const service = serviceCheck.rows[0];
     const servicePrice = parseFloat(service.price) || 0;
+    const packagePrice = parseFloat(service.package_price) || servicePrice;
+    const packageDuration = service.duration_minutes || 60;
     const platformFeeRate = 0.15;
 
-    // Validate total_price is not less than service price (with platform fee)
-    const minPrice = servicePrice * (1 + platformFeeRate);
+    // Validate total_price is not less than expected (with platform fee)
     const submittedPrice = parseFloat(total_price) || 0;
 
     // For hourly pricing, we can't validate exact price here (depends on duration)
     // But we can ensure it's not suspiciously low
-    if (service.pricing_type !== 'hourly' && submittedPrice < minPrice * 0.99) {
-      return res.status(400).json({
-        error: 'Invalid price',
-        detail: `Price must be at least ₱${minPrice.toFixed(2)}`
-      });
+    if (service.pricing_type === 'hourly') {
+      const minPrice = servicePrice * (1 + platformFeeRate);
+      if (submittedPrice < minPrice * 0.99) {
+        return res.status(400).json({
+          error: 'Invalid price',
+          detail: `Price must be at least ₱${minPrice.toFixed(2)}`
+        });
+      }
+    } else {
+      // Package pricing: price scales with duration (e.g. 2 hrs of a 1-hr package = 2×)
+      const startForPrice = new Date(String(start_date));
+      let endForPrice: Date;
+      if (end_date) {
+        endForPrice = new Date(String(end_date));
+      } else {
+        endForPrice = new Date(startForPrice.getTime() + packageDuration * 60 * 1000);
+      }
+      const durationMinutes = Math.round((endForPrice.getTime() - startForPrice.getTime()) / (1000 * 60));
+      const units = Math.max(1, durationMinutes / packageDuration);
+      const expectedServicePrice = packagePrice * units;
+      let minPrice = expectedServicePrice * (1 + platformFeeRate);
+
+      if (service.pricing_type === 'both') {
+        const hourlyRate = parseFloat(service.hourly_rate) || parseFloat(service.hourly_price) || servicePrice;
+        const hourlyExpected = hourlyRate * (durationMinutes / 60) * (1 + platformFeeRate);
+        minPrice = Math.min(minPrice, hourlyExpected);
+      }
+
+      if (submittedPrice < minPrice * 0.99) {
+        return res.status(400).json({
+          error: 'Invalid price',
+          detail: `Price must be at least ₱${minPrice.toFixed(2)}`
+        });
+      }
     }
 
     // Convert user IDs to record IDs if needed (handles providers/clients tables)
@@ -688,7 +727,7 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
 
   try {
     const existingRes = await pool.query(
-      'SELECT id, client_id, provider_id, status FROM bookings WHERE id::text = $1',
+      'SELECT id, client_id, provider_id, status, dispute_raised FROM bookings WHERE id::text = $1',
       [bookingId]
     );
     const existing = existingRes.rows[0];
@@ -704,7 +743,7 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
 
     const currentStatus = String(existing.status);
     if (role !== 'admin') {
-      if (['completed', 'cancelled', 'rejected'].includes(currentStatus)) {
+      if (['completed', 'cancelled', 'rejected'].includes(currentStatus) || existing.dispute_raised) {
         return res.status(400).json({ error: 'Cannot cancel this booking' });
       }
     }
@@ -831,7 +870,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const hasClientsTable = existingTables.includes('clients');
 
     const existingRes = await pool.query(
-      'SELECT id, client_id, provider_id, status, start_date, end_date FROM bookings WHERE id::text = $1',
+      'SELECT id, client_id, provider_id, status, start_date, end_date, dispute_raised FROM bookings WHERE id::text = $1',
       [bookingId]
     );
     const existing = existingRes.rows[0];
@@ -866,7 +905,13 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       return res.status(400).json({ error: 'Missing status' });
     }
 
-    if (!['pending', 'accepted', 'rejected', 'confirmed', 'completed', 'cancelled'].includes(nextStatus)) {
+    // 'completed' is intentionally not settable through this generic endpoint - it
+    // must go through POST /:id/complete (evidence upload) -> PUT /:id/confirm (or
+    // the 48-hour auto-confirm / dispute resolution), which are the only paths that
+    // also release the client's escrowed payment from pending to available balance.
+    // Allowing a direct status jump here would let a provider mark a booking
+    // "completed" while the payment stays stranded in escrow forever.
+    if (!['pending', 'accepted', 'rejected', 'confirmed', 'cancelled'].includes(nextStatus)) {
       return res.status(400).json({ error: 'Invalid status' });
     }
 
@@ -875,7 +920,6 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const isAccept = nextStatus === 'accepted' || nextStatus === 'confirmed';
     const isReject = nextStatus === 'rejected';
     const isCancel = nextStatus === 'cancelled';
-    const isComplete = nextStatus === 'completed';
 
     if (isAccept) {
       if (!isProvider) return res.status(403).json({ error: 'Only provider can accept booking' });
@@ -889,14 +933,9 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
 
     if (isCancel) {
       if (!isClient && !isProvider) return res.status(403).json({ error: 'Access denied' });
-      if (['completed', 'cancelled', 'rejected'].includes(currentStatus)) {
+      if (['completed', 'cancelled', 'rejected'].includes(currentStatus) || existing.dispute_raised) {
         return res.status(400).json({ error: 'Cannot cancel this booking' });
       }
-    }
-
-    if (isComplete) {
-      if (!isProvider) return res.status(403).json({ error: 'Only provider can complete booking' });
-      if (!['accepted', 'confirmed'].includes(currentStatus)) return res.status(400).json({ error: 'Only accepted bookings can be completed' });
     }
 
     if (nextStatus === 'pending') {
@@ -941,9 +980,6 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       if (isCancel) {
         updates.push(`cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP)`);
       }
-      if (isComplete) {
-        updates.push(`completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)`);
-      }
 
       values.push(bookingId);
 
@@ -960,10 +996,8 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
           // Get names for notifications
           const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [clientUserId]);
           const providerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]);
-          const serviceInfo = await pool.query('SELECT title FROM services WHERE id::text = $1', [String(updated.service_id)]);
           const clientName = clientInfo.rows[0]?.name || 'Client';
           const providerName = providerInfo.rows[0]?.name || 'Provider';
-          const serviceTitle = serviceInfo.rows[0]?.title || 'service';
 
           if (isAccept) {
             // Notify client that their booking was accepted
@@ -991,14 +1025,6 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
               cancellerUserId,
               cancellerName,
               bookingId
-            );
-          } else if (isComplete) {
-            // Notify client that booking is completed
-            await notificationService.notifyBookingCompleted(
-              clientUserId,
-              providerUserId,
-              bookingId,
-              serviceTitle
             );
           }
         } catch (notifError) {
@@ -1072,8 +1098,9 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
       return res.status(400).json({ error: 'End date must be after start date' });
     }
 
-    if (newStartDate < new Date()) {
-      return res.status(400).json({ error: 'Cannot reschedule to a past date' });
+    const MIN_LEAD_TIME_MS = 60 * 60 * 1000; // 1 hour notice for the other party
+    if (newStartDate.getTime() < Date.now() + MIN_LEAD_TIME_MS) {
+      return res.status(400).json({ error: 'New start time must be at least 1 hour from now' });
     }
 
     // Get existing booking
@@ -1090,8 +1117,20 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
     }
 
     const booking = bookingResult.rows[0];
-    const clientUserId = String(booking.client_id);
-    const providerUserId = String(booking.provider_id);
+
+    // Resolve provider/client user IDs from providers/clients tables if present,
+    // matching the same defensive pattern used by PUT /:id and /resolve-dispute
+    // instead of trusting booking.client_id/provider_id to already be users.id.
+    let clientUserId = String(booking.client_id);
+    let providerUserId = String(booking.provider_id);
+    try {
+      const providerRes = await pool.query(`SELECT user_id FROM providers WHERE id::text = $1`, [String(booking.provider_id)]);
+      if (providerRes.rows[0]?.user_id) providerUserId = String(providerRes.rows[0].user_id);
+    } catch (_e) { /* providers table doesn't exist */ }
+    try {
+      const clientRes = await pool.query(`SELECT user_id FROM clients WHERE id::text = $1`, [String(booking.client_id)]);
+      if (clientRes.rows[0]?.user_id) clientUserId = String(clientRes.rows[0].user_id);
+    } catch (_e) { /* clients table doesn't exist */ }
 
     // Check if user has permission (client or provider can reschedule)
     const isClient = String(currentUserId) === clientUserId;
@@ -1109,10 +1148,9 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
       });
     }
 
-    // Don't allow rescheduling if dispute is raised
-    if (booking.dispute_raised) {
+    if (booking.reschedule_pending_approval) {
       return res.status(400).json({
-        error: 'Cannot reschedule a booking with an active dispute'
+        error: "A reschedule is already awaiting the other party's approval"
       });
     }
 
@@ -1124,55 +1162,93 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
       });
     }
 
-    // Check for conflicts with other bookings (use ::text for type safety)
-    const conflictResult = await pool.query(
-      `SELECT id FROM bookings
-       WHERE provider_id::text = $1
-         AND id::text <> $2
-         AND status NOT IN ('cancelled', 'rejected')
-         AND deleted_at IS NULL
-         AND start_date < $3
-         AND end_date > $4
-       LIMIT 1`,
-      [String(booking.provider_id), bookingId, newEndDate.toISOString(), newStartDate.toISOString()]
-    );
-
-    if (conflictResult.rows[0]) {
-      return res.status(409).json({
-        error: 'The selected time slot conflicts with another booking'
-      });
-    }
-
-    // Store original dates for history
+    // An already-accepted/confirmed booking needs the other party to sign off on
+    // the new time; a still-pending booking will be reviewed via the normal accept flow.
+    const requiresApproval = ['accepted', 'confirmed'].includes(booking.status);
     const originalStartDate = booking.start_date;
     const originalEndDate = booking.end_date;
 
-    // Update the booking
-    const updateResult = await pool.query(
-      `UPDATE bookings
-       SET start_date = $1,
-           end_date = $2,
-           rescheduled_at = CURRENT_TIMESTAMP,
-           rescheduled_by = $3,
-           reschedule_reason = $4,
-           original_start_date = COALESCE(original_start_date, $5),
-           original_end_date = COALESCE(original_end_date, $6),
-           reschedule_count = COALESCE(reschedule_count, 0) + 1,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id::text = $7
-       RETURNING *`,
-      [
-        newStartDate.toISOString(),
-        newEndDate.toISOString(),
-        currentUserId,
-        reason || null,
-        originalStartDate,
-        originalEndDate,
-        bookingId
-      ]
-    );
+    const dbClient = await pool.connect();
+    let updatedBooking: any;
+    try {
+      await dbClient.query('BEGIN');
+      await dbClient.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [String(booking.provider_id)]);
 
-    const updatedBooking = updateResult.rows[0];
+      // Check the provider hasn't blocked the new date
+      const newDateStr = newStartDate.toISOString().split('T')[0];
+      const blockedCheck = await dbClient.query(
+        `SELECT id, reason FROM availability_overrides
+         WHERE provider_id::text = $1
+           AND override_date = $2::date
+           AND is_available = FALSE`,
+        [String(booking.provider_id), newDateStr]
+      );
+      if (blockedCheck.rows[0]) {
+        await dbClient.query('ROLLBACK');
+        return res.status(409).json({
+          error: blockedCheck.rows[0].reason
+            ? `The provider is unavailable on this date: ${blockedCheck.rows[0].reason}`
+            : 'The provider has marked this date as unavailable'
+        });
+      }
+
+      // Check for conflicts with other bookings (use ::text for type safety)
+      const conflictResult = await dbClient.query(
+        `SELECT id FROM bookings
+         WHERE provider_id::text = $1
+           AND id::text <> $2
+           AND status NOT IN ('cancelled', 'rejected')
+           AND deleted_at IS NULL
+           AND start_date < $3
+           AND end_date > $4
+         LIMIT 1`,
+        [String(booking.provider_id), bookingId, newEndDate.toISOString(), newStartDate.toISOString()]
+      );
+
+      if (conflictResult.rows[0]) {
+        await dbClient.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'The selected time slot conflicts with another booking'
+        });
+      }
+
+      // Update the booking
+      const updateResult = await dbClient.query(
+        `UPDATE bookings
+         SET start_date = $1,
+             end_date = $2,
+             rescheduled_at = CURRENT_TIMESTAMP,
+             rescheduled_by = $3,
+             reschedule_reason = $4,
+             original_start_date = COALESCE(original_start_date, $5),
+             original_end_date = COALESCE(original_end_date, $6),
+             reschedule_count = COALESCE(reschedule_count, 0) + 1,
+             reschedule_pending_approval = $7,
+             reschedule_previous_start_date = CASE WHEN $7 THEN $5 ELSE NULL END,
+             reschedule_previous_end_date = CASE WHEN $7 THEN $6 ELSE NULL END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $8
+         RETURNING *`,
+        [
+          newStartDate.toISOString(),
+          newEndDate.toISOString(),
+          currentUserId,
+          reason || null,
+          originalStartDate,
+          originalEndDate,
+          requiresApproval,
+          bookingId
+        ]
+      );
+
+      updatedBooking = updateResult.rows[0];
+      await dbClient.query('COMMIT');
+    } catch (txError) {
+      await dbClient.query('ROLLBACK');
+      throw txError;
+    } finally {
+      dbClient.release();
+    }
 
     // Get user names for notifications
     const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [clientUserId]);
@@ -1197,32 +1273,42 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
 
     // Send notification to the other party
     const recipientId = isClient ? providerUserId : clientUserId;
-    const recipientRole = isClient ? 'provider' : 'client';
 
-    await notificationService.create({
-      userId: recipientId,
-      type: 'booking_request', // Reusing type, could add 'booking_rescheduled' type
-      title: 'Booking Rescheduled',
-      message: `${rescheduledBy} rescheduled the booking for "${serviceName}" to ${newDateStr}`,
-      data: {
-        booking_id: bookingId,
-        client_id: clientUserId,
-        client_name: clientName,
-        provider_id: providerUserId,
-        provider_name: providerName,
-        new_start_date: newStartDate.toISOString(),
-        old_start_date: originalStartDate,
-        reschedule_reason: reason
-      }
-    });
+    try {
+      await notificationService.create({
+        userId: recipientId,
+        type: 'booking_request', // Reusing type, could add 'booking_rescheduled' type
+        title: requiresApproval ? 'New Time Proposed — Confirmation Needed' : 'Booking Rescheduled',
+        message: requiresApproval
+          ? `${rescheduledBy} proposed a new time for "${serviceName}": ${newDateStr}. Please confirm or keep the original time.`
+          : `${rescheduledBy} rescheduled the booking for "${serviceName}" to ${newDateStr}`,
+        data: {
+          booking_id: bookingId,
+          client_id: clientUserId,
+          client_name: clientName,
+          provider_id: providerUserId,
+          provider_name: providerName,
+          new_start_date: newStartDate.toISOString(),
+          old_start_date: originalStartDate,
+          reschedule_reason: reason,
+          requires_approval: requiresApproval,
+        }
+      });
+    } catch (notifError) {
+      console.error('Failed to send reschedule notification:', notifError);
+    }
 
     // Send system message in chat
     try {
       const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
       if (chatId) {
-        const systemMessage = reason
-          ? `Booking rescheduled to ${newDateStr}. Reason: ${reason}`
-          : `Booking rescheduled to ${newDateStr}`;
+        const systemMessage = requiresApproval
+          ? (reason
+              ? `${rescheduledBy} proposed rescheduling to ${newDateStr}. Reason: ${reason}. Awaiting confirmation.`
+              : `${rescheduledBy} proposed rescheduling to ${newDateStr}. Awaiting confirmation.`)
+          : (reason
+              ? `Booking rescheduled to ${newDateStr}. Reason: ${reason}`
+              : `Booking rescheduled to ${newDateStr}`);
 
         await pool.query(
           `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
@@ -1246,11 +1332,287 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
 
     return res.json({
       data: updatedBooking,
-      message: 'Booking rescheduled successfully'
+      message: requiresApproval
+        ? 'New time proposed. Waiting for the other party to confirm.'
+        : 'Booking rescheduled successfully'
     });
   } catch (error) {
     console.error('Error rescheduling booking:', error);
     return res.status(500).json({ error: 'Failed to reschedule booking' });
+  }
+});
+
+// ==================== RESCHEDULE APPROVAL ====================
+// When a reschedule is proposed on an already-accepted/confirmed booking, the
+// other party (whoever didn't propose it) must confirm or reject the new time.
+
+router.put('/:id/reschedule/approve', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = req.userId;
+  const bookingId = req.params.id;
+  if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+
+    const bookingRes = await dbClient.query(
+      `SELECT b.*, s.title as service_title
+       FROM bookings b
+       LEFT JOIN services s ON s.id = b.service_id
+       WHERE b.id::text = $1 AND b.deleted_at IS NULL
+       FOR UPDATE OF b`,
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) {
+      await dbClient.query('ROLLBACK');
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    if (!booking.reschedule_pending_approval) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({ error: 'This booking has no reschedule awaiting approval' });
+    }
+
+    let clientUserId = String(booking.client_id);
+    let providerUserId = String(booking.provider_id);
+
+    await dbClient.query('SAVEPOINT sp_approve_provider_user');
+    try {
+      const providerRes = await dbClient.query(`SELECT user_id FROM providers WHERE id::text = $1`, [String(booking.provider_id)]);
+      if (providerRes.rows[0]?.user_id) providerUserId = String(providerRes.rows[0].user_id);
+    } catch (_e) {
+      await dbClient.query('ROLLBACK TO SAVEPOINT sp_approve_provider_user');
+    } finally {
+      try { await dbClient.query('RELEASE SAVEPOINT sp_approve_provider_user'); } catch (_e) { /* noop */ }
+    }
+
+    await dbClient.query('SAVEPOINT sp_approve_client_user');
+    try {
+      const clientRes = await dbClient.query(`SELECT user_id FROM clients WHERE id::text = $1`, [String(booking.client_id)]);
+      if (clientRes.rows[0]?.user_id) clientUserId = String(clientRes.rows[0].user_id);
+    } catch (_e) {
+      await dbClient.query('ROLLBACK TO SAVEPOINT sp_approve_client_user');
+    } finally {
+      try { await dbClient.query('RELEASE SAVEPOINT sp_approve_client_user'); } catch (_e) { /* noop */ }
+    }
+
+    const isClient = String(currentUserId) === clientUserId;
+    const isProvider = String(currentUserId) === providerUserId;
+    if (!isClient && !isProvider) {
+      await dbClient.query('ROLLBACK');
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const proposerId = String(booking.rescheduled_by);
+    if (String(currentUserId) === proposerId) {
+      await dbClient.query('ROLLBACK');
+      return res.status(403).json({ error: 'You proposed this reschedule; waiting for the other party to respond' });
+    }
+
+    const updateResult = await dbClient.query(
+      `UPDATE bookings
+       SET reschedule_pending_approval = FALSE,
+           reschedule_previous_start_date = NULL,
+           reschedule_previous_end_date = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $1
+       RETURNING *`,
+      [bookingId]
+    );
+
+    await dbClient.query('COMMIT');
+
+    const updatedBooking = updateResult.rows[0];
+    const approverName = isClient ? 'The client' : 'The provider';
+
+    try {
+      await notificationService.create({
+        userId: proposerId,
+        type: 'booking_request',
+        title: 'New Time Confirmed',
+        message: `${approverName} confirmed the new time for "${booking.service_title || 'the booking'}".`,
+        data: { booking_id: bookingId },
+      });
+    } catch (notifError) {
+      console.error('Failed to send reschedule-approved notification:', notifError);
+    }
+
+    try {
+      const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+      if (chatId) {
+        const systemMessage = `${approverName} confirmed the new booking time.`;
+        await pool.query(
+          `INSERT INTO chat_messages (chat_id, sender_id, content, is_system) VALUES ($1, NULL, $2, TRUE)`,
+          [chatId, systemMessage]
+        );
+        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+        const io = (req.app as any).get('io');
+        if (io) {
+          io.to(`booking:${bookingId}`).emit('chat:message', {
+            bookingId,
+            message: { content: systemMessage, is_system: true, created_at: new Date().toISOString() }
+          });
+        }
+      }
+    } catch (chatError) {
+      console.error('Failed to send reschedule-approved chat message:', chatError);
+    }
+
+    return res.json({ data: updatedBooking, message: 'New time confirmed' });
+  } catch (error) {
+    try { await dbClient.query('ROLLBACK'); } catch (_e) { /* noop */ }
+    console.error('Error approving reschedule:', error);
+    return res.status(500).json({ error: 'Failed to confirm new time' });
+  } finally {
+    dbClient.release();
+  }
+});
+
+router.put('/:id/reschedule/reject', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = req.userId;
+  const bookingId = req.params.id;
+  if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+
+    const bookingRes = await dbClient.query(
+      `SELECT b.*, s.title as service_title
+       FROM bookings b
+       LEFT JOIN services s ON s.id = b.service_id
+       WHERE b.id::text = $1 AND b.deleted_at IS NULL
+       FOR UPDATE OF b`,
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) {
+      await dbClient.query('ROLLBACK');
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    if (!booking.reschedule_pending_approval || !booking.reschedule_previous_start_date || !booking.reschedule_previous_end_date) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({ error: 'This booking has no reschedule awaiting approval' });
+    }
+
+    let clientUserId = String(booking.client_id);
+    let providerUserId = String(booking.provider_id);
+
+    await dbClient.query('SAVEPOINT sp_reject_provider_user');
+    try {
+      const providerRes = await dbClient.query(`SELECT user_id FROM providers WHERE id::text = $1`, [String(booking.provider_id)]);
+      if (providerRes.rows[0]?.user_id) providerUserId = String(providerRes.rows[0].user_id);
+    } catch (_e) {
+      await dbClient.query('ROLLBACK TO SAVEPOINT sp_reject_provider_user');
+    } finally {
+      try { await dbClient.query('RELEASE SAVEPOINT sp_reject_provider_user'); } catch (_e) { /* noop */ }
+    }
+
+    await dbClient.query('SAVEPOINT sp_reject_client_user');
+    try {
+      const clientRes = await dbClient.query(`SELECT user_id FROM clients WHERE id::text = $1`, [String(booking.client_id)]);
+      if (clientRes.rows[0]?.user_id) clientUserId = String(clientRes.rows[0].user_id);
+    } catch (_e) {
+      await dbClient.query('ROLLBACK TO SAVEPOINT sp_reject_client_user');
+    } finally {
+      try { await dbClient.query('RELEASE SAVEPOINT sp_reject_client_user'); } catch (_e) { /* noop */ }
+    }
+
+    const isClient = String(currentUserId) === clientUserId;
+    const isProvider = String(currentUserId) === providerUserId;
+    if (!isClient && !isProvider) {
+      await dbClient.query('ROLLBACK');
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const proposerId = String(booking.rescheduled_by);
+    if (String(currentUserId) === proposerId) {
+      await dbClient.query('ROLLBACK');
+      return res.status(403).json({ error: 'You proposed this reschedule; waiting for the other party to respond' });
+    }
+
+    await dbClient.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [String(booking.provider_id)]);
+
+    // Make sure the original slot wasn't taken by something else while this
+    // reschedule was pending approval.
+    const conflictResult = await dbClient.query(
+      `SELECT id FROM bookings
+       WHERE provider_id::text = $1
+         AND id::text <> $2
+         AND status NOT IN ('cancelled', 'rejected')
+         AND deleted_at IS NULL
+         AND start_date < $3
+         AND end_date > $4
+       LIMIT 1`,
+      [String(booking.provider_id), bookingId, booking.reschedule_previous_end_date, booking.reschedule_previous_start_date]
+    );
+    if (conflictResult.rows[0]) {
+      await dbClient.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'The original time slot is no longer available. Ask the other party to propose a new time instead.'
+      });
+    }
+
+    const updateResult = await dbClient.query(
+      `UPDATE bookings
+       SET start_date = reschedule_previous_start_date,
+           end_date = reschedule_previous_end_date,
+           reschedule_pending_approval = FALSE,
+           reschedule_previous_start_date = NULL,
+           reschedule_previous_end_date = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $1
+       RETURNING *`,
+      [bookingId]
+    );
+
+    await dbClient.query('COMMIT');
+
+    const updatedBooking = updateResult.rows[0];
+    const rejecterName = isClient ? 'The client' : 'The provider';
+
+    try {
+      await notificationService.create({
+        userId: proposerId,
+        type: 'booking_request',
+        title: 'New Time Declined',
+        message: `${rejecterName} declined the proposed time for "${booking.service_title || 'the booking'}". The booking has reverted to its original time.`,
+        data: { booking_id: bookingId },
+      });
+    } catch (notifError) {
+      console.error('Failed to send reschedule-rejected notification:', notifError);
+    }
+
+    try {
+      const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+      if (chatId) {
+        const systemMessage = `${rejecterName} declined the proposed time. The booking has reverted to its original time.`;
+        await pool.query(
+          `INSERT INTO chat_messages (chat_id, sender_id, content, is_system) VALUES ($1, NULL, $2, TRUE)`,
+          [chatId, systemMessage]
+        );
+        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+        const io = (req.app as any).get('io');
+        if (io) {
+          io.to(`booking:${bookingId}`).emit('chat:message', {
+            bookingId,
+            message: { content: systemMessage, is_system: true, created_at: new Date().toISOString() }
+          });
+        }
+      }
+    } catch (chatError) {
+      console.error('Failed to send reschedule-rejected chat message:', chatError);
+    }
+
+    return res.json({ data: updatedBooking, message: 'Reschedule declined; reverted to original time' });
+  } catch (error) {
+    try { await dbClient.query('ROLLBACK'); } catch (_e) { /* noop */ }
+    console.error('Error rejecting reschedule:', error);
+    return res.status(500).json({ error: 'Failed to decline new time' });
+  } finally {
+    dbClient.release();
   }
 });
 
@@ -1557,7 +1919,7 @@ export async function autoResolveStaleDisputes() {
       `SELECT id, client_id, provider_id, service_id, dispute_reason
        FROM bookings
        WHERE (status = 'disputed' OR dispute_raised = TRUE)
-         AND updated_at < NOW() - INTERVAL '${DISPUTE_TIMEOUT_DAYS} days'`
+         AND COALESCE(dispute_raised_at, updated_at) < NOW() - INTERVAL '${DISPUTE_TIMEOUT_DAYS} days'`
     );
 
     if (staleDisputes.rows.length === 0) return;
@@ -1583,8 +1945,10 @@ export async function autoResolveStaleDisputes() {
           continue;
         }
 
-        // Resolve provider user ID
+        // Resolve provider user ID from providers table if present.
+        // Use SAVEPOINT so a missing table (or other error) doesn't abort the transaction.
         let providerUserId = String(booking.provider_id);
+        await txClient.query('SAVEPOINT sp_auto_resolve_provider_user');
         try {
           const providerCheck = await txClient.query(
             `SELECT user_id FROM providers WHERE id::text = $1`,
@@ -1593,10 +1957,18 @@ export async function autoResolveStaleDisputes() {
           if (providerCheck.rows[0]?.user_id) {
             providerUserId = String(providerCheck.rows[0].user_id);
           }
-        } catch (e) { /* providers table doesn't exist */ }
+        } catch (_e) {
+          await txClient.query('ROLLBACK TO SAVEPOINT sp_auto_resolve_provider_user');
+        } finally {
+          try {
+            await txClient.query('RELEASE SAVEPOINT sp_auto_resolve_provider_user');
+          } catch (_e) {
+          }
+        }
 
-        // Resolve client user ID
+        // Resolve client user ID from clients table if present.
         let clientUserId = String(booking.client_id);
+        await txClient.query('SAVEPOINT sp_auto_resolve_client_user');
         try {
           const clientCheck = await txClient.query(
             `SELECT user_id FROM clients WHERE id::text = $1`,
@@ -1605,18 +1977,29 @@ export async function autoResolveStaleDisputes() {
           if (clientCheck.rows[0]?.user_id) {
             clientUserId = String(clientCheck.rows[0].user_id);
           }
-        } catch (e) { /* clients table doesn't exist */ }
+        } catch (_e) {
+          await txClient.query('ROLLBACK TO SAVEPOINT sp_auto_resolve_client_user');
+        } finally {
+          try {
+            await txClient.query('RELEASE SAVEPOINT sp_auto_resolve_client_user');
+          } catch (_e) {
+          }
+        }
+
+        const autoResolution = `Dispute auto-resolved in favor of provider after ${DISPUTE_TIMEOUT_DAYS} days without admin action.`;
 
         // Update booking - auto-resolve in favor of provider
         await txClient.query(
           `UPDATE bookings
            SET status = 'completed',
                dispute_raised = FALSE,
-               dispute_reason = NULL,
+               dispute_resolution = $2,
+               dispute_resolved_at = CURRENT_TIMESTAMP,
+               dispute_resolved_by = NULL,
                completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
                updated_at = CURRENT_TIMESTAMP
            WHERE id::text = $1`,
-          [String(booking.id)]
+          [String(booking.id), autoResolution]
         );
 
         // Release payment to provider
@@ -1668,11 +2051,34 @@ export async function autoResolveStaleDisputes() {
           releasedAmount = amount;
         }
 
+        // Log audit entry for the auto-resolution
+        try {
+          await txClient.query(
+            `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, metadata, ip_address)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              null,
+              'dispute_auto_resolved',
+              'booking',
+              String(booking.id),
+              JSON.stringify({
+                resolved_in_favor_of: 'provider',
+                resolution: autoResolution,
+                released_amount: releasedAmount,
+                timeout_days: DISPUTE_TIMEOUT_DAYS,
+              }),
+              'system',
+            ]
+          );
+        } catch (auditError) {
+          console.error('Failed to create audit log for dispute auto-resolution:', auditError);
+        }
+
         await txClient.query('COMMIT');
 
         // Send notifications
         try {
-          const resolution = `Dispute auto-resolved in favor of provider after ${DISPUTE_TIMEOUT_DAYS} days without admin action.`;
+          const resolution = autoResolution;
           await notificationService.notifyDisputeResolved(clientUserId, String(booking.id), resolution, 'provider');
           await notificationService.notifyDisputeResolved(providerUserId, String(booking.id), resolution, 'provider');
 
@@ -2387,8 +2793,10 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
     const refundAmount = (paymentAmount * refundPct) / 100;
     const releaseAmount = paymentAmount - refundAmount;
 
-    // Determine final status based on resolution
-    const finalStatus = resolved_in_favor_of === 'provider' ? 'completed' : 'cancelled';
+    // Determine final status based on resolution. A partial refund still leaves the
+    // provider paid for the work, so treat any released amount as a completed booking
+    // rather than overloading 'cancelled' for split resolutions.
+    const finalStatus = (resolved_in_favor_of === 'provider' || releaseAmount > 0) ? 'completed' : 'cancelled';
 
     // Update booking status and store resolution details
     await dbClient.query(
@@ -2472,6 +2880,12 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
             [String(wallet.id), String(payment.id), -actualRefund, currentAvailable + (actualRelease || 0), `dispute_refund_${bookingId}`, `Refund issued after dispute resolved in client's favor (${refundPct}%)`]
           );
           refundedAmount = actualRefund;
+
+          // Update payment status to reflect partial/full refund
+          await dbClient.query(
+            `UPDATE payments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2`,
+            [refundPct === 100 ? 'refunded' : 'partially_refunded', String(payment.id)]
+          );
         }
       } else {
         // Normal case: sufficient pending balance
@@ -2525,7 +2939,7 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
     // Log audit entry for dispute resolution
     try {
       await dbClient.query(
-        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
+        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, metadata, ip_address)
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [
           currentUserId,

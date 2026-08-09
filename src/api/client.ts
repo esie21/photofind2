@@ -128,8 +128,11 @@ class APIClient {
     });
   }
 
-  async delete<T>(url: string): Promise<T> {
-    return this.request<T>(url, { method: 'DELETE' });
+  async delete<T>(url: string, data?: unknown): Promise<T> {
+    return this.request<T>(url, {
+      method: 'DELETE',
+      body: data ? JSON.stringify(data) : undefined,
+    });
   }
 
   async patch<T>(url: string, data?: unknown): Promise<T> {

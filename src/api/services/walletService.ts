@@ -9,6 +9,7 @@ export interface Wallet {
   total_paid_out: number;
   pending_payouts_count: number;
   pending_payouts_total: number;
+  minimum_payout_amount: number;
   created_at: string;
   updated_at: string;
 }
@@ -70,18 +71,6 @@ const walletService = {
   async getTransactions(limit = 50, offset = 0): Promise<PaginatedResponse<Transaction>> {
     const resp = await apiClient.get<PaginatedResponse<Transaction>>(`/wallet/transactions?limit=${limit}&offset=${offset}`);
     return resp;
-  },
-
-  // Release pending balance for a completed booking
-  async releasePendingBalance(bookingId: string): Promise<{
-    released_amount: number;
-    new_available_balance: number;
-    new_pending_balance: number;
-  }> {
-    const resp = await apiClient.post<{ data: { released_amount: number; new_available_balance: number; new_pending_balance: number } }>('/wallet/release-pending', {
-      booking_id: bookingId,
-    });
-    return resp.data;
   },
 
   // Admin: Adjust wallet balance

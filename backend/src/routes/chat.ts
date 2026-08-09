@@ -260,11 +260,12 @@ router.get('/history', verifyToken, async (req: AuthedRequest, res: Response) =>
         SELECT id, chat_id, sender_id, content, attachment_url, attachment_type, attachment_name, is_system, created_at, read_at
         FROM chat_messages
         WHERE chat_id = $1
-        ORDER BY created_at ASC
+        ORDER BY created_at DESC
         LIMIT $2
       `,
       [chat.id, limit]
     );
+    msgs.rows.reverse();
 
     // Mark other user's unread messages as read when history is fetched
     await pool.query(
@@ -512,10 +513,11 @@ router.get('/direct/:recipientId/history', verifyToken, async (req: AuthedReques
       `SELECT id, chat_id, sender_id, content, attachment_url, attachment_type, attachment_name, is_system, created_at, read_at
        FROM chat_messages
        WHERE chat_id = $1
-       ORDER BY created_at ASC
+       ORDER BY created_at DESC
        LIMIT $2`,
       [chat.id, limit]
     );
+    msgs.rows.reverse();
 
     // Mark messages as read
     await pool.query(

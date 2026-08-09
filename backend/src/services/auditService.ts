@@ -50,7 +50,9 @@ export type AuditAction =
   | 'service.delete'
   | 'admin.login'
   | 'admin.settings_update'
-  | 'system.config_change';
+  | 'system.config_change'
+  | 'support.reply'
+  | 'support.status_update';
 
 class AuditService {
   async log(params: AuditLogParams): Promise<void> {

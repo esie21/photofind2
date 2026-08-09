@@ -36,6 +36,7 @@ router.get('/metrics/overview', async (req: Request & { userId?: string }, res: 
       pendingVerificationsResult,
       openDisputesResult,
       pendingReviewsResult,
+      openSupportTicketsResult,
     ] = await Promise.all([
       pool.query(`
         SELECT
@@ -84,13 +85,18 @@ router.get('/metrics/overview', async (req: Request & { userId?: string }, res: 
       `),
 
       pool.query(`
-        SELECT COUNT(*) as count FROM disputes
-        WHERE status IN ('open', 'under_review', 'escalated')
+        SELECT COUNT(*) as count FROM bookings
+        WHERE (status = 'disputed' OR dispute_raised = TRUE) AND deleted_at IS NULL
       `),
 
       pool.query(`
         SELECT COUNT(*) as count FROM reviews
         WHERE deleted_at IS NULL AND moderation_status IN ('pending', 'flagged')
+      `),
+
+      pool.query(`
+        SELECT COUNT(*) as count FROM support_tickets
+        WHERE status IN ('open', 'in_progress')
       `),
     ]);
 
@@ -137,6 +143,7 @@ router.get('/metrics/overview', async (req: Request & { userId?: string }, res: 
           verifications: parseInt(pendingVerificationsResult.rows[0].count),
           disputes: parseInt(openDisputesResult.rows[0].count),
           reviews: parseInt(pendingReviewsResult.rows[0].count),
+          supportTickets: parseInt(openSupportTicketsResult.rows[0].count),
         },
       },
     });
@@ -423,6 +430,15 @@ router.post('/users/:id/restore', async (req: Request & { userId?: string }, res
 
 router.get('/providers/pending-verification', async (req: Request & { userId?: string }, res: Response) => {
   try {
+    const { limit = '20', offset = '0' } = req.query;
+    const limitNum = parseInt(limit as string);
+    const offsetNum = parseInt(offset as string);
+
+    const countResult = await pool.query(`
+      SELECT COUNT(*) as total FROM users u
+      WHERE u.role = 'provider' AND u.deleted_at IS NULL AND u.verification_status = 'pending'
+    `);
+
     const result = await pool.query(`
       SELECT u.id, u.email, u.name, u.profile_image, u.category, u.bio,
              u.years_experience, u.location, u.verification_status, u.verification_documents, u.created_at,
@@ -430,9 +446,13 @@ router.get('/providers/pending-verification', async (req: Request & { userId?: s
       FROM users u
       WHERE u.role = 'provider' AND u.deleted_at IS NULL AND u.verification_status = 'pending'
       ORDER BY u.created_at ASC
-    `);
+      LIMIT $1 OFFSET $2
+    `, [limitNum, offsetNum]);
 
-    return res.json({ data: result.rows });
+    return res.json({
+      data: result.rows,
+      meta: { total: parseInt(countResult.rows[0].total), limit: limitNum, offset: offsetNum },
+    });
   } catch (error) {
     console.error('Error fetching pending verifications:', error);
     return res.status(500).json({ error: 'Failed to fetch pending verifications' });
@@ -591,6 +611,122 @@ router.delete('/reviews/:id', async (req: Request & { userId?: string }, res: Re
   } catch (error) {
     console.error('Error deleting review:', error);
     return res.status(500).json({ error: 'Failed to delete review' });
+  }
+});
+
+// ==================== SUPPORT TICKETS ====================
+
+router.get('/support-tickets', async (req: Request & { userId?: string }, res: Response) => {
+  try {
+    const { status = 'all', limit = '20', offset = '0' } = req.query;
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (status !== 'all') {
+      conditions.push(`t.status = $${paramIndex}`);
+      params.push(status);
+      paramIndex++;
+    }
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const countResult = await pool.query(`SELECT COUNT(*) as total FROM support_tickets t ${whereClause}`, params);
+
+    const dataQuery = `
+      SELECT t.*, u.name as user_name, u.email as user_email, u.role as user_role,
+             s.title as service_title
+      FROM support_tickets t
+      JOIN users u ON u.id::text = t.user_id::text
+      LEFT JOIN bookings b ON b.id::text = t.booking_id::text
+      LEFT JOIN services s ON s.id::text = b.service_id::text
+      ${whereClause}
+      ORDER BY t.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+    params.push(parseInt(limit as string), parseInt(offset as string));
+
+    const dataResult = await pool.query(dataQuery, params);
+
+    return res.json({
+      data: dataResult.rows,
+      meta: { total: parseInt(countResult.rows[0].total), limit: parseInt(limit as string), offset: parseInt(offset as string) },
+    });
+  } catch (error) {
+    console.error('Error fetching support tickets:', error);
+    return res.status(500).json({ error: 'Failed to fetch support tickets' });
+  }
+});
+
+router.patch('/support-tickets/:id', async (req: Request & { userId?: string }, res: Response) => {
+  try {
+    const adminId = req.userId;
+    const ticketId = req.params.id;
+    const { status, admin_reply } = req.body;
+
+    const validStatuses = ['open', 'in_progress', 'resolved'];
+    if (status !== undefined && !validStatuses.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${validStatuses.join(', ')}` });
+    }
+
+    const oldTicket = await pool.query('SELECT * FROM support_tickets WHERE id::text = $1', [ticketId]);
+    if (!oldTicket.rows[0]) {
+      return res.status(404).json({ error: 'Support ticket not found' });
+    }
+
+    const updates: string[] = ['updated_at = CURRENT_TIMESTAMP'];
+    const values: any[] = [];
+    let idx = 1;
+
+    if (status !== undefined) {
+      updates.push(`status = $${idx++}`);
+      values.push(status);
+    }
+    if (admin_reply !== undefined && admin_reply.trim()) {
+      updates.push(`admin_reply = $${idx++}`, `replied_by = $${idx++}`, `replied_at = CURRENT_TIMESTAMP`);
+      values.push(admin_reply.trim(), adminId);
+      // Replying without an explicit status resolves the ticket by default.
+      if (status === undefined) {
+        updates.push(`status = $${idx++}`);
+        values.push('resolved');
+      }
+    }
+
+    values.push(ticketId);
+    const updated = await pool.query(
+      `UPDATE support_tickets SET ${updates.join(', ')} WHERE id::text = $${idx} RETURNING *`,
+      values
+    );
+
+    await auditService.log({
+      userId: adminId,
+      action: admin_reply ? 'support.reply' : 'support.status_update',
+      entityType: 'support_ticket',
+      entityId: ticketId,
+      oldValues: { status: oldTicket.rows[0].status },
+      newValues: { status: updated.rows[0].status },
+      req,
+    });
+
+    if (admin_reply !== undefined && admin_reply.trim()) {
+      try {
+        await notificationService.create({
+          userId: String(oldTicket.rows[0].user_id),
+          type: 'system',
+          title: 'Support replied to your ticket',
+          message: `"${oldTicket.rows[0].subject}": ${admin_reply.trim()}`,
+          data: { action: 'support_reply', ticket_id: ticketId },
+        });
+      } catch (notifError) {
+        console.error('Failed to send support reply notification:', notifError);
+      }
+    }
+
+    return res.json({ data: updated.rows[0] });
+  } catch (error) {
+    console.error('Error updating support ticket:', error);
+    return res.status(500).json({ error: 'Failed to update support ticket' });
   }
 });
 

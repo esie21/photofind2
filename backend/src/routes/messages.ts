@@ -203,18 +203,10 @@ router.get(
     try {
       const currentUserId = req.userId; // Removed Number() conversion
       await ensureChatsSchema();
-      await ensureMessagesSchema();
-
-      const lastMessageSelect =
-        messagesReadMode === 'read_at'
-          ? 'm.read_at'
-          : messagesReadMode === 'is_read'
-            ? 'CASE WHEN m.is_read THEN m.created_at ELSE NULL END AS read_at'
-            : 'NULL::timestamp AS read_at';
 
       const result = await pool.query(
         `
-        SELECT 
+        SELECT
           c.*,
           CASE WHEN c.user_a = $1 THEN c.user_b ELSE c.user_a END AS other_user_id,
           u.name AS other_user_name,
@@ -226,8 +218,8 @@ router.get(
         FROM chats c
         JOIN users u ON u.id::text = CASE WHEN c.user_a = $1 THEN c.user_b ELSE c.user_a END
         LEFT JOIN LATERAL (
-          SELECT m.id, m.content, m.sender_id, m.created_at, ${lastMessageSelect}
-          FROM messages m
+          SELECT m.id, m.content, m.sender_id, m.created_at
+          FROM chat_messages m
           WHERE m.chat_id::text = c.id::text
           ORDER BY m.created_at DESC
           LIMIT 1

@@ -83,8 +83,10 @@ export function AvailabilityCalendar({
   };
 
   const isDateSelectable = (day: number): boolean => {
-    const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    const date = new Date(dateStr);
+    // Built from local Y/M/D components (not parsed from the "YYYY-MM-DD" string,
+    // which JS treats as UTC midnight) so this agrees with BookingFlow.tsx's
+    // own day-status check instead of drifting by hours near midnight.
+    const date = new Date(year, month - 1, day);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -104,8 +106,9 @@ export function AvailabilityCalendar({
   };
 
   const getDayStatus = (day: number): 'available' | 'partial' | 'booked' | 'blocked' | 'past' | 'empty' => {
-    const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    const date = new Date(dateStr);
+    // See isDateSelectable above — local Y/M/D construction keeps this in sync
+    // with BookingFlow.tsx's day-status check.
+    const date = new Date(year, month - 1, day);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 

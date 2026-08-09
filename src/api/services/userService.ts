@@ -7,9 +7,10 @@ const userService = {
     return apiClient.get<User[]>(API_CONFIG.ENDPOINTS.USERS.GET_ALL);
   },
 
-  async getAllProviders(params?: { q?: string; page?: number; limit?: number }): Promise<{ data: User[]; meta?: any }> {
+  async getAllProviders(params?: { q?: string; category?: string; page?: number; limit?: number }): Promise<{ data: User[]; meta?: any }> {
     const searchParams = new URLSearchParams();
     if (params?.q) searchParams.set('q', params.q);
+    if (params?.category && params.category !== 'all') searchParams.set('category', params.category);
     if (params?.page) searchParams.set('page', params.page.toString());
     if (params?.limit) searchParams.set('limit', params.limit.toString());
     const queryString = searchParams.toString();
@@ -97,6 +98,42 @@ const userService = {
       return resp;
     } catch (err) {
       console.error('uploadPortfolioImages error', err);
+      throw err;
+    }
+  },
+
+  async uploadVerificationDocuments(id: string, files: File[]): Promise<{
+    id: string;
+    verification_status: string;
+    verification_documents: Array<{ path: string; original_name: string; uploaded_at: string }>;
+  }> {
+    const fd = new FormData();
+    files.forEach((f) => fd.append('documents', f));
+    try {
+      // Use direct backend URL for file uploads (bypasses Vercel proxy limits)
+      const directUrl = `${API_CONFIG.DIRECT_UPLOAD_URL}${API_CONFIG.ENDPOINTS.USERS.UPLOAD_VERIFICATION(id)}`;
+      const token = localStorage.getItem('authToken');
+      const response = await fetch(directUrl, {
+        method: 'POST',
+        body: fd,
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        let errorText = `API Error: ${response.status} ${response.statusText}`;
+        try {
+          const errJson = await response.json();
+          if (errJson?.error) errorText = errJson.error;
+        } catch (e) {}
+        throw new Error(errorText);
+      }
+
+      return await response.json();
+    } catch (err) {
+      console.error('uploadVerificationDocuments error', err);
       throw err;
     }
   },

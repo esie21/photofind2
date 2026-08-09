@@ -1,4 +1,4 @@
-import { Calendar, CreditCard, MessageSquare, CheckCircle, XCircle, DollarSign, Star, Bell, Trash2, User } from 'lucide-react';
+import { Calendar, CreditCard, MessageSquare, CheckCircle, XCircle, PhilippinePeso, Star, Bell, Trash2, User } from 'lucide-react';
 import { Notification, NotificationType } from '../api/services/notificationService';
 
 interface NotificationItemProps {
@@ -14,10 +14,10 @@ const typeConfig: Record<NotificationType, { icon: any; color: string; bgColor: 
   booking_rejected: { icon: XCircle, color: 'text-red-600', bgColor: 'bg-red-100', label: 'Booking Declined' },
   booking_cancelled: { icon: XCircle, color: 'text-gray-600', bgColor: 'bg-gray-100', label: 'Booking Cancelled' },
   booking_completed: { icon: CheckCircle, color: 'text-purple-600', bgColor: 'bg-purple-100', label: 'Completed' },
-  payment_received: { icon: DollarSign, color: 'text-green-600', bgColor: 'bg-green-100', label: 'Payment' },
+  payment_received: { icon: PhilippinePeso, color: 'text-green-600', bgColor: 'bg-green-100', label: 'Payment' },
   payment_failed: { icon: CreditCard, color: 'text-red-600', bgColor: 'bg-red-100', label: 'Payment Failed' },
-  payout_approved: { icon: DollarSign, color: 'text-blue-600', bgColor: 'bg-blue-100', label: 'Payout Approved' },
-  payout_completed: { icon: DollarSign, color: 'text-green-600', bgColor: 'bg-green-100', label: 'Payout Sent' },
+  payout_approved: { icon: PhilippinePeso, color: 'text-blue-600', bgColor: 'bg-blue-100', label: 'Payout Approved' },
+  payout_completed: { icon: PhilippinePeso, color: 'text-green-600', bgColor: 'bg-green-100', label: 'Payout Sent' },
   payout_rejected: { icon: XCircle, color: 'text-red-600', bgColor: 'bg-red-100', label: 'Payout Rejected' },
   new_message: { icon: MessageSquare, color: 'text-purple-600', bgColor: 'bg-purple-100', label: 'Message' },
   new_review: { icon: Star, color: 'text-yellow-600', bgColor: 'bg-yellow-100', label: 'Review' },

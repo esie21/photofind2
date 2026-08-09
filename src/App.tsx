@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { useAuth } from './context/AuthContext';
+import { useToast } from './context/ToastContext';
 import { LandingPage } from './components/LandingPage';
 import { AuthModal } from './components/AuthModal';
 import { ForgotPasswordModal } from './components/ForgotPasswordModal';
@@ -12,8 +13,14 @@ import { BookingFlow } from './components/BookingFlow';
 import { AdminDashboard } from './components/AdminDashboard';
 import { ChatInterface } from './components/ChatInterface';
 import { MessagesPage } from './components/MessagesPage';
+import { SettingsPage } from './components/SettingsPage';
+import { HelpSupportPage } from './components/HelpSupportPage';
+import { BookingsPage } from './components/BookingsPage';
+import { AccountMenuTarget } from './components/UserAccountMenu';
 import { Notification } from './api/services/notificationService';
 import chatService from './api/services/chatService';
+
+type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
 
 interface ChatContext {
   recipientId: string;
@@ -23,18 +30,60 @@ interface ChatContext {
 }
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'messages' | 'reset-password'>('landing');
+  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'messages' | 'reset-password' | 'settings' | 'help' | 'bookings'>('landing');
   const { user } = useAuth();
+  const toast = useToast();
   const [bookingContext, setBookingContext] = useState<{ providerId?: string; providerName?: string; providerImage?: string; serviceId?: string } | null>(null);
   const [dashboardKey, setDashboardKey] = useState(0);
   const [chatContext, setChatContext] = useState<ChatContext | null>(null);
   const [viewingProviderId, setViewingProviderId] = useState<string | null>(null);
+  const [landingSearchQuery, setLandingSearchQuery] = useState<string | undefined>(undefined);
+  const [landingCategory, setLandingCategory] = useState<string | undefined>(undefined);
+  const [providerTabRequest, setProviderTabRequest] = useState<{ tab: ProviderTab; requestId: number } | null>(null);
 
-  // Check for reset-password route on mount
+  const handleAccountMenuNavigate = (target: AccountMenuTarget) => {
+    const isProvider = user?.role === 'provider';
+
+    if (target === 'settings') {
+      setCurrentView('settings');
+      return;
+    }
+    if (target === 'help') {
+      setCurrentView('help');
+      return;
+    }
+    if (target === 'bookings') {
+      window.history.pushState({}, '', '/bookings');
+      setCurrentView('bookings');
+      return;
+    }
+    // Profile / Wallet & Earnings / Reviews only have a home on the provider dashboard today.
+    if (isProvider) {
+      const tab: ProviderTab = target === 'profile' ? 'profile' : target === 'wallet' ? 'wallet' : 'reviews';
+      setProviderTabRequest({ tab, requestId: Date.now() });
+      setCurrentView('provider');
+    } else {
+      toast.info('Coming soon', "This isn't available for client accounts yet.");
+    }
+  };
+
+  // Check for reset-password / bookings route on mount
   useEffect(() => {
     const path = window.location.pathname;
     if (path === '/reset-password') {
       setCurrentView('reset-password');
+      return;
+    }
+    // Admins always land on the admin dashboard, regardless of whatever path the
+    // browser happened to be on (e.g. left over from a previous visit to /bookings) -
+    // otherwise the /bookings check below would route them to the client bookings
+    // page instead, since it doesn't look at role at all.
+    if (user?.role === 'admin') {
+      setCurrentView('admin');
+      return;
+    }
+    if (path === '/bookings' && user) {
+      setCurrentView('bookings');
       return;
     }
 
@@ -51,6 +100,10 @@ export default function App() {
       const path = window.location.pathname;
       if (path === '/reset-password') {
         setCurrentView('reset-password');
+      } else if (user?.role === 'admin') {
+        setCurrentView('admin');
+      } else if (path === '/bookings' && user) {
+        setCurrentView('bookings');
       } else if (path === '/') {
         if (user) {
           setCurrentView(user.role === 'provider' ? 'provider' : 'client');
@@ -243,13 +296,35 @@ export default function App() {
           setShowAuthModal(true);
         }}
         onNotificationNavigate={handleNotificationNavigate}
+        onAccountMenuNavigate={handleAccountMenuNavigate}
       />
-      
+
       <main>
         {currentView === 'reset-password' && <ResetPasswordPage />}
-        {currentView === 'landing' && <LandingPage onViewChange={handleViewChange} />}
+        {currentView === 'settings' && <SettingsPage />}
+        {currentView === 'bookings' && <BookingsPage />}
+        {currentView === 'help' && <HelpSupportPage onGoToBookings={() => handleAccountMenuNavigate('bookings')} />}
+        {currentView === 'landing' && (
+          <LandingPage
+            onViewChange={handleViewChange}
+            onSearch={(query) => {
+              setLandingSearchQuery(query);
+              setLandingCategory(undefined);
+              setDashboardKey((k) => k + 1);
+              handleViewChange('client');
+            }}
+            onCategorySelect={(category) => {
+              setLandingCategory(category);
+              setLandingSearchQuery(undefined);
+              setDashboardKey((k) => k + 1);
+            }}
+          />
+        )}
         {currentView === 'client' && <ClientDashboard
           key={dashboardKey}
+          initialSearchQuery={landingSearchQuery}
+          initialCategory={landingCategory}
+          onContactSupport={() => setCurrentView('help')}
           onStartBooking={(provider?: unknown) => {
             if (!user) {
               setAuthMode('login');
@@ -269,7 +344,12 @@ export default function App() {
           }}
           onViewProvider={handleViewProviderProfile}
         />}
-        {currentView === 'provider' && <ProviderDashboard />}
+        {currentView === 'provider' && (
+          <ProviderDashboard
+            initialTab={providerTabRequest?.tab}
+            tabRequestId={providerTabRequest?.requestId}
+          />
+        )}
         {currentView === 'messages' && <MessagesPage />}
         {currentView === 'booking' && (
           <BookingFlow

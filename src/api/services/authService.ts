@@ -21,6 +21,15 @@ export interface AuthResponse {
   };
 }
 
+export interface GoogleAuthResponse extends AuthResponse {
+  needsRole?: boolean;
+  profile?: {
+    email: string;
+    name: string;
+    picture?: string | null;
+  };
+}
+
 export interface User {
   id: string;
   email: string;
@@ -32,6 +41,11 @@ export interface User {
   bio?: string;
   years_experience?: number;
   location?: string;
+  category?: string;
+  title?: string;
+  is_verified?: boolean;
+  verification_status?: 'unsubmitted' | 'pending' | 'approved' | 'rejected' | string;
+  verification_documents?: Array<{ path: string; original_name: string; uploaded_at: string }> | null;
 }
 
 const authService = {
@@ -50,6 +64,21 @@ const authService = {
   async signup(data: SignupData): Promise<AuthResponse> {
     const response = await apiClient.post<AuthResponse>(
       API_CONFIG.ENDPOINTS.AUTH.SIGNUP,
+      data
+    );
+    if (response?.token) {
+      apiClient.setToken(response.token);
+    }
+    return response;
+  },
+
+  async loginWithGoogle(data: {
+    credential: string;
+    role?: 'client' | 'provider';
+    intent: 'login' | 'signup';
+  }): Promise<GoogleAuthResponse> {
+    const response = await apiClient.post<GoogleAuthResponse>(
+      API_CONFIG.ENDPOINTS.AUTH.GOOGLE,
       data
     );
     if (response?.token) {

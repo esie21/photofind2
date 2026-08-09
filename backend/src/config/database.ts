@@ -1,8 +1,6 @@
+import '../loadEnv';
 import { Pool, Client } from 'pg';
 import bcrypt from 'bcryptjs';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 // Support both DATABASE_URL (Railway/Heroku style) and individual variables
 const poolConfig = process.env.DATABASE_URL
@@ -77,9 +75,12 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS years_experience INTEGER DEFAULT 0;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS category VARCHAR(100);`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS title VARCHAR(255);`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS rating DECIMAL(3,2) DEFAULT 0;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS review_count INTEGER DEFAULT 0;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR(255);`);
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users (google_id) WHERE google_id IS NOT NULL;`);
 
     // Create services table (only if not exists)
     const servicesExist = await client.query(`SELECT to_regclass('public.services') as exists`);
@@ -125,6 +126,18 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
     // pricing_type: 'package' (fixed price) or 'hourly' (price per hour)
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS pricing_type VARCHAR(20) DEFAULT 'package';`);
+    await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS package_price DECIMAL(10, 2);`);
+    await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS hourly_rate DECIMAL(10, 2);`);
+    await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS hourly_price DECIMAL(10, 2);`);
+    // Backfill pricing columns from legacy price field
+    await client.query(`
+      UPDATE services SET package_price = price
+      WHERE package_price IS NULL AND (pricing_type IS NULL OR pricing_type IN ('package', 'both'));
+    `);
+    await client.query(`
+      UPDATE services SET hourly_rate = COALESCE(hourly_price, price)
+      WHERE hourly_rate IS NULL AND pricing_type IN ('hourly', 'both');
+    `);
 
     // Create bookings table (only if not exists)
     const bookingsExist = await client.query(`SELECT to_regclass('public.bookings') as exists`);
@@ -138,8 +151,8 @@ export async function initializeTables() {
             service_id UUID REFERENCES services(id) ON DELETE SET NULL,
             status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'confirmed', 'awaiting_confirmation', 'disputed')),
             notes TEXT,
-            start_date TIMESTAMP,
-            end_date TIMESTAMP,
+            start_date TIMESTAMPTZ,
+            end_date TIMESTAMPTZ,
             booking_mode VARCHAR(20) DEFAULT 'request',
             payment_status VARCHAR(50) DEFAULT 'unpaid',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -155,8 +168,8 @@ export async function initializeTables() {
             service_id INTEGER REFERENCES services(id) ON DELETE SET NULL,
             status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'confirmed', 'awaiting_confirmation', 'disputed')),
             notes TEXT,
-            start_date TIMESTAMP,
-            end_date TIMESTAMP,
+            start_date TIMESTAMPTZ,
+            end_date TIMESTAMPTZ,
             booking_mode VARCHAR(20) DEFAULT 'request',
             payment_status VARCHAR(50) DEFAULT 'unpaid',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -167,8 +180,8 @@ export async function initializeTables() {
     }
 
     // Add missing columns to bookings table (works for both UUID and INTEGER schemas)
-    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS start_date TIMESTAMP;`);
-    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS end_date TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS start_date TIMESTAMPTZ;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS end_date TIMESTAMPTZ;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_mode VARCHAR(20) DEFAULT 'request';`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMP;`);
@@ -180,9 +193,14 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rescheduled_at TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rescheduled_by UUID;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_reason TEXT;`);
-    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS original_start_date TIMESTAMP;`);
-    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS original_end_date TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS original_start_date TIMESTAMPTZ;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS original_end_date TIMESTAMPTZ;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_count INTEGER DEFAULT 0;`);
+    // Set when an already-accepted/confirmed booking is rescheduled, so the other
+    // party must confirm or reject the new time instead of it taking effect unilaterally.
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_pending_approval BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_previous_start_date TIMESTAMPTZ;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_previous_end_date TIMESTAMPTZ;`);
 
     // Dual confirmation columns for service completion verification
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS provider_completed_at TIMESTAMP;`);
@@ -219,6 +237,26 @@ export async function initializeTables() {
       console.log('Updated bookings status constraint to include new statuses.');
     } catch (e) {
       console.log('Could not update bookings status constraint (may already be correct):', (e as Error).message);
+    }
+
+    // Migrate booking timestamp columns from TIMESTAMP (no timezone) to TIMESTAMPTZ.
+    // Without a timezone, these columns silently stored/reread times using whatever
+    // the server host's ambient timezone happened to be (often UTC), not Manila —
+    // causing booking times to drift by hours depending on where the app is hosted.
+    // Existing naive values are interpreted as Asia/Manila wall-clock time, since
+    // that's the timezone the app's UI and users have always operated in.
+    for (const col of ['start_date', 'end_date', 'original_start_date', 'original_end_date', 'reschedule_previous_start_date', 'reschedule_previous_end_date']) {
+      const colInfo = await client.query(`
+        SELECT data_type FROM information_schema.columns
+        WHERE table_name = 'bookings' AND column_name = $1
+      `, [col]);
+      if (colInfo.rows[0]?.data_type === 'timestamp without time zone') {
+        console.log(`Migrating bookings.${col} to TIMESTAMPTZ...`);
+        await client.query(`
+          ALTER TABLE bookings ALTER COLUMN ${col} TYPE TIMESTAMPTZ
+          USING ${col} AT TIME ZONE 'Asia/Manila';
+        `);
+      }
     }
 
     // Migrate old booking_date to start_date/end_date if the column exists
@@ -303,36 +341,6 @@ export async function initializeTables() {
     // Booking evidence indexes
     await client.query(`CREATE INDEX IF NOT EXISTS idx_booking_evidence_booking ON booking_evidence (booking_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_booking_evidence_uploaded_by ON booking_evidence (uploaded_by);`);
-
-    // Check if chats table has wrong column types and drop if needed
-    const chatsColType = await client.query(`
-      SELECT data_type FROM information_schema.columns
-      WHERE table_name = 'chats' AND column_name = 'user_a'
-    `);
-    if (chatsColType.rows.length > 0) {
-      const currentType = chatsColType.rows[0].data_type;
-      const expectedType = usesUUID ? 'uuid' : 'integer';
-      if (currentType !== expectedType) {
-        console.log(`Dropping chats-related tables due to type mismatch (${currentType} vs ${expectedType})`);
-        await client.query(`DROP TABLE IF EXISTS chat_messages CASCADE;`);
-        await client.query(`DROP TABLE IF EXISTS messages CASCADE;`);
-        await client.query(`DROP TABLE IF EXISTS chats CASCADE;`);
-      }
-    }
-
-    // Check if conversations table has wrong column types and drop if needed
-    const convsColType = await client.query(`
-      SELECT data_type FROM information_schema.columns
-      WHERE table_name = 'conversations' AND column_name = 'user_a'
-    `);
-    if (convsColType.rows.length > 0) {
-      const currentType = convsColType.rows[0].data_type;
-      const expectedType = usesUUID ? 'uuid' : 'integer';
-      if (currentType !== expectedType) {
-        console.log(`Dropping conversations table due to type mismatch (${currentType} vs ${expectedType})`);
-        await client.query(`DROP TABLE IF EXISTS conversations CASCADE;`);
-      }
-    }
 
     // Create chats table with correct type based on schema
     const chatsExist = await client.query(`SELECT to_regclass('public.chats') as exists`);
@@ -805,11 +813,11 @@ export async function initializeTables() {
           CREATE TABLE time_slots (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             provider_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            start_datetime TIMESTAMP NOT NULL,
-            end_datetime TIMESTAMP NOT NULL,
+            start_datetime TIMESTAMPTZ NOT NULL,
+            end_datetime TIMESTAMPTZ NOT NULL,
             status VARCHAR(20) NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'held', 'booked')),
             held_by UUID REFERENCES users(id) ON DELETE SET NULL,
-            hold_expires_at TIMESTAMP,
+            hold_expires_at TIMESTAMPTZ,
             booking_id UUID,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             CONSTRAINT unique_provider_slot UNIQUE (provider_id, start_datetime)
@@ -820,15 +828,32 @@ export async function initializeTables() {
           CREATE TABLE time_slots (
             id SERIAL PRIMARY KEY,
             provider_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            start_datetime TIMESTAMP NOT NULL,
-            end_datetime TIMESTAMP NOT NULL,
+            start_datetime TIMESTAMPTZ NOT NULL,
+            end_datetime TIMESTAMPTZ NOT NULL,
             status VARCHAR(20) NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'held', 'booked')),
             held_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-            hold_expires_at TIMESTAMP,
+            hold_expires_at TIMESTAMPTZ,
             booking_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             CONSTRAINT unique_provider_slot UNIQUE (provider_id, start_datetime)
           );
+        `);
+      }
+    }
+
+    // Migrate time_slots timestamp columns to TIMESTAMPTZ — same reasoning as
+    // the bookings table migration above: naive TIMESTAMP columns let slot
+    // generation and hold-expiry drift by hours depending on the host's timezone.
+    for (const col of ['start_datetime', 'end_datetime', 'hold_expires_at']) {
+      const colInfo = await client.query(`
+        SELECT data_type FROM information_schema.columns
+        WHERE table_name = 'time_slots' AND column_name = $1
+      `, [col]);
+      if (colInfo.rows[0]?.data_type === 'timestamp without time zone') {
+        console.log(`Migrating time_slots.${col} to TIMESTAMPTZ...`);
+        await client.query(`
+          ALTER TABLE time_slots ALTER COLUMN ${col} TYPE TIMESTAMPTZ
+          USING ${col} AT TIME ZONE 'Asia/Manila';
         `);
       }
     }
@@ -884,7 +909,14 @@ export async function initializeTables() {
     // ==================== SOFT DELETE COLUMNS ====================
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;`);
-    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT 'pending';`);
+    // 'unsubmitted' means the provider hasn't requested verification yet (no documents
+    // uploaded). Only a provider who actually submits documents moves to 'pending', so
+    // the admin queue (WHERE verification_status = 'pending') reflects real requests
+    // instead of every provider who has ever signed up. SET DEFAULT is needed on top of
+    // ADD COLUMN IF NOT EXISTS because the latter is a no-op on databases where the
+    // column already exists with the old 'pending' default.
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT 'unsubmitted';`);
+    await client.query(`ALTER TABLE users ALTER COLUMN verification_status SET DEFAULT 'unsubmitted';`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_documents JSONB;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP;`);
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;`);
@@ -1161,6 +1193,49 @@ export async function initializeTables() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs (action);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs (entity_type, entity_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs (created_at DESC);`);
+
+    // ==================== SUPPORT TICKETS TABLE ====================
+    const supportTicketsExist = await client.query(`SELECT to_regclass('public.support_tickets') as exists`);
+    if (!supportTicketsExist.rows[0].exists) {
+      if (usesUUID) {
+        await client.query(`
+          CREATE TABLE support_tickets (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            booking_id UUID REFERENCES bookings(id) ON DELETE SET NULL,
+            subject VARCHAR(255) NOT NULL,
+            message TEXT NOT NULL,
+            status VARCHAR(50) NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'resolved')),
+            admin_reply TEXT,
+            replied_by UUID REFERENCES users(id) ON DELETE SET NULL,
+            replied_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      } else {
+        await client.query(`
+          CREATE TABLE support_tickets (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL,
+            subject VARCHAR(255) NOT NULL,
+            message TEXT NOT NULL,
+            status VARCHAR(50) NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'resolved')),
+            admin_reply TEXT,
+            replied_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            replied_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      }
+    }
+
+    // Support tickets indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_user ON support_tickets (user_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets (status);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_created ON support_tickets (created_at DESC);`);
 
     console.log('Database tables initialized successfully');
     // Seed admin user if not present

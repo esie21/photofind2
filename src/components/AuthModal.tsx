@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { X, Mail, Chrome, Loader, AlertCircle, Eye, EyeOff, ArrowLeft, Check, Camera, User } from 'lucide-react';
+import { X, Mail, Loader, AlertCircle, Eye, EyeOff, ArrowLeft, Check, Camera, User } from 'lucide-react';
+import { GoogleLogin, CredentialResponse } from '@react-oauth/google';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 
@@ -71,8 +72,9 @@ const validateName = (name: string): string | undefined => {
 };
 
 export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthModalProps) {
-  const { login, signup } = useAuth();
+  const { login, signup, loginWithGoogle } = useAuth();
   const toast = useToast();
+  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
   const [authStep, setAuthStep] = useState<'method' | 'role'>('method');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -86,6 +88,8 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [checkingEmail, setCheckingEmail] = useState(false);
+  const [googleCredential, setGoogleCredential] = useState<string | null>(null);
+  const [googleProfile, setGoogleProfile] = useState<{ email: string; name: string } | null>(null);
 
   // Reset form when modal opens or mode changes
   useEffect(() => {
@@ -100,6 +104,8 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
     setTouched({});
     setShowPassword(false);
     setShowConfirmPassword(false);
+    setGoogleCredential(null);
+    setGoogleProfile(null);
   }, [mode]);
 
   const passwordStrength = getPasswordStrength(password);
@@ -144,6 +150,8 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
     setAuthStep('method');
     setError(null);
     setSelectedRole(null);
+    setGoogleCredential(null);
+    setGoogleProfile(null);
   };
 
   const checkEmailAvailability = async (emailToCheck: string): Promise<boolean> => {
@@ -207,6 +215,21 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
     setLoading(true);
 
     try {
+      if (googleCredential) {
+        const response = await loginWithGoogle({
+          credential: googleCredential,
+          role,
+          intent: 'signup',
+        });
+        if (response.needsRole || !response.user) {
+          throw new Error('Could not complete Google sign-up. Please try again.');
+        }
+        toast.success('Account created!', `Welcome to PhotoFind, ${response.user.name}!`);
+        onSuccess(role);
+        onClose();
+        return;
+      }
+
       const response = await signup({
         email,
         password,
@@ -225,15 +248,46 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
     }
   };
 
-  const handleMethodSubmit = async (method: 'google') => {
+  const handleGoogleSuccess = async (credentialResponse: CredentialResponse) => {
+    const credential = credentialResponse.credential;
+    if (!credential) {
+      setError('Google sign-in did not return a valid credential');
+      return;
+    }
+
     setError(null);
     setLoading(true);
+
     try {
-      if (method === 'google') {
-        setError('Google sign-in is not configured yet');
+      const response = await loginWithGoogle({
+        credential,
+        intent: mode,
+      });
+
+      if (response.needsRole) {
+        setGoogleCredential(credential);
+        setGoogleProfile({
+          email: response.profile?.email || '',
+          name: response.profile?.name || 'User',
+        });
+        setAuthStep('role');
+        return;
       }
+
+      if (!response.user) {
+        throw new Error('Google sign-in failed');
+      }
+
+      toast.success(
+        mode === 'login' ? 'Welcome back!' : 'Account created!',
+        `Signed in as ${response.user.name || response.user.email}`
+      );
+      onSuccess(response.user.role as 'client' | 'provider');
+      onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Method failed');
+      const message = err instanceof Error ? err.message : 'Google sign-in failed';
+      setError(message);
+      toast.error('Google sign-in failed', message);
     } finally {
       setLoading(false);
     }
@@ -508,13 +562,23 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
 
               {/* Social Options */}
               <div className="space-y-3">
-                <button 
-                  onClick={() => handleMethodSubmit('google')}
-                  className="w-full py-3 px-4 border-2 border-gray-200 rounded-xl hover:bg-gray-50 transition-colors flex items-center justify-center gap-3"
-                >
-                  <Chrome className="w-5 h-5 text-gray-700" />
-                  <span className="text-gray-700">Continue with Google</span>
-                </button>
+                {googleClientId ? (
+                  <div className="flex justify-center">
+                    <GoogleLogin
+                      onSuccess={handleGoogleSuccess}
+                      onError={() => setError('Google sign-in was cancelled or failed')}
+                      theme="outline"
+                      size="large"
+                      width={360}
+                      text={mode === 'login' ? 'signin_with' : 'signup_with'}
+                      shape="rectangular"
+                    />
+                  </div>
+                ) : (
+                  <div className="p-3 border border-amber-200 bg-amber-50 rounded-xl text-sm text-amber-800">
+                    Google sign-in is not configured. Add <code>VITE_GOOGLE_CLIENT_ID</code> to your frontend env and <code>GOOGLE_CLIENT_ID</code> to backend env.
+                  </div>
+                )}
               </div>
 
               {mode === 'login' && (
@@ -538,7 +602,11 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
                 How do you want to use PhotoFind?
               </p>
               <p className="text-sm text-gray-500 mb-6">
-                Creating account for <span className="font-medium text-gray-700">{email}</span>
+                {googleProfile ? (
+                  <>Creating Google account for <span className="font-medium text-gray-700">{googleProfile.email}</span></>
+                ) : (
+                  <>Creating account for <span className="font-medium text-gray-700">{email}</span></>
+                )}
               </p>
 
               {error && (

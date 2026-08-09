@@ -309,14 +309,15 @@ router.get('/providers/:providerId/timeslots', async (req: Request, res: Respons
     // Release expired holds
     await releaseExpiredHolds();
 
-    // Get available AND held slots (so users can see what's temporarily unavailable)
-    // Booked slots are excluded - they're permanently taken
+    // Get available, held, AND booked slots. Booked ones are included (not just
+    // available/held) so the client sees them as visibly unavailable in the grid
+    // instead of the slot just silently missing with no explanation.
     const result = await pool.query(
       `SELECT id, start_datetime, end_datetime, status, held_by, hold_expires_at
        FROM time_slots
        WHERE provider_id::text = $1
          AND DATE(start_datetime) = $2::date
-         AND status IN ('available', 'held')
+         AND status IN ('available', 'held', 'booked')
          AND start_datetime > NOW()
        ORDER BY start_datetime`,
       [providerUserId, dateStr]

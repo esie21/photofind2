@@ -1,8 +1,11 @@
-import { useState } from 'react';
-import { X, Calendar, Clock, AlertCircle, Loader2 } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { X, Clock, AlertCircle, Loader2 } from 'lucide-react';
 import bookingService from '../api/services/bookingService';
+import availabilityService from '../api/services/availabilityService';
+import { AvailabilityCalendar } from './AvailabilityCalendar';
 
 interface RescheduleModalProps {
+  providerId: string;
   booking: {
     id: string;
     service?: string;
@@ -18,28 +21,49 @@ interface RescheduleModalProps {
   onSuccess: () => void;
 }
 
-export function RescheduleModal({ booking, onClose, onSuccess }: RescheduleModalProps) {
+interface RawSlot {
+  id: string;
+  start: string;
+  end: string;
+  status: string;
+}
+
+// A candidate start time is only valid if there's an unbroken run of available
+// slots, back-to-back from that start, covering the full booking duration.
+function computeValidStartTimes(slots: RawSlot[], durationMinutes: number): RawSlot[] {
+  const available = slots
+    .filter((s) => s.status === 'available')
+    .map((s) => ({ ...s, startMs: new Date(s.start).getTime(), endMs: new Date(s.end).getTime() }))
+    .sort((a, b) => a.startMs - b.startMs);
+
+  const durationMs = durationMinutes * 60 * 1000;
+  const valid: RawSlot[] = [];
+
+  for (let i = 0; i < available.length; i++) {
+    let coverageEnd = available[i].endMs;
+    let j = i;
+    while (coverageEnd - available[i].startMs < durationMs && j + 1 < available.length && available[j + 1].startMs === coverageEnd) {
+      j++;
+      coverageEnd = available[j].endMs;
+    }
+    if (coverageEnd - available[i].startMs >= durationMs) {
+      valid.push(available[i]);
+    }
+  }
+
+  return valid;
+}
+
+export function RescheduleModal({ providerId, booking, onClose, onSuccess }: RescheduleModalProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reason, setReason] = useState('');
 
-  // Parse existing booking date/time
-  const existingDate = booking.start_date || booking.date;
-  const existingStart = existingDate ? new Date(existingDate) : new Date();
-
-  // Default to tomorrow if no date
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  tomorrow.setHours(9, 0, 0, 0);
-
-  const defaultDate = existingStart > new Date() ? existingStart : tomorrow;
-
-  const [selectedDate, setSelectedDate] = useState(
-    defaultDate.toISOString().split('T')[0]
-  );
-  const [selectedTime, setSelectedTime] = useState(
-    defaultDate.toTimeString().slice(0, 5)
-  );
+  const [selectedDate, setSelectedDate] = useState<string | undefined>(undefined);
+  const [selectedSlot, setSelectedSlot] = useState<RawSlot | null>(null);
+  const [validSlots, setValidSlots] = useState<RawSlot[]>([]);
+  const [loadingSlots, setLoadingSlots] = useState(false);
+  const [slotsError, setSlotsError] = useState<string | null>(null);
 
   // Calculate duration from existing booking or default to 60 minutes
   const getDuration = () => {
@@ -54,22 +78,45 @@ export function RescheduleModal({ booking, onClose, onSuccess }: RescheduleModal
 
   const duration = getDuration();
 
+  const fetchSlotsForDate = useCallback(async (dateStr: string) => {
+    setLoadingSlots(true);
+    setSlotsError(null);
+    setSelectedSlot(null);
+    try {
+      const data = await availabilityService.getAvailableSlots(providerId, dateStr);
+      const oneHourFromNow = Date.now() + 60 * 60 * 1000;
+      const candidates = computeValidStartTimes(data.slots || [], duration).filter(
+        (s) => new Date(s.start).getTime() >= oneHourFromNow
+      );
+      setValidSlots(candidates);
+    } catch (err: any) {
+      setSlotsError(err?.message || 'Failed to load available times');
+      setValidSlots([]);
+    } finally {
+      setLoadingSlots(false);
+    }
+  }, [providerId, duration]);
+
+  useEffect(() => {
+    if (selectedDate) fetchSlotsForDate(selectedDate);
+  }, [selectedDate, fetchSlotsForDate]);
+
+  // Default the calendar to the booking's current month
+  const existingDate = booking.start_date || booking.date;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (!selectedSlot) {
+      setError('Please select an available time');
+      return;
+    }
+
     setIsLoading(true);
-
     try {
-      // Construct start and end dates
-      const startDate = new Date(`${selectedDate}T${selectedTime}:00`);
+      const startDate = new Date(selectedSlot.start);
       const endDate = new Date(startDate.getTime() + duration * 60 * 1000);
-
-      // Validate date is in the future
-      if (startDate <= new Date()) {
-        setError('Please select a future date and time');
-        setIsLoading(false);
-        return;
-      }
 
       await bookingService.rescheduleBooking(booking.id, {
         start_date: startDate.toISOString(),
@@ -86,18 +133,8 @@ export function RescheduleModal({ booking, onClose, onSuccess }: RescheduleModal
     }
   };
 
-  // Generate time slots
-  const timeSlots = [];
-  for (let hour = 6; hour <= 22; hour++) {
-    for (let min = 0; min < 60; min += 30) {
-      const h = hour.toString().padStart(2, '0');
-      const m = min.toString().padStart(2, '0');
-      timeSlots.push(`${h}:${m}`);
-    }
-  }
-
-  // Get min date (today)
-  const today = new Date().toISOString().split('T')[0];
+  const formatSlotTime = (iso: string) =>
+    new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Manila' });
 
   // Format current booking date for display
   const currentDateStr = existingDate
@@ -112,9 +149,9 @@ export function RescheduleModal({ booking, onClose, onSuccess }: RescheduleModal
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-xl">
+      <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-xl max-h-[90vh] flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+        <div className="flex items-center justify-between p-4 border-b border-gray-200 flex-shrink-0">
           <h2 className="text-lg font-semibold text-gray-900">Reschedule Booking</h2>
           <button
             onClick={onClose}
@@ -125,12 +162,13 @@ export function RescheduleModal({ booking, onClose, onSuccess }: RescheduleModal
         </div>
 
         {/* Content */}
-        <form onSubmit={handleSubmit} className="p-4 space-y-4">
+        <form onSubmit={handleSubmit} className="p-4 space-y-4 overflow-y-auto">
           {/* Current Booking Info */}
           <div className="bg-gray-50 rounded-xl p-3">
             <p className="text-sm text-gray-500 mb-1">Current Booking</p>
             <p className="font-medium text-gray-900">{booking.service || 'Service'}</p>
             <p className="text-sm text-gray-600">{currentDateStr}</p>
+            <p className="text-xs text-gray-500 mt-1">Duration: {duration} minutes</p>
           </div>
 
           {/* Error Message */}
@@ -146,46 +184,59 @@ export function RescheduleModal({ booking, onClose, onSuccess }: RescheduleModal
             <label className="block text-sm font-medium text-gray-700 mb-1">
               New Date
             </label>
-            <div className="relative">
-              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <input
-                type="date"
-                value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
-                min={today}
-                required
-                className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-              />
-            </div>
+            <AvailabilityCalendar
+              providerId={providerId}
+              onDateSelect={setSelectedDate}
+              selectedDate={selectedDate}
+            />
           </div>
 
           {/* New Time */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              New Time
-            </label>
-            <div className="relative">
-              <Clock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <select
-                value={selectedTime}
-                onChange={(e) => setSelectedTime(e.target.value)}
-                required
-                className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent appearance-none bg-white"
-              >
-                {timeSlots.map((time) => (
-                  <option key={time} value={time}>
-                    {new Date(`2000-01-01T${time}`).toLocaleTimeString('en-US', {
-                      hour: 'numeric',
-                      minute: '2-digit',
-                    })}
-                  </option>
-                ))}
-              </select>
+          {selectedDate && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
+                <Clock className="w-4 h-4" />
+                New Time
+              </label>
+              {loadingSlots ? (
+                <div className="flex items-center justify-center py-6">
+                  <Loader2 className="w-6 h-6 animate-spin text-purple-600" />
+                </div>
+              ) : slotsError ? (
+                <div className="text-center py-4">
+                  <p className="text-sm text-red-600">{slotsError}</p>
+                  <button
+                    type="button"
+                    onClick={() => fetchSlotsForDate(selectedDate)}
+                    className="mt-1 text-sm text-purple-600 hover:underline"
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : validSlots.length === 0 ? (
+                <p className="text-sm text-gray-500 text-center py-4">
+                  No time on this date fits the full {duration}-minute session. Please pick another date.
+                </p>
+              ) : (
+                <div className="grid grid-cols-3 gap-2">
+                  {validSlots.map((slot) => (
+                    <button
+                      key={slot.id}
+                      type="button"
+                      onClick={() => setSelectedSlot(slot)}
+                      className={`px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                        selectedSlot?.id === slot.id
+                          ? 'bg-purple-600 text-white shadow-md'
+                          : 'bg-gray-50 text-gray-700 hover:bg-purple-50 hover:text-purple-700'
+                      }`}
+                    >
+                      {formatSlotTime(slot.start)}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-            <p className="text-xs text-gray-500 mt-1">
-              Duration: {duration} minutes
-            </p>
-          </div>
+          )}
 
           {/* Reason (optional) */}
           <div>
@@ -214,7 +265,7 @@ export function RescheduleModal({ booking, onClose, onSuccess }: RescheduleModal
             </button>
             <button
               type="submit"
-              disabled={isLoading}
+              disabled={isLoading || !selectedSlot}
               className="flex-1 px-4 py-2.5 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
             >
               {isLoading ? (

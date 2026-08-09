@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import { Check, Calendar as CalendarIcon, Clock, CreditCard, ChevronRight, MessageSquare, AlertCircle, Loader, Timer, Info } from 'lucide-react';
+import { Check, Calendar as CalendarIcon, Clock, CreditCard, ChevronRight, MessageSquare, AlertCircle, Loader, Timer, Info, Ban } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import bookingService from '../api/services/bookingService';
 import serviceService, { Service } from '../api/services/serviceService';
@@ -56,6 +56,9 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
   const [calendarError, setCalendarError] = useState<string | null>(null); // Calendar error state
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [isHolding, setIsHolding] = useState(false); // Loading state for hold operation
+  // availableSlots includes already-booked slots so they render as visibly
+  // unavailable in the grid - this counts only the ones that can actually be picked.
+  const bookableSlotsCount = availableSlots.filter(s => s.status !== 'booked').length;
 
   // Fetch provider services on mount
   useEffect(() => {
@@ -106,11 +109,16 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     }
   }, [currentStep, fetchCalendarData]);
 
-  // Fetch available slots for selected date
+  // Fetch available slots for selected date. Deliberately does not clear
+  // availableSlots before the request resolves - the slot grid already switches
+  // to a spinner via loadingSlots, but the "booking for today" notice, instructions
+  // box, and header subtitle key off availableSlots directly (not loadingSlots), so
+  // clearing it first made them flash hidden and reappear on every refetch (e.g.
+  // every time a hold's 10-minute countdown expires while the user is just sitting
+  // on this step).
   const fetchSlotsForDate = useCallback(async (dateStr: string) => {
     if (!providerId) return;
     setLoadingSlots(true);
-    setAvailableSlots([]);
     try {
       const data = await availabilityService.getAvailableSlots(providerId, dateStr);
       setAvailableSlots(data.slots || []);
@@ -207,74 +215,17 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     return [...slots].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
   };
 
-  // Handle slot toggle - different behavior for hourly vs package
-  const handleSlotToggle = (slot: TimeSlot) => {
-    const isSelected = selectedSlots.some(s => s.id === slot.id);
-
-    // Package booking: Single click selects start time, auto-fill remaining slots
-    if (bookingType === 'package' && packageDurationMinutes > 0) {
-      if (isSelected) {
-        // Clicking the start slot again clears selection
-        setSelectedSlots([]);
-        return;
-      }
-
-      // Find index of clicked slot in available slots
-      const clickedIndex = availableSlots.findIndex(s => s.id === slot.id);
-      if (clickedIndex === -1) return;
-
-      // Calculate how many slots we need (each slot is 30 minutes)
-      const slotsNeeded = Math.ceil(packageDurationMinutes / 30);
-
-      // Check if we have enough consecutive slots from this point
-      const potentialSlots: TimeSlot[] = [];
-      for (let i = 0; i < slotsNeeded && clickedIndex + i < availableSlots.length; i++) {
-        const currentSlot = availableSlots[clickedIndex + i];
-        // Check if slot is held by another user
-        if (currentSlot.is_held && !heldSlotIds.includes(currentSlot.id)) {
-          break;
-        }
-        potentialSlots.push(currentSlot);
-      }
-
-      // Verify slots are consecutive
-      if (potentialSlots.length < slotsNeeded) {
-        toast.error('Not enough time', `This package requires ${formatDuration(packageDurationMinutes)}. Not enough consecutive slots available from this time.`);
-        return;
-      }
-
-      if (!areSlotsConsecutive(potentialSlots)) {
-        toast.error('Not available', 'The required time slots are not consecutive. Please select another start time.');
-        return;
-      }
-
-      setSelectedSlots(potentialSlots);
-      setStepError(null);
-      return;
+  // Release holds when the user changes their slot selection
+  const releaseCurrentHolds = useCallback(async () => {
+    if (heldSlotIds.length === 0) return;
+    try {
+      await availabilityService.releaseSlots(heldSlotIds);
+    } catch (e) {
+      console.error('Failed to release holds:', e);
     }
-
-    // Hourly booking: Multi-select consecutive slots manually
-    if (isSelected) {
-      // Deselect slot
-      const newSelection = selectedSlots.filter(s => s.id !== slot.id);
-      setSelectedSlots(newSelection);
-      // Check if we need to re-validate consecutiveness
-      if (newSelection.length > 0 && !areSlotsConsecutive(newSelection)) {
-        // Find the longest consecutive chain and keep it
-        setSelectedSlots([]);
-        toast.warning('Selection cleared', 'Please select consecutive time slots');
-      }
-    } else {
-      // Select slot - check if it would make a consecutive chain
-      const newSelection = [...selectedSlots, slot];
-      if (areSlotsConsecutive(newSelection)) {
-        setSelectedSlots(newSelection);
-        setStepError(null);
-      } else {
-        toast.error('Non-consecutive', 'Please select consecutive time slots only');
-      }
-    }
-  };
+    setHeldSlotIds([]);
+    setHoldExpiresAt(null);
+  }, [heldSlotIds]);
 
   // Hold selected slots
   const handleHoldSlots = async () => {
@@ -329,9 +280,10 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     }
   };
 
-  // Clear selection without releasing holds
-  const handleClearSelection = () => {
+  // Clear selection and release any holds
+  const handleClearSelection = async () => {
     setSelectedSlots([]);
+    await releaseCurrentHolds();
   };
 
   // Helper to format date
@@ -503,15 +455,20 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     : 0;
   const packageDurationMinutes = selectedServiceData?.duration_minutes || 0;
   const packageDurationHours = packageDurationMinutes > 0 ? packageDurationMinutes / 60 : 0;
-  // Ensure requiredSlotsForPackage is at least 1 to avoid division issues
-  const requiredSlotsForPackage = packageDurationMinutes > 0 ? Math.ceil(packageDurationMinutes / 30) : 1;
+  const packageUnits = packageDurationMinutes > 0 && totalDurationMinutes > 0
+    ? totalDurationMinutes / packageDurationMinutes
+    : 1;
 
   // Calculate price based on booking type
   // Hourly: hourly rate × hours selected
-  // Package: fixed price regardless of duration
+  // Package: package price × number of package units (e.g. 2 hrs of a 1-hr package = 2× price)
   const hasSelectedSlots = totalDurationMinutes > 0;
   const servicePrice = hasSelectedSlots
-    ? (bookingType === 'hourly' && totalDurationHours > 0 ? hourlyRate * totalDurationHours : basePrice)
+    ? (bookingType === 'hourly' && totalDurationHours > 0
+        ? hourlyRate * totalDurationHours
+        : bookingType === 'package' && packageDurationMinutes > 0
+          ? basePrice * packageUnits
+          : basePrice)
     : 0;
   const platformFee = Number.isFinite(servicePrice) ? servicePrice * 0.15 : 0;
   const total = Number.isFinite(servicePrice + platformFee) ? servicePrice + platformFee : 0;
@@ -529,6 +486,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
       hour: 'numeric',
       minute: '2-digit',
       hour12: true,
+      timeZone: 'Asia/Manila',
     });
   }, [sortedSlots]);
 
@@ -540,6 +498,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
       hour: 'numeric',
       minute: '2-digit',
       hour12: true,
+      timeZone: 'Asia/Manila',
     });
   }, [sortedSlots]);
 
@@ -562,6 +521,124 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     const mins = minutes % 60;
     if (mins === 0) return `${hours} hour${hours > 1 ? 's' : ''}`;
     return `${hours}h ${mins}m`;
+  };
+
+  // Build consecutive slots between two times using available slot list (time-based, not array index)
+  const getConsecutiveRange = (startSlot: TimeSlot, endSlot: TimeSlot): TimeSlot[] | null => {
+    const rangeStart = new Date(startSlot.start).getTime();
+    const rangeEnd = new Date(endSlot.start).getTime();
+    if (rangeStart > rangeEnd) return null;
+
+    const range: TimeSlot[] = [];
+    let expectedStart = rangeStart;
+
+    for (const slot of availableSlots) {
+      const slotStart = new Date(slot.start).getTime();
+      if (slotStart < expectedStart) continue;
+      if (slotStart > rangeEnd) break;
+
+      if (slotStart !== expectedStart) return null;
+      if (slot.status === 'booked') return null;
+      if (slot.is_held && !heldSlotIds.includes(slot.id)) return null;
+
+      range.push(slot);
+      expectedStart = new Date(slot.end).getTime();
+    }
+
+    if (range.length === 0 || range[0].id !== startSlot.id) return null;
+    return range;
+  };
+
+  // Try to auto-fill the full package duration from a start slot (optional quick-select)
+  const buildPackageSlotsFromStart = (startSlot: TimeSlot): TimeSlot[] | null => {
+    if (packageDurationMinutes <= 0) return [startSlot];
+
+    const minSlots = Math.ceil(packageDurationMinutes / 30);
+    const startIndex = availableSlots.findIndex(s => s.id === startSlot.id);
+    if (startIndex === -1) return null;
+
+    const endIndex = startIndex + minSlots - 1;
+    if (endIndex >= availableSlots.length) return null;
+
+    return getConsecutiveRange(startSlot, availableSlots[endIndex]);
+  };
+
+  const applySlotSelection = async (nextSlots: TimeSlot[]) => {
+    const sorted = getSortedSelectedSlots(nextSlots);
+    const currentIds = getSortedSelectedSlots(selectedSlots).map(s => s.id).join(',');
+    const nextIds = sorted.map(s => s.id).join(',');
+
+    if (currentIds !== nextIds && heldSlotIds.length > 0) {
+      await releaseCurrentHolds();
+    }
+
+    setSelectedSlots(sorted);
+    setStepError(null);
+  };
+
+  // Unified slot selection: tap start, then tap end to fill range; tap consecutive slots to extend
+  const handleSlotToggle = async (slot: TimeSlot) => {
+    if (slot.status === 'booked') return;
+    if (slot.is_held && !heldSlotIds.includes(slot.id)) return;
+
+    const isSelected = selectedSlots.some(s => s.id === slot.id);
+    const sorted = getSortedSelectedSlots(selectedSlots);
+
+    if (isSelected) {
+      const clickedIdx = sorted.findIndex(s => s.id === slot.id);
+      if (sorted.length === 1 || clickedIdx === 0) {
+        await handleClearSelection();
+      } else {
+        await applySlotSelection(sorted.slice(0, clickedIdx));
+      }
+      return;
+    }
+
+    if (selectedSlots.length === 0) {
+      // First tap: select start time only (don't require full package duration upfront)
+      await applySlotSelection([slot]);
+      return;
+    }
+
+    const firstSlot = sorted[0];
+    const lastSlot = sorted[sorted.length - 1];
+    const slotStart = new Date(slot.start).getTime();
+    const slotEnd = new Date(slot.end).getTime();
+    const lastEnd = new Date(lastSlot.end).getTime();
+    const firstStart = new Date(firstSlot.start).getTime();
+
+    // Extend forward: fill all consecutive slots up to clicked slot
+    if (slotStart >= lastEnd) {
+      const range = getConsecutiveRange(firstSlot, slot);
+      if (range) {
+        await applySlotSelection(range);
+        return;
+      }
+      if (slotStart === lastEnd) {
+        await applySlotSelection([...sorted, slot]);
+        return;
+      }
+      toast.error('Gap in availability', 'Some times between your start and this slot are unavailable. Try a closer end time or pick a different start.');
+      return;
+    }
+
+    // Extend backward: fill all consecutive slots from clicked slot through current end
+    if (slotEnd <= firstStart) {
+      const range = getConsecutiveRange(slot, lastSlot);
+      if (range) {
+        await applySlotSelection(range);
+        return;
+      }
+      if (slotEnd === firstStart) {
+        await applySlotSelection([slot, ...sorted]);
+        return;
+      }
+      toast.error('Gap in availability', 'Some times between this slot and your end time are unavailable. Try a different range.');
+      return;
+    }
+
+    // Non-adjacent tap: start a new selection from this slot
+    await applySlotSelection([slot]);
   };
 
   // Format hold timer
@@ -602,6 +679,10 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
       }
       if (selectedSlots.length === 0) {
         setStepError('Please select at least one time slot');
+        return false;
+      }
+      if (bookingType === 'package' && packageDurationMinutes > 0 && totalDurationMinutes < packageDurationMinutes) {
+        setStepError(`This package requires ${formatDuration(packageDurationMinutes)}. You selected ${formatDuration(totalDurationMinutes)} — tap a later end time or use Auto-fill.`);
         return false;
       }
     }
@@ -1130,7 +1211,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                           </div>
                           <p className="text-sm text-green-700">
                             {packageDurationMinutes > 0
-                              ? `Select your start time below. Duration: ${formatDuration(packageDurationMinutes)}`
+                              ? `Tap a start time (${formatDuration(packageDurationMinutes)} minimum), then tap more slots to add hours`
                               : 'Select your preferred start time below.'
                             }
                           </p>
@@ -1364,16 +1445,18 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                             </div>
                             <div>
                               <h3 className="text-white font-semibold text-base sm:text-lg">
-                                {isHourlyPricing ? 'Select Time Slots' : 'Select Start Time'}
+                                Select Time Slots
                               </h3>
                               <p className="text-blue-100 text-xs sm:text-sm">
-                                {availableSlots.length > 0
+                                {bookableSlotsCount > 0
                                   ? isHourlyPricing
                                     ? `Tap consecutive slots for longer bookings (₱${hourlyRate.toLocaleString()}/hr)`
                                     : packageDurationMinutes > 0
-                                      ? `Tap your start time • ${formatDuration(packageDurationMinutes)} will be auto-selected`
-                                      : 'Tap your preferred start time'
-                                  : 'No slots available'
+                                      ? `Tap start (e.g. 8:00 AM), then tap end time (e.g. 4:00 PM for ${formatDuration(packageDurationMinutes)})`
+                                      : 'Tap start time, then tap end time to select your range'
+                                  : availableSlots.length > 0
+                                    ? 'Fully booked - no slots available'
+                                    : 'No slots available'
                                 }
                               </p>
                             </div>
@@ -1394,8 +1477,29 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                 <span className="px-2 py-0.5 bg-blue-100 rounded-full text-xs font-medium text-blue-700">
                                   {formatDuration(totalDurationMinutes)}
                                 </span>
+                                {bookingType === 'package' && packageDurationMinutes > 0 && totalDurationMinutes < packageDurationMinutes && (
+                                  <span className="px-2 py-0.5 bg-amber-100 rounded-full text-xs font-medium text-amber-700">
+                                    Need {formatDuration(packageDurationMinutes - totalDurationMinutes)} more
+                                  </span>
+                                )}
                               </div>
-                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {bookingType === 'package' && packageDurationMinutes > 0 && selectedSlots.length > 0 && totalDurationMinutes < packageDurationMinutes && (
+                                  <button
+                                    onClick={async () => {
+                                      const first = getSortedSelectedSlots(selectedSlots)[0];
+                                      const full = buildPackageSlotsFromStart(first);
+                                      if (!full) {
+                                        toast.error('Not enough time', `Not enough consecutive availability for ${formatDuration(packageDurationMinutes)} from ${selectedTimeLabel}. Try an earlier start time.`);
+                                        return;
+                                      }
+                                      await applySlotSelection(full);
+                                    }}
+                                    className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-xs font-medium rounded-full transition-colors"
+                                  >
+                                    Auto-fill {formatDuration(packageDurationMinutes)}
+                                  </button>
+                                )}
                                 {heldSlotIds.length > 0 ? (
                                   <div className="flex items-center gap-1 px-2 py-1 bg-green-100 rounded-full">
                                     <Check className="w-3 h-3 text-green-600" />
@@ -1435,19 +1539,16 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                     </span>
                                   ) : (
                                     <span className="text-green-600">
-                                      📦 Package: {formatDuration(packageDurationMinutes)}
+                                      📦 {packageUnits > 1
+                                        ? `₱${basePrice.toLocaleString()} × ${packageUnits.toFixed(0)} (${formatDuration(packageDurationMinutes)} each)`
+                                        : `Package: ${formatDuration(packageDurationMinutes)}`
+                                      }
                                     </span>
                                   )}
                                   <span className="font-semibold text-blue-800">
                                     ₱{servicePrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
                                   </span>
                                 </div>
-                                {/* Package duration mismatch warning */}
-                                {!isHourlyPricing && packageDurationMinutes > 0 && totalDurationMinutes !== packageDurationMinutes && (
-                                  <div className="mt-1 text-xs text-amber-600">
-                                    Note: Package is {formatDuration(packageDurationMinutes)}, you selected {formatDuration(totalDurationMinutes)}
-                                  </div>
-                                )}
                               </div>
                             )}
                           </div>
@@ -1476,33 +1577,44 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                   hour: 'numeric',
                                   minute: '2-digit',
                                   hour12: true,
+                                  timeZone: 'Asia/Manila',
                                 });
                                 const isSelected = selectedSlots.some(s => s.id === slot.id);
                                 const isHeldByMe = heldSlotIds.includes(slot.id);
                                 const isHeldByOther = slot.is_held && !isHeldByMe;
-                                const isDisabled = (heldSlotIds.length > 0 && !isHeldByMe) || isHeldByOther;
+                                const isBooked = slot.status === 'booked';
+                                const isDisabled = isHeldByOther || isBooked;
 
                                 return (
                                   <button
                                     key={slot.id}
                                     onClick={() => !isDisabled && handleSlotToggle(slot)}
                                     disabled={isDisabled}
-                                    title={isHeldByOther ? 'Temporarily unavailable (held by another user)' : ''}
+                                    title={
+                                      isBooked
+                                        ? 'Unavailable - already booked'
+                                        : isHeldByOther
+                                          ? 'Temporarily unavailable (held by another user)'
+                                          : ''
+                                    }
                                     className={`
                                       relative p-2 sm:p-3 rounded-lg text-center transition-all duration-150
-                                      ${isHeldByOther
-                                        ? 'bg-orange-50 border border-orange-200 cursor-not-allowed'
-                                        : isSelected
-                                          ? isHeldByMe
-                                            ? 'bg-green-500 text-white shadow-md'
-                                            : 'bg-blue-500 text-white shadow-md'
-                                          : 'bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-300'
+                                      ${isBooked
+                                        ? 'bg-red-50 border border-red-200 cursor-not-allowed'
+                                        : isHeldByOther
+                                          ? 'bg-orange-50 border border-orange-200 cursor-not-allowed'
+                                          : isSelected
+                                            ? isHeldByMe
+                                              ? 'bg-green-500 text-white shadow-md'
+                                              : 'bg-blue-500 text-white shadow-md'
+                                            : 'bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-300'
                                       }
-                                      ${isDisabled && !isHeldByOther ? 'opacity-40 cursor-not-allowed' : ''}
+                                      ${isDisabled && !isHeldByOther && !isBooked ? 'opacity-40 cursor-not-allowed' : ''}
                                       ${!isDisabled ? 'cursor-pointer active:scale-95' : ''}
                                     `}
                                   >
                                     <span className={`font-medium text-xs sm:text-sm ${
+                                      isBooked ? 'text-red-400 line-through' :
                                       isHeldByOther ? 'text-orange-400' :
                                       isSelected ? 'text-white' : 'text-gray-700'
                                     }`}>
@@ -1513,6 +1625,9 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                     )}
                                     {isHeldByOther && (
                                       <Timer className="w-3 h-3 absolute top-0.5 right-0.5 text-orange-400" />
+                                    )}
+                                    {isBooked && (
+                                      <Ban className="w-3 h-3 absolute top-0.5 right-0.5 text-red-400" />
                                     )}
                                   </button>
                                 );
@@ -1534,25 +1649,36 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                           )}
 
                           {/* Instructions */}
-                          {heldSlotIds.length === 0 && availableSlots.length > 0 && (
+                          {bookableSlotsCount > 0 && (
                             <div className="mt-4 flex items-start gap-3 p-3 bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl border border-blue-100">
                               <Info className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
                               <div>
                                 <p className="text-sm text-blue-800 font-medium">Book multiple hours</p>
                                 <p className="text-xs text-blue-600 mt-0.5">
-                                  Tap consecutive slots to book longer sessions. Each slot is 30 minutes. Select your desired duration, then tap "Reserve Slots".
+                                  {bookingType === 'package' && packageDurationMinutes > 0
+                                    ? `Tap your start time, then tap your end time to select the full range. For an ${formatDuration(packageDurationMinutes)} package starting at 8:00 AM, tap 4:00 PM as the end.`
+                                    : 'Tap your start time, then tap your end time to select the full range. Each slot is 30 minutes.'}
+                                  {heldSlotIds.length > 0 && ' Your reserved slots will update when you change the selection.'}
                                 </p>
                               </div>
                             </div>
                           )}
 
-                          {/* Held by others legend */}
-                          {availableSlots.some(s => s.is_held) && (
-                            <div className="mt-3 flex items-center gap-2 text-xs text-gray-500">
-                              <div className="flex items-center gap-1">
-                                <div className="w-3 h-3 rounded bg-orange-50 border border-orange-200" />
-                                <span>Temporarily held by another user</span>
-                              </div>
+                          {/* Unavailable slot legend */}
+                          {(availableSlots.some(s => s.is_held) || availableSlots.some(s => s.status === 'booked')) && (
+                            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-gray-500">
+                              {availableSlots.some(s => s.is_held) && (
+                                <div className="flex items-center gap-1">
+                                  <div className="w-3 h-3 rounded bg-orange-50 border border-orange-200" />
+                                  <span>Temporarily held by another user</span>
+                                </div>
+                              )}
+                              {availableSlots.some(s => s.status === 'booked') && (
+                                <div className="flex items-center gap-1">
+                                  <div className="w-3 h-3 rounded bg-red-50 border border-red-200" />
+                                  <span>Already booked</span>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -1720,19 +1846,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                         <div className="text-xs text-gray-500 pb-1 border-b border-gray-100">
                           {bookingType === 'hourly' ? (
                             <>₱{hourlyRate.toLocaleString()} per hour × {totalDurationHours.toFixed(1)} hours</>
+                          ) : packageUnits > 1 ? (
+                            <>₱{basePrice.toLocaleString()} per {formatDuration(packageDurationMinutes)} × {packageUnits.toFixed(0)}</>
                           ) : (
-                            <>Fixed Package Price{packageDurationMinutes > 0 ? ` (${formatDuration(packageDurationMinutes)})` : ''}</>
+                            <>Package Price{packageDurationMinutes > 0 ? ` (${formatDuration(packageDurationMinutes)})` : ''}</>
                           )}
                         </div>
-                        {/* Package duration mismatch warning */}
-                        {!isHourlyPricing && packageDurationMinutes > 0 && totalDurationMinutes !== packageDurationMinutes && (
-                          <div className="flex items-start gap-2 p-2 bg-amber-50 rounded-lg border border-amber-200">
-                            <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
-                            <span className="text-xs text-amber-700">
-                              Package duration is {formatDuration(packageDurationMinutes)}, but you selected {formatDuration(totalDurationMinutes)}. The price remains fixed.
-                            </span>
-                          </div>
-                        )}
                         <div className="flex justify-between text-sm">
                           <span className="text-gray-600">Service Fee</span>
                           <span className="text-gray-900">₱{servicePrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
@@ -1867,31 +1986,28 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                             <span>₱{hourlyRate.toLocaleString()} × {totalDurationHours.toFixed(1)} hrs</span>
                           </div>
                         )}
+                        {bookingType === 'package' && packageUnits > 1 && (
+                          <div className="flex justify-between text-sm text-gray-500">
+                            <span>Calculation</span>
+                            <span>₱{basePrice.toLocaleString()} × {packageUnits.toFixed(0)}</span>
+                          </div>
+                        )}
                         <div className="flex justify-between text-sm">
                           <span className="text-gray-600">Service Fee</span>
                           <span className="text-gray-900">
-                            ₱{(bookingType === 'hourly'
-                              ? hourlyRate * totalDurationHours
-                              : basePrice
-                            ).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                            ₱{servicePrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
                           </span>
                         </div>
                         <div className="flex justify-between text-sm">
                           <span className="text-gray-600">Platform Fee (15%)</span>
                           <span className="text-gray-900">
-                            ₱{((bookingType === 'hourly'
-                              ? hourlyRate * totalDurationHours
-                              : basePrice
-                            ) * 0.15).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                            ₱{platformFee.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
                           </span>
                         </div>
                         <div className="flex justify-between pt-2 border-t border-gray-200">
                           <span className="text-gray-900 font-medium">Total</span>
                           <span className="text-purple-600 font-semibold">
-                            ₱{((bookingType === 'hourly'
-                              ? hourlyRate * totalDurationHours
-                              : basePrice
-                            ) * 1.15).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                            ₱{total.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
                           </span>
                         </div>
                       </>
@@ -1962,7 +2078,10 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
             </div>
 
             {/* Help */}
-            <div className="bg-purple-50 rounded-2xl p-4 border border-purple-200">
+            <a
+              href={`mailto:support@photofind.app?subject=${encodeURIComponent(`Help with booking${providerName ? ` - ${providerName}` : ''}`)}`}
+              className="block bg-purple-50 rounded-2xl p-4 border border-purple-200 hover:bg-purple-100 transition-colors"
+            >
               <div className="flex items-start gap-3">
                 <MessageSquare className="w-5 h-5 text-purple-600 flex-shrink-0 mt-0.5" />
                 <div>
@@ -1970,7 +2089,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                   <p className="text-xs text-purple-700">Contact our support team for assistance with your booking</p>
                 </div>
               </div>
-            </div>
+            </a>
           </div>
         </div>
       </div>

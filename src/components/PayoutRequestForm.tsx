@@ -4,15 +4,14 @@ import { payoutService } from '../api/services/walletService';
 
 interface PayoutRequestFormProps {
   availableBalance: number;
+  minimumPayout: number;
   onSuccess: () => void;
   onCancel: () => void;
 }
 
 type PayoutMethod = 'bank_transfer' | 'gcash' | 'paymaya';
 
-const MINIMUM_PAYOUT = 500;
-
-export function PayoutRequestForm({ availableBalance, onSuccess, onCancel }: PayoutRequestFormProps) {
+export function PayoutRequestForm({ availableBalance, minimumPayout, onSuccess, onCancel }: PayoutRequestFormProps) {
   const [amount, setAmount] = useState('');
   const [payoutMethod, setPayoutMethod] = useState<PayoutMethod>('gcash');
   const [loading, setLoading] = useState(false);
@@ -43,8 +42,8 @@ export function PayoutRequestForm({ availableBalance, onSuccess, onCancel }: Pay
       return;
     }
 
-    if (payoutAmount < MINIMUM_PAYOUT) {
-      setError(`Minimum payout amount is PHP ${MINIMUM_PAYOUT}`);
+    if (payoutAmount < minimumPayout) {
+      setError(`Minimum payout amount is PHP ${minimumPayout}`);
       return;
     }
 
@@ -144,7 +143,7 @@ export function PayoutRequestForm({ availableBalance, onSuccess, onCancel }: Pay
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
               placeholder="0.00"
-              min={MINIMUM_PAYOUT}
+              min={minimumPayout}
               max={availableBalance}
               step="0.01"
               className="w-full pl-14 pr-20 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
@@ -158,7 +157,7 @@ export function PayoutRequestForm({ availableBalance, onSuccess, onCancel }: Pay
             </button>
           </div>
           <p className="text-xs text-gray-500 mt-1">
-            Minimum: PHP {MINIMUM_PAYOUT.toLocaleString()}
+            Minimum: PHP {minimumPayout.toLocaleString()}
           </p>
         </div>
 
@@ -286,7 +285,7 @@ export function PayoutRequestForm({ availableBalance, onSuccess, onCancel }: Pay
         {/* Submit Button */}
         <button
           type="submit"
-          disabled={loading || !amount || parseFloat(amount) < MINIMUM_PAYOUT}
+          disabled={loading || !amount || parseFloat(amount) < minimumPayout}
           className="w-full py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {loading ? (

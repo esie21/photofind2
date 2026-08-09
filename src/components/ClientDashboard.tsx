@@ -1,61 +1,51 @@
 import { useState, useEffect } from 'react';
-import { Search, SlidersHorizontal, Star, MapPin, Calendar, MessageSquare, Clock, ChevronRight, Filter, DollarSign, RefreshCw, AlertCircle } from 'lucide-react';
+import { Search, SlidersHorizontal, Star, MapPin, MessageSquare, Clock, ChevronRight, Filter, ShieldCheck } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { ChatInterface } from './ChatInterface';
 import { ProviderCardSkeleton, BookingCardSkeleton } from './ui/skeleton';
 import { EmptyState } from './EmptyState';
-import { ErrorState, InlineError } from './ErrorState';
-import { ReviewForm } from './ReviewForm';
-import { RescheduleModal } from './RescheduleModal';
+import { ErrorState } from './ErrorState';
 import { ConfirmCompletionModal } from './ConfirmCompletionModal';
 import userService from '../api/services/userService';
 import bookingService from '../api/services/bookingService';
-import reviewService from '../api/services/reviewService';
+import { CATEGORY_OPTIONS } from '../constants/categories';
 
 interface ClientDashboardProps {
   onStartBooking: (provider?: any) => void;
   onViewProvider?: (providerId: string) => void;
+  initialSearchQuery?: string;
+  initialCategory?: string;
+  onContactSupport?: () => void;
 }
 
-export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashboardProps) {
-  const [showFilters, setShowFilters] = useState(false);
+export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQuery, initialCategory, onContactSupport }: ClientDashboardProps) {
+  const [showFilters, setShowFilters] = useState(!!initialCategory);
   const [showChat, setShowChat] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<any>(null);
   const [providersList, setProvidersList] = useState<any[]>([]);
   const [loadingProviders, setLoadingProviders] = useState(false);
   const [providersError, setProvidersError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [typedQuery, setTypedQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(initialSearchQuery || '');
+  const [typedQuery, setTypedQuery] = useState(initialSearchQuery || '');
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState(12);
   const [totalProviders, setTotalProviders] = useState<number | null>(null);
   const [priceRange, setPriceRange] = useState([0, 1000]);
-  const [selectedCategory, setSelectedCategory] = useState('all');
+  const [selectedCategory, setSelectedCategory] = useState(initialCategory || 'all');
   const [sortBy, setSortBy] = useState('recommended');
   const [myBookings, setMyBookings] = useState<any[]>([]);
   const [loadingBookings, setLoadingBookings] = useState(false);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
-  const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
-  const [showReviewForm, setShowReviewForm] = useState(false);
-  const [reviewBooking, setReviewBooking] = useState<any>(null);
-  const [reviewedBookingIds, setReviewedBookingIds] = useState<Set<string>>(new Set());
-  const [showRescheduleModal, setShowRescheduleModal] = useState(false);
-  const [rescheduleBooking, setRescheduleBooking] = useState<any>(null);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [confirmBookingData, setConfirmBookingData] = useState<any>(null);
-  const [showAllUpcoming, setShowAllUpcoming] = useState(false);
 
   const upcomingBookings = myBookings;
-  const maxUpcomingToShow = 10;
-  const displayedUpcomingBookings = showAllUpcoming
-    ? upcomingBookings
-    : upcomingBookings.slice(0, maxUpcomingToShow);
 
   const fetchProviders = async () => {
     setLoadingProviders(true);
     setProvidersError(null);
     try {
-      const res = await userService.getAllProviders({ q: searchQuery, page, limit });
+      const res = await userService.getAllProviders({ q: searchQuery, category: selectedCategory, page, limit });
       const list = res.data;
       const total = res.meta?.total ?? null;
       setProvidersList(list);
@@ -86,7 +76,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
 
   useEffect(() => {
     fetchProviders();
-  }, [searchQuery, page, limit]);
+  }, [searchQuery, selectedCategory, page, limit]);
 
   const fetchMyBookings = async () => {
     setLoadingBookings(true);
@@ -95,8 +85,10 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
       const data = await bookingService.getMyBookings();
       const mapped = (data || []).map((b: any) => {
         const start = b.start_date ? new Date(b.start_date) : b.startDate ? new Date(b.startDate) : null;
-        const date = start ? start.toISOString().slice(0, 10) : '';
-        const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+        // Always render in Manila time so the date and time shown agree with
+        // each other and with the server, regardless of the viewer's device timezone.
+        const date = start ? start.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' }) : '';
+        const time = start ? start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Manila' }) : '';
         return {
           id: b.id,
           provider_id: b.provider_user_id || b.provider_id,
@@ -125,32 +117,6 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
   useEffect(() => {
     fetchMyBookings();
   }, []);
-
-  // Fetch which bookings have already been reviewed
-  const fetchReviewedBookings = async () => {
-    try {
-      const myReviews = await reviewService.getMyReviews();
-      const reviewedIds = new Set(myReviews.map((r: any) => String(r.booking_id)));
-      setReviewedBookingIds(reviewedIds);
-    } catch (err) {
-      console.error('Failed to fetch reviewed bookings:', err);
-    }
-  };
-
-  useEffect(() => {
-    fetchReviewedBookings();
-  }, []);
-
-  const handleLeaveReview = (booking: any) => {
-    setReviewBooking(booking);
-    setShowReviewForm(true);
-  };
-
-  const handleReviewSuccess = () => {
-    // Add the booking ID to reviewed set
-    setReviewedBookingIds(prev => new Set([...prev, String(reviewBooking?.id)]));
-    fetchReviewedBookings();
-  };
 
   const handleSendMessage = (provider: any) => {
     setSelectedProvider(provider);
@@ -202,14 +168,13 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                     <label className="block text-sm text-gray-700 mb-2">Category</label>
                     <select
                       value={selectedCategory}
-                      onChange={(e) => setSelectedCategory(e.target.value)}
+                      onChange={(e) => { setSelectedCategory(e.target.value); setPage(1); }}
                       className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
                     >
                       <option value="all">All Categories</option>
-                      <option value="photography">Photography</option>
-                      <option value="videography">Videography</option>
-                      <option value="design">Design</option>
-                      <option value="makeup">Makeup</option>
+                      {CATEGORY_OPTIONS.map((cat) => (
+                        <option key={cat} value={cat}>{cat}</option>
+                      ))}
                     </select>
                   </div>
                   <div>
@@ -310,11 +275,22 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                       <div className="flex-1">
                         <div className="flex items-start justify-between mb-2">
                           <div>
-                            <h3 className="text-gray-900 mb-1">{provider.name}</h3>
+                            <div className="flex items-center gap-1.5 mb-1">
+                              <h3 className="text-gray-900">{provider.name}</h3>
+                              {provider.is_verified && (
+                                <span
+                                  title="Verified provider"
+                                  className="flex items-center gap-0.5 px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded-full text-[10px] font-medium"
+                                >
+                                  <ShieldCheck className="w-3 h-3" />
+                                  Verified
+                                </span>
+                              )}
+                            </div>
                             <p className="text-gray-600 text-sm">{provider.featured_service?.title || provider.service}</p>
                           </div>
                           <div className="text-right">
-                            <div className="text-purple-600">{provider.featured_service?.price ? `$${provider.featured_service.price}/hr` : provider.price ? `$${provider.price}/hr` : ''}</div>
+                            <div className="text-purple-600">{provider.featured_service?.price ? `₱${provider.featured_service.price}/hr` : provider.price ? `₱${provider.price}/hr` : ''}</div>
                           </div>
                         </div>
 
@@ -426,192 +402,16 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
               </div>
             )}
 
-            {/* Upcoming Bookings */}
-            <div className="bg-white rounded-2xl p-6 shadow-sm">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-gray-900">Upcoming Bookings</h3>
-                {upcomingBookings.length > maxUpcomingToShow && (
-                  <button
-                    onClick={() => setShowAllUpcoming((prev) => !prev)}
-                    className="text-sm text-purple-600 hover:text-purple-700"
-                  >
-                    {showAllUpcoming ? 'Show less' : 'View all'}
-                  </button>
-                )}
-              </div>
-
-              <div className="space-y-3">
-                {loadingBookings ? (
-                  <>
-                    {Array.from({ length: 2 }).map((_, i) => (
-                      <div key={i} className="p-4 border border-gray-100 rounded-xl">
-                        <div className="flex gap-3">
-                          <div className="w-12 h-12 bg-gray-200 animate-pulse rounded-lg" />
-                          <div className="flex-1 space-y-2">
-                            <div className="h-4 bg-gray-200 animate-pulse rounded w-24" />
-                            <div className="h-3 bg-gray-200 animate-pulse rounded w-32" />
-                            <div className="h-3 bg-gray-200 animate-pulse rounded w-20" />
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </>
-                ) : bookingsError ? (
-                  <InlineError
-                    message={bookingsError}
-                    onRetry={fetchMyBookings}
-                    retrying={loadingBookings}
-                  />
-                ) : upcomingBookings.length === 0 ? (
-                  <EmptyState
-                    type="bookings"
-                    title="No bookings yet"
-                    description="Book a service to get started!"
-                  />
-                ) : (
-                  displayedUpcomingBookings.map((booking) => (
-                    <div key={booking.id} className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 transition-colors">
-                      <div className="flex gap-3">
-                        <ImageWithFallback
-                          src={booking.image}
-                          alt={booking.provider}
-                          className="w-12 h-12 object-cover rounded-lg"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm text-gray-900 truncate">{booking.provider}</p>
-                          <p className="text-xs text-gray-600 truncate">{booking.service || 'Service'}</p>
-                          <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
-                            <Calendar className="w-3 h-3" />
-                            <span>{booking.date}</span>
-                            <Clock className="w-3 h-3 ml-1" />
-                            <span>{booking.time}</span>
-                            <DollarSign className="w-3 h-3" />
-                            <span>{booking.total_price}</span>
-                          </div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <span className={`inline-block px-2 py-1 text-xs rounded-full ${booking.status === 'confirmed' || booking.status === 'accepted'
-                              ? 'bg-green-100 text-green-700'
-                              : booking.status === 'completed'
-                                ? 'bg-blue-100 text-blue-700'
-                                : booking.status === 'cancelled' || booking.status === 'rejected'
-                                  ? 'bg-red-100 text-red-700'
-                                  : booking.status === 'awaiting_confirmation'
-                                    ? 'bg-orange-100 text-orange-700'
-                                    : booking.status === 'disputed'
-                                      ? 'bg-red-100 text-red-700'
-                                      : 'bg-yellow-100 text-yellow-700'
-                              }`}>
-                              {booking.status === 'awaiting_confirmation' ? 'Awaiting Your Confirmation' : booking.status}
-                            </span>
-                            <button
-                              onClick={() => {
-                                setSelectedBookingId(booking.id);
-                                setSelectedProvider({
-                                  id: booking.provider_id,
-                                  name: booking.provider,
-                                  service: booking.service,
-                                  image: booking.image,
-                                });
-                                setShowChat(true);
-                              }}
-                              className="px-2 py-1 text-xs text-purple-600 hover:bg-purple-50 rounded-lg flex items-center gap-1"
-                            >
-                              <MessageSquare className="w-3 h-3" />
-                              Message
-                            </button>
-                            {['pending', 'accepted', 'confirmed'].includes(booking.status) && (
-                              <button
-                                onClick={() => {
-                                  setRescheduleBooking({
-                                    id: booking.id,
-                                    service: booking.service,
-                                    provider: booking.provider,
-                                    date: booking.date,
-                                    time: booking.time,
-                                  });
-                                  setShowRescheduleModal(true);
-                                }}
-                                className="px-2 py-1 text-xs text-orange-600 hover:bg-orange-50 rounded-lg flex items-center gap-1"
-                              >
-                                <RefreshCw className="w-3 h-3" />
-                                Reschedule
-                              </button>
-                            )}
-                            {booking.status === 'awaiting_confirmation' && (
-                              <button
-                                onClick={() => {
-                                  setConfirmBookingData({
-                                    id: String(booking.id),
-                                    service_title: booking.service || 'Service',
-                                    provider_name: booking.provider || 'Provider',
-                                    provider_completed_at: booking.provider_completed_at,
-                                    completion_notes: booking.completion_notes,
-                                    start_date: booking.start_date || booking.date,
-                                  });
-                                  setShowConfirmModal(true);
-                                }}
-                                className="px-2 py-1 text-xs bg-orange-600 text-white hover:bg-orange-700 rounded-lg flex items-center gap-1"
-                              >
-                                <Clock className="w-3 h-3" />
-                                Confirm Completion
-                              </button>
-                            )}
-                            {booking.status === 'disputed' && (
-                              <div className="w-full mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
-                                <div className="flex items-start gap-2">
-                                  <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-                                  <div>
-                                    <h4 className="text-sm font-semibold text-red-800">Dispute Under Review</h4>
-                                    <p className="text-sm text-red-700 mt-1">
-                                      {booking.dispute_reason
-                                        ? `Your Reason: "${booking.dispute_reason}"`
-                                        : 'You have disputed this booking. An admin will review it shortly.'}
-                                    </p>
-                                    <p className="text-xs text-red-600 mt-2">
-                                      Admins will analyze the evidence and notify you of the resolution.
-                                    </p>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-                            {booking.status === 'completed' && !reviewedBookingIds.has(String(booking.id)) && (
-                              <button
-                                onClick={() => handleLeaveReview(booking)}
-                                className="px-2 py-1 text-xs text-yellow-600 hover:bg-yellow-50 rounded-lg flex items-center gap-1"
-                              >
-                                <Star className="w-3 h-3" />
-                                Leave Review
-                              </button>
-                            )}
-                            {booking.status === 'completed' && reviewedBookingIds.has(String(booking.id)) && (
-                              <span className="px-2 py-1 text-xs text-green-600 flex items-center gap-1">
-                                <Star className="w-3 h-3 fill-current" />
-                                Reviewed
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-              {!loadingBookings && !bookingsError && upcomingBookings.length > maxUpcomingToShow && (
-                <p className="mt-3 text-xs text-gray-500 text-center">
-                  {showAllUpcoming
-                    ? `Showing all ${upcomingBookings.length} bookings`
-                    : `Showing first ${maxUpcomingToShow} bookings (+${upcomingBookings.length - maxUpcomingToShow} more)`}
-                </p>
-              )}
-            </div>
-
             {/* Quick Actions */}
             <div className="bg-gradient-to-br from-purple-600 to-pink-600 rounded-2xl p-6 text-white">
-              <h3 className="mb-2">Need help finding the right professional?</h3>
+              <h3 className="mb-2">Need help with something?</h3>
               <p className="text-sm text-purple-100 mb-4">
-                Our team can help match you with the perfect service provider
+                Check our FAQ or send our team a message and we'll get back to you
               </p>
-              <button className="w-full py-2 bg-white text-purple-600 rounded-lg hover:bg-purple-50 transition-colors text-sm">
+              <button
+                onClick={onContactSupport}
+                className="w-full py-2 bg-white text-purple-600 rounded-lg hover:bg-purple-50 transition-colors text-sm"
+              >
                 Contact Support
               </button>
             </div>
@@ -625,40 +425,9 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
       {showChat && selectedProvider && (
         <ChatInterface
           provider={selectedProvider}
-          bookingId={selectedBookingId ?? undefined}
           onClose={() => {
             setShowChat(false);
-            setSelectedBookingId(null);
-          }}
-        />
-      )}
-
-      {/* Review Form Modal */}
-      {showReviewForm && reviewBooking && (
-        <ReviewForm
-          bookingId={String(reviewBooking.id)}
-          providerName={reviewBooking.provider}
-          serviceName={reviewBooking.service}
-          onClose={() => {
-            setShowReviewForm(false);
-            setReviewBooking(null);
-          }}
-          onSuccess={handleReviewSuccess}
-        />
-      )}
-
-      {/* Reschedule Modal */}
-      {showRescheduleModal && rescheduleBooking && (
-        <RescheduleModal
-          booking={rescheduleBooking}
-          onClose={() => {
-            setShowRescheduleModal(false);
-            setRescheduleBooking(null);
-          }}
-          onSuccess={() => {
-            setShowRescheduleModal(false);
-            setRescheduleBooking(null);
-            fetchMyBookings();
+            setSelectedProvider(null);
           }}
         />
       )}
@@ -727,7 +496,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider }: ClientDashbo
                 <div className="bg-purple-50 rounded-xl p-4">
                   <div className="flex items-center justify-between">
                     <span className="text-gray-700">Hourly Rate</span>
-                    <span className="text-purple-600">${selectedProvider.price}/hr</span>
+                    <span className="text-purple-600">₱{selectedProvider.price}/hr</span>
                   </div>
                 </div>
               </div>

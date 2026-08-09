@@ -3,6 +3,7 @@ import pool from '../config/database';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import { OAuth2Client } from 'google-auth-library';
 import { isValidEmail, isStrongPassword, setSecureCookie, clearSecureCookie, logSecurityEvent, passwordResetLimiter } from '../middleware/security';
 
 const router = Router();
@@ -26,6 +27,43 @@ interface AuthRequest extends Request {
 
 // Token cookie name
 const AUTH_COOKIE_NAME = 'auth_token';
+
+function getGoogleClientId() {
+  return process.env.GOOGLE_CLIENT_ID || '';
+}
+
+function getGoogleClient() {
+  return new OAuth2Client(getGoogleClientId());
+}
+
+function issueAuthToken(user: { id: string; role: string }) {
+  return jwt.sign(
+    {
+      userId: user.id,
+      role: user.role,
+      iat: Math.floor(Date.now() / 1000),
+    },
+    process.env.JWT_SECRET || 'your_secret_key',
+    {
+      expiresIn: '24h',
+      algorithm: 'HS256',
+    }
+  );
+}
+
+function sendAuthResponse(res: Response, user: { id: string; email: string; name: string; role: string }) {
+  const token = issueAuthToken(user);
+  setSecureCookie(res, AUTH_COOKIE_NAME, token, 24 * 60 * 60 * 1000);
+  return res.json({
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+    },
+  });
+}
 
 // Login endpoint
 router.post('/login', async (req: AuthRequest, res: Response) => {
@@ -108,6 +146,97 @@ router.post('/login', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// Google Sign-In
+router.post('/google', async (req: Request, res: Response) => {
+  try {
+    const { credential, role, intent } = req.body as {
+      credential?: string;
+      role?: 'client' | 'provider';
+      intent?: 'login' | 'signup';
+    };
+
+    if (!credential) {
+      return res.status(400).json({ error: 'Missing Google credential' });
+    }
+
+    const googleClientId = getGoogleClientId();
+    if (!googleClientId) {
+      return res.status(503).json({ error: 'Google sign-in is not configured on the server' });
+    }
+
+    const ticket = await getGoogleClient().verifyIdToken({
+      idToken: credential,
+      audience: googleClientId,
+    });
+
+    const payload = ticket.getPayload();
+    if (!payload?.email || !payload.sub) {
+      return res.status(400).json({ error: 'Invalid Google account data' });
+    }
+
+    if (payload.email_verified === false) {
+      return res.status(400).json({ error: 'Google email is not verified' });
+    }
+
+    const googleId = payload.sub;
+    const email = payload.email.toLowerCase().trim();
+    const name = (payload.name || email.split('@')[0]).trim();
+    const picture = payload.picture || null;
+
+    let userResult = await pool.query(
+      'SELECT id, email, name, role FROM users WHERE google_id = $1',
+      [googleId]
+    );
+
+    if (userResult.rows.length === 0) {
+      userResult = await pool.query(
+        'SELECT id, email, name, role, google_id FROM users WHERE LOWER(email) = LOWER($1)',
+        [email]
+      );
+
+      if (userResult.rows[0] && !userResult.rows[0].google_id) {
+        await pool.query(
+          `UPDATE users
+           SET google_id = $1,
+               profile_image = COALESCE(profile_image, $2),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $3`,
+          [googleId, picture, userResult.rows[0].id]
+        );
+      }
+    }
+
+    if (userResult.rows.length === 0) {
+      if (intent === 'login') {
+        return res.status(404).json({ error: 'No account found for this Google email. Please sign up first.' });
+      }
+
+      const validRoles = ['client', 'provider'];
+      if (!role || !validRoles.includes(role)) {
+        return res.status(200).json({
+          needsRole: true,
+          profile: { email, name, picture },
+        });
+      }
+
+      const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
+      const created = await pool.query(
+        `INSERT INTO users (email, name, password_hash, role, google_id, profile_image)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, email, name, role`,
+        [email, name, passwordHash, role, googleId, picture]
+      );
+
+      return sendAuthResponse(res.status(201), created.rows[0]);
+    }
+
+    return sendAuthResponse(res, userResult.rows[0]);
+  } catch (error) {
+    console.error('Google sign-in error:', error);
+    return res.status(401).json({ error: 'Google sign-in failed. Please try again.' });
   }
 });
 
@@ -236,7 +365,7 @@ router.get('/me', async (req: Request, res: Response) => {
     );
 
     const result = await pool.query(
-      'SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location FROM users WHERE id = $1',
+      'SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents FROM users WHERE id = $1',
       [decoded.userId]
     );
 

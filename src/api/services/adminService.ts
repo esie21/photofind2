@@ -31,6 +31,7 @@ export interface MetricsOverview {
     verifications: number;
     disputes: number;
     reviews: number;
+    supportTickets: number;
   };
 }
 
@@ -115,6 +116,24 @@ export interface AdminReview {
   reviewee_name: string;
   reviewee_email: string;
   booking_id: string | null;
+  service_title: string | null;
+}
+
+export interface AdminSupportTicket {
+  id: string;
+  user_id: string;
+  booking_id: string | null;
+  subject: string;
+  message: string;
+  status: 'open' | 'in_progress' | 'resolved';
+  admin_reply: string | null;
+  replied_by: string | null;
+  replied_at: string | null;
+  created_at: string;
+  updated_at: string;
+  user_name: string;
+  user_email: string;
+  user_role: string;
   service_title: string | null;
 }
 
@@ -277,9 +296,15 @@ const adminService = {
   },
 
   // Provider Verification
-  async getPendingVerifications(): Promise<PendingVerification[]> {
-    const resp = await apiClient.get<{ data: PendingVerification[] }>('/admin/providers/pending-verification');
-    return resp.data;
+  async getPendingVerifications(params: {
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<PaginatedResponse<PendingVerification>> {
+    const searchParams = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined) searchParams.append(key, String(value));
+    });
+    return apiClient.get<PaginatedResponse<PendingVerification>>(`/admin/providers/pending-verification?${searchParams.toString()}`);
   },
 
   async verifyProvider(id: string): Promise<void> {
@@ -308,7 +333,25 @@ const adminService = {
   },
 
   async deleteReview(id: string, reason?: string): Promise<void> {
-    await apiClient.delete<{ message: string }>(`/admin/reviews/${id}`);
+    await apiClient.delete<{ message: string }>(`/admin/reviews/${id}`, { reason });
+  },
+
+  // Support Tickets
+  async getSupportTickets(params: {
+    status?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<PaginatedResponse<AdminSupportTicket>> {
+    const searchParams = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined) searchParams.append(key, String(value));
+    });
+    return apiClient.get<PaginatedResponse<AdminSupportTicket>>(`/admin/support-tickets?${searchParams.toString()}`);
+  },
+
+  async updateSupportTicket(id: string, data: { status?: string; admin_reply?: string }): Promise<AdminSupportTicket> {
+    const resp = await apiClient.patch<{ data: AdminSupportTicket }>(`/admin/support-tickets/${id}`, data);
+    return resp.data;
   },
 
   // Disputes

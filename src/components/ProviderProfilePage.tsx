@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Star, MapPin, Clock, ArrowLeft, MessageSquare, Camera, Briefcase, X } from 'lucide-react';
+import { Star, MapPin, Clock, ArrowLeft, MessageSquare, Camera, Briefcase, X, ShieldCheck } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { ChatInterface } from './ChatInterface';
 import reviewService, { Review, ReviewStats } from '../api/services/reviewService';
@@ -27,6 +27,7 @@ interface ProviderData {
   years_experience: number;
   rating: number;
   review_count: number;
+  is_verified?: boolean;
 }
 
 interface Service {
@@ -88,6 +89,7 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
               years_experience: found.years_experience || 0,
               rating: found.rating || 0,
               review_count: found.review_count || 0,
+              is_verified: !!found.is_verified,
             });
           } else {
             throw new Error('Provider not found');
@@ -239,7 +241,18 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
 
               {/* Info */}
               <div className="flex-1">
-                <h1 className="text-2xl font-semibold text-gray-900">{provider.name}</h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-2xl font-semibold text-gray-900">{provider.name}</h1>
+                  {provider.is_verified && (
+                    <span
+                      title="Verified provider"
+                      className="flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full text-xs font-medium"
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      Verified
+                    </span>
+                  )}
+                </div>
                 <p className="text-purple-600">{provider.category || 'Professional'}</p>
 
                 <div className="flex flex-wrap items-center gap-4 mt-3 text-sm">
@@ -339,7 +352,7 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
                           <h4 className="font-medium text-gray-900">{service.title}</h4>
                           <p className="text-sm text-gray-600 mt-1 line-clamp-2">{service.description}</p>
                           <div className="flex items-center justify-between mt-3">
-                            <span className="text-purple-600 font-medium">${service.price}</span>
+                            <span className="text-purple-600 font-medium">₱{service.price}</span>
                             <span className="text-sm text-gray-500">{service.duration_minutes} min</span>
                           </div>
                         </div>
@@ -393,7 +406,7 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
                             <h4 className="font-medium text-gray-900">{service.title}</h4>
                             <p className="text-sm text-gray-600 mt-1">{service.description}</p>
                             <div className="flex items-center gap-4 mt-3 text-sm">
-                              <span className="text-purple-600 font-medium">${service.price}</span>
+                              <span className="text-purple-600 font-medium">₱{service.price}</span>
                               <span className="text-gray-500 flex items-center gap-1">
                                 <Clock className="w-4 h-4" />
                                 {service.duration_minutes} min

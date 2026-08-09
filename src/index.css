@@ -2357,6 +2357,38 @@ html {
   initial-value: 1;
 }
 
+/* These utility classes are used throughout src/ but were absent from this
+   file (a static, pre-generated Tailwind snapshot with no live build step —
+   see the .profile-chip block below for the same issue). Hand-written here
+   with Tailwind v4's real default values so every existing usage across the
+   app (bold/semibold text, amber/orange badges, skeleton loaders) starts
+   actually working instead of silently no-op'ing. */
+.font-bold { font-weight: 700; }
+.font-semibold { font-weight: 600; }
+
+.bg-amber-100 { background-color: oklch(.962 .059 95.617); }
+.text-amber-700 { color: oklch(.555 .163 48.998); }
+.bg-orange-100 { background-color: oklch(.954 .038 75.164); }
+.text-orange-700 { color: oklch(.553 .195 38.402); }
+.text-orange-600 { color: oklch(.646 .222 41.116); }
+.hover\:text-orange-700:hover { color: oklch(.553 .195 38.402); }
+.hover\:text-yellow-700:hover { color: oklch(.554 .135 66.442); }
+.fill-current { fill: currentColor; }
+.bg-red-50 { background-color: oklch(.971 .013 17.38); }
+.border-red-200 { border-color: oklch(.885 .062 18.334); }
+.text-red-800 { color: oklch(.444 .177 26.899); }
+
+@keyframes pulse {
+  50% { opacity: .5; }
+}
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse { animation: none; }
+}
+
 @keyframes bounce {
   0%, 100% {
     animation-timing-function: cubic-bezier(.8, 0, 1, 1);
@@ -2366,5 +2398,72 @@ html {
   50% {
     animation-timing-function: cubic-bezier(0, 0, .2, 1);
     transform: none;
+  }
+}
+
+.profile-chip {
+  background-color: #ebebeb;
+  padding: 6px 14px 6px 6px;
+}
+
+.profile-chip-name {
+  display: none;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+@media (width >= 40rem) {
+  .profile-chip-name {
+    display: inline;
+  }
+}
+
+.account-menu-panel {
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  border-radius: 16px;
+  box-shadow: 0 12px 32px -8px rgba(17, 12, 34, 0.18), 0 4px 12px -4px rgba(17, 12, 34, 0.1);
+  transform: translateY(-6px) scale(0.97);
+  opacity: 0;
+  transition: transform 160ms ease-out, opacity 160ms ease-out;
+  transform-origin: top right;
+  pointer-events: none;
+}
+
+.account-menu-panel-open {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.account-menu-avatar {
+  width: 44px;
+  height: 44px;
+}
+
+.account-menu-row {
+  padding: 12px 16px;
+}
+
+.account-menu-icon-circle {
+  width: 36px;
+  height: 36px;
+  border-radius: 9999px;
+  background: var(--color-purple-100);
+  color: var(--color-purple-600);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.account-menu-icon-circle-danger {
+  background: var(--color-red-50);
+  color: var(--color-red-600);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .account-menu-panel {
+    transition: none;
   }
 }
