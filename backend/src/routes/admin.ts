@@ -636,13 +636,21 @@ router.get('/support-tickets', async (req: Request & { userId?: string }, res: R
 
     const dataQuery = `
       SELECT t.*, u.name as user_name, u.email as user_email, u.role as user_role,
-             s.title as service_title
+             s.title as service_title,
+             lm.content as last_message, lm.created_at as last_message_at,
+             (SELECT COUNT(*) FROM support_messages um
+               WHERE um.ticket_id::text = t.id::text AND um.sender_role = 'user' AND um.read_at IS NULL) as unread_count
       FROM support_tickets t
       JOIN users u ON u.id::text = t.user_id::text
       LEFT JOIN bookings b ON b.id::text = t.booking_id::text
       LEFT JOIN services s ON s.id::text = b.service_id::text
+      LEFT JOIN LATERAL (
+        SELECT content, created_at FROM support_messages m
+        WHERE m.ticket_id::text = t.id::text
+        ORDER BY m.created_at DESC LIMIT 1
+      ) lm ON true
       ${whereClause}
-      ORDER BY t.created_at DESC
+      ORDER BY COALESCE(lm.created_at, t.created_at) DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
     params.push(parseInt(limit as string), parseInt(offset as string));
@@ -650,7 +658,7 @@ router.get('/support-tickets', async (req: Request & { userId?: string }, res: R
     const dataResult = await pool.query(dataQuery, params);
 
     return res.json({
-      data: dataResult.rows,
+      data: dataResult.rows.map((r: any) => ({ ...r, unread_count: parseInt(r.unread_count) || 0 })),
       meta: { total: parseInt(countResult.rows[0].total), limit: parseInt(limit as string), offset: parseInt(offset as string) },
     });
   } catch (error) {
@@ -663,10 +671,10 @@ router.patch('/support-tickets/:id', async (req: Request & { userId?: string }, 
   try {
     const adminId = req.userId;
     const ticketId = req.params.id;
-    const { status, admin_reply } = req.body;
+    const { status } = req.body;
 
     const validStatuses = ['open', 'in_progress', 'resolved'];
-    if (status !== undefined && !validStatuses.includes(status)) {
+    if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: `status must be one of: ${validStatuses.join(', ')}` });
     }
 
@@ -675,53 +683,20 @@ router.patch('/support-tickets/:id', async (req: Request & { userId?: string }, 
       return res.status(404).json({ error: 'Support ticket not found' });
     }
 
-    const updates: string[] = ['updated_at = CURRENT_TIMESTAMP'];
-    const values: any[] = [];
-    let idx = 1;
-
-    if (status !== undefined) {
-      updates.push(`status = $${idx++}`);
-      values.push(status);
-    }
-    if (admin_reply !== undefined && admin_reply.trim()) {
-      updates.push(`admin_reply = $${idx++}`, `replied_by = $${idx++}`, `replied_at = CURRENT_TIMESTAMP`);
-      values.push(admin_reply.trim(), adminId);
-      // Replying without an explicit status resolves the ticket by default.
-      if (status === undefined) {
-        updates.push(`status = $${idx++}`);
-        values.push('resolved');
-      }
-    }
-
-    values.push(ticketId);
     const updated = await pool.query(
-      `UPDATE support_tickets SET ${updates.join(', ')} WHERE id::text = $${idx} RETURNING *`,
-      values
+      `UPDATE support_tickets SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2 RETURNING *`,
+      [status, ticketId]
     );
 
     await auditService.log({
       userId: adminId,
-      action: admin_reply ? 'support.reply' : 'support.status_update',
+      action: 'support.status_update',
       entityType: 'support_ticket',
       entityId: ticketId,
       oldValues: { status: oldTicket.rows[0].status },
       newValues: { status: updated.rows[0].status },
       req,
     });
-
-    if (admin_reply !== undefined && admin_reply.trim()) {
-      try {
-        await notificationService.create({
-          userId: String(oldTicket.rows[0].user_id),
-          type: 'system',
-          title: 'Support replied to your ticket',
-          message: `"${oldTicket.rows[0].subject}": ${admin_reply.trim()}`,
-          data: { action: 'support_reply', ticket_id: ticketId },
-        });
-      } catch (notifError) {
-        console.error('Failed to send support reply notification:', notifError);
-      }
-    }
 
     return res.json({ data: updated.rows[0] });
   } catch (error) {

@@ -37,6 +37,11 @@ class NotificationService {
     this.io = io;
   }
 
+  // Get the Socket.IO instance (for background jobs that run outside a request/response cycle)
+  getSocketIO(): SocketIOServer | null {
+    return this.io;
+  }
+
   // Create and send a notification
   async create(params: CreateNotificationParams): Promise<any> {
     const { userId, type, title, message, data } = params;

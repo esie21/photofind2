@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
-import { Mail, MessageSquare, ChevronDown, Send, Loader2, Clock } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Mail, MessageSquare, ChevronDown, Plus } from 'lucide-react';
 import supportService, { SupportTicket } from '../api/services/supportService';
-import { useToast } from '../context/ToastContext';
+import { SupportChat } from './SupportChat';
 
 const FAQS = [
   {
@@ -37,19 +37,21 @@ interface HelpSupportPageProps {
 }
 
 export function HelpSupportPage({ onGoToBookings }: HelpSupportPageProps = {}) {
-  const toast = useToast();
   const [openIndex, setOpenIndex] = useState<number | null>(null);
-  const [subject, setSubject] = useState('');
-  const [message, setMessage] = useState('');
-  const [submitting, setSubmitting] = useState(false);
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [loadingTickets, setLoadingTickets] = useState(true);
+  const [activeTicketId, setActiveTicketId] = useState<string | null>(null);
+  const hasAutoSelected = useRef(false);
 
   const loadTickets = async () => {
     setLoadingTickets(true);
     try {
       const resp = await supportService.getMyTickets();
       setTickets(resp.data);
+      if (!hasAutoSelected.current) {
+        hasAutoSelected.current = true;
+        if (resp.data.length > 0) setActiveTicketId(resp.data[0].id);
+      }
     } catch (err) {
       console.error('Failed to load support tickets:', err);
     } finally {
@@ -59,33 +61,19 @@ export function HelpSupportPage({ onGoToBookings }: HelpSupportPageProps = {}) {
 
   useEffect(() => {
     loadTickets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!subject.trim() || !message.trim()) {
-      toast.error('Missing info', 'Please fill in both a subject and a message.');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      await supportService.createTicket({ subject: subject.trim(), message: message.trim() });
-      toast.success('Message sent', "We've received your message and will reply here soon.");
-      setSubject('');
-      setMessage('');
-      await loadTickets();
-    } catch (err: any) {
-      toast.error('Failed to send', err.message || 'Please try again in a moment.');
-    } finally {
-      setSubmitting(false);
-    }
+  const handleTicketCreated = (ticket: SupportTicket) => {
+    setActiveTicketId(ticket.id);
+    loadTickets();
   };
 
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-3xl mx-auto px-4 py-8">
         <h1 className="text-gray-900 mb-1">Help & Support</h1>
-        <p className="text-sm text-gray-500 mb-8">Find answers to common questions, or reach out to our team directly.</p>
+        <p className="text-sm text-gray-500 mb-8">Find answers to common questions, or chat with our team directly.</p>
 
         {/* Contact options */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
@@ -117,73 +105,46 @@ export function HelpSupportPage({ onGoToBookings }: HelpSupportPageProps = {}) {
           </button>
         </div>
 
-        {/* Contact form */}
-        <div className="bg-white rounded-2xl shadow-sm p-6 mb-8">
-          <h2 className="text-gray-900 mb-1">Send us a message</h2>
-          <p className="text-sm text-gray-500 mb-4">We typically reply within 1-2 business days.</p>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label htmlFor="support-subject" className="block text-sm text-gray-700 mb-1.5">Subject</label>
-              <input
-                id="support-subject"
-                type="text"
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                placeholder="What's this about?"
-                maxLength={255}
-                className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
-              />
-            </div>
-            <div>
-              <label htmlFor="support-message" className="block text-sm text-gray-700 mb-1.5">Message</label>
-              <textarea
-                id="support-message"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                placeholder="Describe your issue or question..."
-                rows={4}
-                className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none resize-none"
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-5 py-2.5 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors text-sm font-medium flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-              {submitting ? 'Sending...' : 'Send message'}
-            </button>
-          </form>
+        {/* Conversation list */}
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-gray-900">Chat with support</h2>
+          <button
+            type="button"
+            onClick={() => setActiveTicketId(null)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            New conversation
+          </button>
         </div>
 
-        {/* Ticket history */}
         {!loadingTickets && tickets.length > 0 && (
-          <div className="bg-white rounded-2xl shadow-sm p-6 mb-8">
-            <h2 className="text-gray-900 mb-4">Your requests</h2>
-            <div className="space-y-4">
-              {tickets.map((ticket) => {
-                const badge = STATUS_BADGE[ticket.status] || STATUS_BADGE.open;
-                return (
-                  <div key={ticket.id} className="border border-gray-100 rounded-xl p-4">
-                    <div className="flex items-start justify-between gap-3 mb-1.5">
-                      <span className="text-sm font-medium text-gray-900">{ticket.subject}</span>
-                      <span className={`px-2 py-0.5 text-xs font-medium rounded-full flex-shrink-0 ${badge.className}`}>
-                        {badge.label}
-                      </span>
-                    </div>
-                    <p className="text-sm text-gray-600 whitespace-pre-wrap">{ticket.message}</p>
-                    {ticket.admin_reply && (
-                      <div className="mt-3 bg-purple-50 rounded-lg p-3">
-                        <p className="text-xs font-medium text-purple-700 mb-1">Support team replied</p>
-                        <p className="text-sm text-purple-900 whitespace-pre-wrap">{ticket.admin_reply}</p>
-                      </div>
-                    )}
+          <div className="flex gap-2 overflow-x-auto pb-1 mb-4">
+            {tickets.map((ticket) => {
+              const badge = STATUS_BADGE[ticket.status] || STATUS_BADGE.open;
+              const isActive = ticket.id === activeTicketId;
+              return (
+                <button
+                  key={ticket.id}
+                  onClick={() => setActiveTicketId(ticket.id)}
+                  className={`flex-shrink-0 text-left px-3 py-2 rounded-xl border transition-colors max-w-[220px] ${
+                    isActive ? 'border-purple-400 bg-purple-50' : 'border-gray-200 bg-white hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="text-sm text-gray-900 truncate">{ticket.subject}</span>
+                    {(ticket.unread_count || 0) > 0 && <span className="w-2 h-2 rounded-full bg-purple-600 flex-shrink-0" />}
                   </div>
-                );
-              })}
-            </div>
+                  <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full ${badge.className}`}>{badge.label}</span>
+                </button>
+              );
+            })}
           </div>
         )}
+
+        <div className="mb-8">
+          <SupportChat mode="user" ticketId={activeTicketId} onTicketCreated={handleTicketCreated} />
+        </div>
 
         {/* FAQ */}
         <div className="bg-white rounded-2xl shadow-sm p-2">

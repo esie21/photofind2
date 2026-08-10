@@ -2,6 +2,12 @@ import { useState, useEffect } from 'react';
 import { X, AlertCircle, Loader2, CheckCircle, AlertTriangle, Image, Clock } from 'lucide-react';
 import bookingService, { BookingEvidence } from '../api/services/bookingService';
 import { getUploadUrl } from '../api/config';
+import { useToast } from '../context/ToastContext';
+
+// The backend returns these exact messages (bookings.ts) when this booking was already
+// resolved elsewhere (e.g. the 48-hour auto-confirm scheduler) while this modal was open.
+const isAlreadyResolvedError = (message: string) =>
+  /already been confirmed/i.test(message) || /dispute has already been raised/i.test(message);
 
 interface ConfirmCompletionModalProps {
   booking: {
@@ -17,6 +23,7 @@ interface ConfirmCompletionModalProps {
 }
 
 export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmCompletionModalProps) {
+  const toast = useToast();
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingEvidence, setIsLoadingEvidence] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -49,7 +56,13 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
       onSuccess();
     } catch (err: any) {
       console.error('Confirm error:', err);
-      setError(err?.message || 'Failed to confirm completion');
+      const message = err?.message || 'Failed to confirm completion';
+      if (isAlreadyResolvedError(message)) {
+        toast.info('Already resolved', 'This booking was already resolved while you had this open.');
+        onSuccess();
+        return;
+      }
+      setError(message);
     } finally {
       setIsLoading(false);
     }
@@ -70,7 +83,13 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
       onSuccess();
     } catch (err: any) {
       console.error('Dispute error:', err);
-      setError(err?.message || 'Failed to submit dispute');
+      const message = err?.message || 'Failed to submit dispute';
+      if (isAlreadyResolvedError(message)) {
+        toast.info('Already resolved', 'This booking was already resolved while you had this open.');
+        onSuccess();
+        return;
+      }
+      setError(message);
     } finally {
       setIsLoading(false);
     }

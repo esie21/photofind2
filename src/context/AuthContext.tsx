@@ -6,8 +6,8 @@ interface AuthContextProps {
   user: User | null;
   token: string | null;
   login: (email: string, password: string) => Promise<User>;
-  signup: (data: { email: string; password: string; name: string; role: 'client' | 'provider' | 'admin' }) => Promise<User>;
-  loginWithGoogle: (data: { credential: string; role?: 'client' | 'provider'; intent: 'login' | 'signup' }) => Promise<{ user?: User; needsRole?: boolean; profile?: { email: string; name: string; picture?: string | null } }>;
+  signup: (data: { email: string; password: string; name: string; role: 'client' | 'provider' | 'admin'; termsAccepted: boolean }) => Promise<User>;
+  loginWithGoogle: (data: { credential: string; role?: 'client' | 'provider'; intent: 'login' | 'signup'; termsAccepted?: boolean }) => Promise<{ user?: User; needsRole?: boolean; profile?: { email: string; name: string; picture?: string | null } }>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<User | null>;
 }
@@ -51,7 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return user;
   };
 
-  const signup = async (data: { email: string; password: string; name: string; role: 'client' | 'provider' | 'admin' }) => {
+  const signup = async (data: { email: string; password: string; name: string; role: 'client' | 'provider' | 'admin'; termsAccepted: boolean }) => {
     const response = await authService.signup(data as any);
     authService.setToken(response.token);
     setToken(response.token);
@@ -60,7 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return user;
   };
 
-  const loginWithGoogle = async (data: { credential: string; role?: 'client' | 'provider'; intent: 'login' | 'signup' }) => {
+  const loginWithGoogle = async (data: { credential: string; role?: 'client' | 'provider'; intent: 'login' | 'signup'; termsAccepted?: boolean }) => {
     const response = await authService.loginWithGoogle(data);
     if (response.needsRole) {
       return {

@@ -126,6 +126,7 @@ export interface AdminSupportTicket {
   subject: string;
   message: string;
   status: 'open' | 'in_progress' | 'resolved';
+  category: 'booking' | 'payment' | 'account' | 'other' | null;
   admin_reply: string | null;
   replied_by: string | null;
   replied_at: string | null;
@@ -135,6 +136,9 @@ export interface AdminSupportTicket {
   user_email: string;
   user_role: string;
   service_title: string | null;
+  last_message: string | null;
+  last_message_at: string | null;
+  unread_count: number;
 }
 
 export interface AdminDispute {
@@ -349,7 +353,7 @@ const adminService = {
     return apiClient.get<PaginatedResponse<AdminSupportTicket>>(`/admin/support-tickets?${searchParams.toString()}`);
   },
 
-  async updateSupportTicket(id: string, data: { status?: string; admin_reply?: string }): Promise<AdminSupportTicket> {
+  async updateSupportTicket(id: string, data: { status: string }): Promise<AdminSupportTicket> {
     const resp = await apiClient.patch<{ data: AdminSupportTicket }>(`/admin/support-tickets/${id}`, data);
     return resp.data;
   },

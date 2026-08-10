@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Bell, X, CheckCheck, Trash2, Loader2, RefreshCw } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import notificationService, { Notification } from '../api/services/notificationService';
@@ -9,6 +9,17 @@ interface NotificationsPanelProps {
   onNavigate?: (notification: Notification) => void;
 }
 
+function getDayBucket(dateString: string): 'Today' | 'Yesterday' | 'Earlier' {
+  const date = new Date(dateString);
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfYesterday = new Date(startOfToday);
+  startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+  if (date >= startOfToday) return 'Today';
+  if (date >= startOfYesterday) return 'Yesterday';
+  return 'Earlier';
+}
+
 export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
   const { user, token } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
@@ -16,8 +27,21 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
   const [unreadCount, setUnreadCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  const [newlyArrivedId, setNewlyArrivedId] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<Socket | null>(null);
+
+  const groupedNotifications = useMemo(() => {
+    const order: Array<'Today' | 'Yesterday' | 'Earlier'> = ['Today', 'Yesterday', 'Earlier'];
+    const buckets: Record<string, Notification[]> = {};
+    for (const n of notifications) {
+      const key = getDayBucket(n.created_at);
+      (buckets[key] ||= []).push(n);
+    }
+    return order
+      .filter((key) => buckets[key]?.length)
+      .map((key) => ({ label: key, items: buckets[key] }));
+  }, [notifications]);
 
   // Fetch notifications
   const fetchNotifications = useCallback(async (refresh = false) => {
@@ -80,6 +104,12 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
     socket.on('notification', (notification: Notification) => {
       setNotifications(prev => [notification, ...prev]);
       setUnreadCount(prev => prev + 1);
+
+      // Briefly highlight the new arrival, then let it fade back to the normal unread style.
+      setNewlyArrivedId(notification.id);
+      setTimeout(() => {
+        setNewlyArrivedId((current) => (current === notification.id ? null : current));
+      }, 1600);
 
       // Play notification sound (optional)
       try {
@@ -203,9 +233,12 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
       >
         <Bell className="w-5 h-5" />
         {unreadCount > 0 && (
-          <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 bg-red-500 text-white text-xs font-medium rounded-full flex items-center justify-center">
-            {unreadCount > 99 ? '99+' : unreadCount}
-          </span>
+          <>
+            <span className="absolute -top-0.5 -right-0.5 w-[18px] h-[18px] bg-red-400 rounded-full animate-ping" />
+            <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 bg-red-500 text-white text-xs font-medium rounded-full flex items-center justify-center">
+              {unreadCount > 99 ? '99+' : unreadCount}
+            </span>
+          </>
         )}
       </button>
 
@@ -214,7 +247,14 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
         <div className="absolute right-0 mt-2 w-96 max-h-[32rem] bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden z-50">
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
-            <h3 className="font-semibold text-gray-900">Notifications</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="font-semibold text-gray-900">Notifications</h3>
+              {unreadCount > 0 && (
+                <span className="px-1.5 py-0.5 text-xs font-medium text-purple-700 bg-purple-100 rounded-full">
+                  {unreadCount} new
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-1">
               <button
                 onClick={() => fetchNotifications(true)}
@@ -257,20 +297,33 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
                 <Loader2 className="w-6 h-6 animate-spin text-purple-600" />
               </div>
             ) : notifications.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-12 text-gray-500">
-                <Bell className="w-12 h-12 text-gray-300 mb-3" />
-                <p className="text-sm">No notifications yet</p>
+              <div className="flex flex-col items-center justify-center py-14 px-6 text-center">
+                <div className="w-14 h-14 rounded-full bg-purple-50 flex items-center justify-center mb-3">
+                  <Bell className="w-6 h-6 text-purple-300" />
+                </div>
+                <p className="text-sm font-medium text-gray-700">You're all caught up</p>
+                <p className="text-xs text-gray-400 mt-1">New notifications will show up here</p>
               </div>
             ) : (
-              <div className="divide-y divide-gray-50">
-                {notifications.map((notification) => (
-                  <NotificationItem
-                    key={notification.id}
-                    notification={notification}
-                    onMarkAsRead={handleMarkAsRead}
-                    onDelete={handleDelete}
-                    onClick={handleNotificationClick}
-                  />
+              <div>
+                {groupedNotifications.map((group) => (
+                  <div key={group.label}>
+                    <div className="px-3 pt-3 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                      {group.label}
+                    </div>
+                    <div className="divide-y divide-gray-50">
+                      {group.items.map((notification) => (
+                        <NotificationItem
+                          key={notification.id}
+                          notification={notification}
+                          onMarkAsRead={handleMarkAsRead}
+                          onDelete={handleDelete}
+                          onClick={handleNotificationClick}
+                          isNew={notification.id === newlyArrivedId}
+                        />
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             )}

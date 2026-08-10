@@ -10,6 +10,7 @@ import adminService, {
 } from '../api/services/adminService';
 import { Users, PhilippinePeso, TrendingUp, AlertCircle, Search, Filter, Eye, X, CheckCircle, XCircle, Clock, Shield, FileText, Download, MessageSquare } from 'lucide-react';
 import { BookingDisputesPanel } from './BookingDisputesPanel';
+import { SupportChat } from './SupportChat';
 import { getUploadUrl } from '../api/config';
 
 type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit' | 'support';
@@ -64,9 +65,7 @@ export function AdminDashboard() {
   const [supportTicketsTotal, setSupportTicketsTotal] = useState(0);
   const [supportStatusFilter, setSupportStatusFilter] = useState('open');
   const [supportPage, setSupportPage] = useState(0);
-  const [showSupportReplyModal, setShowSupportReplyModal] = useState<AdminSupportTicket | null>(null);
-  const [supportReplyText, setSupportReplyText] = useState('');
-  const [supportReplyStatus, setSupportReplyStatus] = useState('resolved');
+  const [selectedSupportTicketId, setSelectedSupportTicketId] = useState<string | null>(null);
 
   // Modal states
   const [showRejectModal, setShowRejectModal] = useState<string | null>(null);
@@ -181,6 +180,10 @@ export function AdminDashboard() {
     });
     setSupportTickets(resp.data);
     setSupportTicketsTotal(resp.meta.total);
+    setSelectedSupportTicketId((prev) => {
+      if (prev && resp.data.some((t) => t.id === prev)) return prev;
+      return resp.data[0]?.id || null;
+    });
   };
 
   // Action handlers
@@ -240,31 +243,6 @@ export function AdminDashboard() {
   const handleSupportStatusChange = async (id: string, status: string) => {
     try {
       await adminService.updateSupportTicket(id, { status });
-      await loadSupportTicketsData();
-    } catch (err: any) {
-      alert(err.message);
-    }
-  };
-
-  const openSupportReplyModal = (ticket: AdminSupportTicket) => {
-    setShowSupportReplyModal(ticket);
-    setSupportReplyText('');
-    setSupportReplyStatus('resolved');
-  };
-
-  const handleSupportReplyConfirm = async () => {
-    if (!showSupportReplyModal) return;
-    if (!supportReplyText.trim()) {
-      alert('Please write a reply before sending.');
-      return;
-    }
-    try {
-      await adminService.updateSupportTicket(showSupportReplyModal.id, {
-        admin_reply: supportReplyText.trim(),
-        status: supportReplyStatus,
-      });
-      setShowSupportReplyModal(null);
-      setSupportReplyText('');
       await loadSupportTicketsData();
     } catch (err: any) {
       alert(err.message);
@@ -1086,68 +1064,62 @@ export function AdminDashboard() {
         </select>
       </div>
 
-      {/* Tickets list */}
-      <div className="space-y-4">
-        {supportTickets.map((ticket) => {
-          const badge = SUPPORT_STATUS_BADGE[ticket.status] || SUPPORT_STATUS_BADGE.open;
-          return (
-            <div key={ticket.id} className="bg-white rounded-2xl shadow-sm p-6">
-              <div className="flex justify-between items-start gap-4">
-                <div>
-                  <div className="flex items-center gap-2 text-sm">
-                    <span className="font-medium text-gray-900">{ticket.subject}</span>
-                  </div>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {ticket.user_name} ({ticket.user_email}) • {ticket.user_role}
-                    {ticket.service_title && ` • re: ${ticket.service_title}`}
-                    {' • '}{formatDate(ticket.created_at)}
-                  </p>
+      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 items-start">
+        {/* Ticket list */}
+        <div className="bg-white rounded-2xl shadow-sm p-2 space-y-1 max-h-[640px] overflow-y-auto">
+          {supportTickets.map((ticket) => {
+            const badge = SUPPORT_STATUS_BADGE[ticket.status] || SUPPORT_STATUS_BADGE.open;
+            const isSelected = ticket.id === selectedSupportTicketId;
+            return (
+              <button
+                key={ticket.id}
+                onClick={() => setSelectedSupportTicketId(ticket.id)}
+                className={`w-full text-left p-3 rounded-xl transition-colors ${isSelected ? 'bg-purple-50 border border-purple-200' : 'hover:bg-gray-50 border border-transparent'}`}
+              >
+                <div className="flex items-start justify-between gap-2 mb-1">
+                  <span className="text-sm font-medium text-gray-900 truncate">{ticket.user_name}</span>
+                  <span className={`px-2 py-0.5 text-xs font-medium rounded-full flex-shrink-0 ${badge.className}`}>{badge.label}</span>
                 </div>
-                <span className={`px-2 py-1 text-xs font-medium rounded-full flex-shrink-0 ${badge.className}`}>
-                  {badge.label}
-                </span>
-              </div>
-              <p className="mt-3 text-gray-700 whitespace-pre-wrap">{ticket.message}</p>
-              {ticket.admin_reply && (
-                <div className="mt-3 bg-purple-50 rounded-lg p-3">
-                  <p className="text-xs font-medium text-purple-700 mb-1">
-                    Your reply {ticket.replied_at ? `• ${formatDate(ticket.replied_at)}` : ''}
-                  </p>
-                  <p className="text-sm text-purple-900 whitespace-pre-wrap">{ticket.admin_reply}</p>
+                <p className="text-xs text-gray-500 truncate mb-1">{ticket.subject}</p>
+                <p className="text-xs text-gray-400 truncate">{ticket.last_message || ticket.message}</p>
+                <div className="flex items-center justify-between mt-1">
+                  <span className="text-xs text-gray-400">{formatDate(ticket.last_message_at || ticket.created_at)}</span>
+                  {(ticket.unread_count || 0) > 0 && <span className="w-2 h-2 rounded-full bg-purple-600" />}
                 </div>
-              )}
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  onClick={() => openSupportReplyModal(ticket)}
-                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium"
-                >
-                  {ticket.admin_reply ? 'Reply again' : 'Reply'}
-                </button>
-                {ticket.status !== 'in_progress' && ticket.status !== 'resolved' && (
-                  <button
-                    onClick={() => handleSupportStatusChange(ticket.id, 'in_progress')}
-                    className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-sm font-medium"
-                  >
-                    Mark In Progress
-                  </button>
-                )}
-                {ticket.status !== 'resolved' && (
-                  <button
-                    onClick={() => handleSupportStatusChange(ticket.id, 'resolved')}
-                    className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-sm font-medium"
-                  >
-                    Mark Resolved
-                  </button>
-                )}
-              </div>
+              </button>
+            );
+          })}
+          {supportTickets.length === 0 && (
+            <div className="p-8 text-center text-gray-500 text-sm">No support tickets found for this filter.</div>
+          )}
+        </div>
+
+        {/* Thread + status controls */}
+        <div className="space-y-3">
+          {selectedSupportTicketId && (
+            <div className="bg-white rounded-2xl shadow-sm p-3 flex flex-wrap gap-2">
+              <button
+                onClick={() => handleSupportStatusChange(selectedSupportTicketId, 'open')}
+                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-xs font-medium"
+              >
+                Mark Open
+              </button>
+              <button
+                onClick={() => handleSupportStatusChange(selectedSupportTicketId, 'in_progress')}
+                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-xs font-medium"
+              >
+                Mark In Progress
+              </button>
+              <button
+                onClick={() => handleSupportStatusChange(selectedSupportTicketId, 'resolved')}
+                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-xs font-medium"
+              >
+                Mark Resolved
+              </button>
             </div>
-          );
-        })}
-        {supportTickets.length === 0 && (
-          <div className="bg-white rounded-2xl shadow-sm p-12 text-center text-gray-500">
-            No support tickets found for this filter.
-          </div>
-        )}
+          )}
+          <SupportChat mode="admin" ticketId={selectedSupportTicketId} className="h-[560px]" />
+        </div>
       </div>
 
       {/* Pagination */}
@@ -1276,45 +1248,6 @@ export function AdminDashboard() {
               >
                 {showReviewActionModal.action === 'reject' ? 'Reject' : showReviewActionModal.action === 'flag' ? 'Flag' : 'Delete'}
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Support Ticket Reply Modal */}
-      {showSupportReplyModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-lg w-full">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-medium text-gray-900">Reply to "{showSupportReplyModal.subject}"</h3>
-              <button onClick={() => { setShowSupportReplyModal(null); setSupportReplyText(''); }} className="text-gray-400 hover:text-gray-600">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="bg-gray-50 rounded-xl p-3 mb-4 text-sm text-gray-600 max-h-32 overflow-y-auto whitespace-pre-wrap">
-              {showSupportReplyModal.message}
-            </div>
-            <textarea
-              value={supportReplyText}
-              onChange={(e) => setSupportReplyText(e.target.value)}
-              placeholder="Write your reply..."
-              className="w-full border border-gray-200 rounded-xl p-3 h-32 focus:ring-2 focus:ring-purple-500 outline-none"
-            />
-            <div className="mt-3">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Set status to</label>
-              <select
-                value={supportReplyStatus}
-                onChange={(e) => setSupportReplyStatus(e.target.value)}
-                className="w-full border border-gray-200 rounded-xl p-3 focus:ring-2 focus:ring-purple-500 outline-none"
-              >
-                <option value="resolved">Resolved</option>
-                <option value="in_progress">In Progress</option>
-                <option value="open">Open</option>
-              </select>
-            </div>
-            <div className="mt-4 flex justify-end gap-3">
-              <button onClick={() => { setShowSupportReplyModal(null); setSupportReplyText(''); }} className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
-              <button onClick={handleSupportReplyConfirm} className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">Send Reply</button>
             </div>
           </div>
         </div>

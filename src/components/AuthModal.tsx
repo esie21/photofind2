@@ -3,6 +3,7 @@ import { X, Mail, Loader, AlertCircle, Eye, EyeOff, ArrowLeft, Check, Camera, Us
 import { GoogleLogin, CredentialResponse } from '@react-oauth/google';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { TermsContent } from './TermsContent';
 
 interface AuthModalProps {
   mode: 'login' | 'signup';
@@ -90,6 +91,8 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
   const [checkingEmail, setCheckingEmail] = useState(false);
   const [googleCredential, setGoogleCredential] = useState<string | null>(null);
   const [googleProfile, setGoogleProfile] = useState<{ email: string; name: string } | null>(null);
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [showTermsPreview, setShowTermsPreview] = useState(false);
 
   // Reset form when modal opens or mode changes
   useEffect(() => {
@@ -106,6 +109,7 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
     setShowConfirmPassword(false);
     setGoogleCredential(null);
     setGoogleProfile(null);
+    setAgreedToTerms(false);
   }, [mode]);
 
   const passwordStrength = getPasswordStrength(password);
@@ -152,6 +156,7 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
     setSelectedRole(null);
     setGoogleCredential(null);
     setGoogleProfile(null);
+    setAgreedToTerms(false);
   };
 
   const checkEmailAvailability = async (emailToCheck: string): Promise<boolean> => {
@@ -220,6 +225,7 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
           credential: googleCredential,
           role,
           intent: 'signup',
+          termsAccepted: agreedToTerms,
         });
         if (response.needsRole || !response.user) {
           throw new Error('Could not complete Google sign-up. Please try again.');
@@ -235,6 +241,7 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
         password,
         name,
         role,
+        termsAccepted: agreedToTerms,
       });
       toast.success('Account created!', `Welcome to PhotoFind, ${name}!`);
       onSuccess(role);
@@ -618,10 +625,30 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
                 </div>
               )}
 
+              <label className="mb-4 flex items-start gap-3 p-3 rounded-xl hover:bg-gray-50 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={agreedToTerms}
+                  onChange={(e) => setAgreedToTerms(e.target.checked)}
+                  className="mt-0.5 w-4 h-4"
+                  style={{ accentColor: '#9333ea' }}
+                />
+                <span className="text-sm text-gray-600">
+                  I agree to the{' '}
+                  <button
+                    type="button"
+                    onClick={() => setShowTermsPreview(true)}
+                    className="text-purple-600 hover:underline"
+                  >
+                    Terms & Conditions
+                  </button>
+                </span>
+              </label>
+
               <div className="space-y-4">
                 <button
                   onClick={() => handleRoleSelect('client')}
-                  disabled={loading}
+                  disabled={loading || !agreedToTerms}
                   className={`w-full p-6 border-2 rounded-2xl transition-all text-left disabled:opacity-50 ${
                     selectedRole === 'client'
                       ? 'border-purple-500 bg-purple-50'
@@ -646,7 +673,7 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
 
                 <button
                   onClick={() => handleRoleSelect('provider')}
-                  disabled={loading}
+                  disabled={loading || !agreedToTerms}
                   className={`w-full p-6 border-2 rounded-2xl transition-all text-left disabled:opacity-50 ${
                     selectedRole === 'provider'
                       ? 'border-pink-500 bg-pink-50'
@@ -673,6 +700,30 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
           )}
         </div>
       </div>
+
+      {showTermsPreview && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[80vh] flex flex-col">
+            <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center justify-between rounded-t-2xl">
+              <h3 className="text-gray-900 font-medium">Terms & Conditions</h3>
+              <button onClick={() => setShowTermsPreview(false)} className="p-1 hover:bg-gray-100 rounded-lg">
+                <X className="w-5 h-5 text-gray-600" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto">
+              <TermsContent />
+            </div>
+            <div className="border-t border-gray-200 p-4 flex justify-end">
+              <button
+                onClick={() => setShowTermsPreview(false)}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

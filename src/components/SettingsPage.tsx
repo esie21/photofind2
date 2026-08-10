@@ -1,9 +1,13 @@
 import { useState } from 'react';
-import { Lock, Bell, Shield } from 'lucide-react';
+import { Lock, Bell, Shield, FileText } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 
-export function SettingsPage() {
+interface SettingsPageProps {
+  onGoToTerms?: () => void;
+}
+
+export function SettingsPage({ onGoToTerms }: SettingsPageProps = {}) {
   const { user } = useAuth();
   const toast = useToast();
   const [emailNotifications, setEmailNotifications] = useState(true);
@@ -108,6 +112,24 @@ export function SettingsPage() {
               <div className="flex-1">
                 <div className="text-sm text-gray-900">Data & privacy</div>
                 <div className="text-xs text-gray-500">Control what's visible to others</div>
+              </div>
+            </button>
+          </div>
+
+          {/* Legal */}
+          <div className="bg-white rounded-2xl shadow-sm p-6">
+            <h2 className="text-gray-900 mb-4">Legal</h2>
+            <button
+              onClick={() => onGoToTerms?.()}
+              disabled={!onGoToTerms}
+              className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-50 transition-colors text-left disabled:cursor-default disabled:hover:bg-transparent"
+            >
+              <span className="w-9 h-9 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center flex-shrink-0">
+                <FileText className="w-4 h-4" />
+              </span>
+              <div className="flex-1">
+                <div className="text-sm text-gray-900">Terms & Conditions</div>
+                <div className="text-xs text-gray-500">Read the terms you agreed to when you signed up</div>
               </div>
             </button>
           </div>

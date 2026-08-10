@@ -9,6 +9,7 @@ export interface LoginCredentials {
 export interface SignupData extends LoginCredentials {
   name: string;
   role: 'client' | 'provider' | 'admin';
+  termsAccepted: boolean;
 }
 
 export interface AuthResponse {
@@ -76,6 +77,7 @@ const authService = {
     credential: string;
     role?: 'client' | 'provider';
     intent: 'login' | 'signup';
+    termsAccepted?: boolean;
   }): Promise<GoogleAuthResponse> {
     const response = await apiClient.post<GoogleAuthResponse>(
       API_CONFIG.ENDPOINTS.AUTH.GOOGLE,

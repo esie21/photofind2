@@ -171,9 +171,24 @@ notificationService.setSocketIO(io);
 
 type PresenceMap = Map<string, Set<string>>;
 const bookingPresence: PresenceMap = new Map();
+const supportPresence: PresenceMap = new Map();
 
 function getRoomName(bookingId: string) {
   return `booking:${bookingId}`;
+}
+
+function getSupportRoomName(ticketId: string) {
+  return `support:${ticketId}`;
+}
+
+async function canAccessSupportTicket(ticketId: string, userId: string): Promise<boolean> {
+  const ticketRes = await pool.query('SELECT user_id FROM support_tickets WHERE id::text = $1', [ticketId]);
+  const ticket = ticketRes.rows[0];
+  if (!ticket) return false;
+  if (String(ticket.user_id) === userId) return true;
+
+  const userRes = await pool.query('SELECT role FROM users WHERE id::text = $1', [userId]);
+  return userRes.rows[0]?.role === 'admin';
 }
 
 async function ensureBookingChat(bookingId: string) {
@@ -209,6 +224,19 @@ function removePresence(bookingId: string, userId: string) {
   if (set.size === 0) bookingPresence.delete(bookingId);
 }
 
+function addSupportPresence(ticketId: string, userId: string) {
+  const set = supportPresence.get(ticketId) || new Set<string>();
+  set.add(userId);
+  supportPresence.set(ticketId, set);
+}
+
+function removeSupportPresence(ticketId: string, userId: string) {
+  const set = supportPresence.get(ticketId);
+  if (!set) return;
+  set.delete(userId);
+  if (set.size === 0) supportPresence.delete(ticketId);
+}
+
 io.use((socket: Socket, next: (err?: Error) => void) => {
   const token =
     (socket.handshake.auth as any)?.token ||
@@ -228,6 +256,7 @@ io.use((socket: Socket, next: (err?: Error) => void) => {
 io.on('connection', (socket: Socket) => {
   const userId = String((socket.data as any).userId || '');
   (socket.data as any).joinedBookings = new Set<string>();
+  (socket.data as any).joinedSupportTickets = new Set<string>();
 
   // Join user's personal notification room
   if (userId) {
@@ -318,11 +347,65 @@ io.on('connection', (socket: Socket) => {
     });
   });
 
+  socket.on('support:join', async (payload: any) => {
+    const ticketId = String(payload?.ticketId || '');
+    if (!ticketId) return;
+
+    const allowed = await canAccessSupportTicket(ticketId, userId);
+    if (!allowed) return;
+
+    const room = getSupportRoomName(ticketId);
+    socket.join(room);
+    (socket.data as any).joinedSupportTickets.add(ticketId);
+    addSupportPresence(ticketId, userId);
+    io.to(room).emit('support:presence', { ticketId, userId, online: true });
+  });
+
+  socket.on('support:typing', (payload: any) => {
+    const ticketId = String(payload?.ticketId || '');
+    const isTyping = Boolean(payload?.isTyping);
+    if (!ticketId) return;
+    socket.to(getSupportRoomName(ticketId)).emit('support:typing', {
+      ticketId,
+      userId,
+      isTyping,
+    });
+  });
+
+  socket.on('support:read', async (payload: any) => {
+    const ticketId = String(payload?.ticketId || '');
+    if (!ticketId) return;
+
+    const allowed = await canAccessSupportTicket(ticketId, userId);
+    if (!allowed) return;
+
+    const viewerRes = await pool.query('SELECT role FROM users WHERE id::text = $1', [userId]);
+    const readerRole = viewerRes.rows[0]?.role === 'admin' ? 'user' : 'admin';
+
+    await pool.query(
+      `UPDATE support_messages SET read_at = CURRENT_TIMESTAMP
+       WHERE ticket_id::text = $1 AND sender_role = $2 AND read_at IS NULL`,
+      [ticketId, readerRole]
+    );
+
+    io.to(getSupportRoomName(ticketId)).emit('support:read', {
+      ticketId,
+      readerId: userId,
+      readAt: new Date().toISOString(),
+    });
+  });
+
   socket.on('disconnect', () => {
     const joined: Set<string> = (socket.data as any).joinedBookings || new Set<string>();
     joined.forEach((bookingId) => {
       removePresence(bookingId, userId);
       io.to(getRoomName(bookingId)).emit('chat:presence', { bookingId, userId, online: false });
+    });
+
+    const joinedTickets: Set<string> = (socket.data as any).joinedSupportTickets || new Set<string>();
+    joinedTickets.forEach((ticketId) => {
+      removeSupportPresence(ticketId, userId);
+      io.to(getSupportRoomName(ticketId)).emit('support:presence', { ticketId, userId, online: false });
     });
   });
 });

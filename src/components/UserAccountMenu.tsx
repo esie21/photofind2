@@ -100,7 +100,10 @@ export function UserAccountMenu({ onNavigate }: UserAccountMenuProps) {
 
           {/* Account menu */}
           <div className="py-2">
-            {MENU_ITEMS.filter(({ target }) => !(target === 'bookings' && (user.role === 'provider' || user.role === 'admin'))).map(({ target, label, icon: Icon }) => (
+            {MENU_ITEMS.filter(({ target }) =>
+              !(target === 'bookings' && (user.role === 'provider' || user.role === 'admin')) &&
+              !(target === 'wallet' && user.role !== 'provider')
+            ).map(({ target, label, icon: Icon }) => (
               <button
                 key={target}
                 role="menuitem"

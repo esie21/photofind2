@@ -22,6 +22,7 @@ interface AuthRequest extends Request {
     password: string;
     name?: string;
     role?: string;
+    termsAccepted?: boolean;
   };
 }
 
@@ -152,10 +153,11 @@ router.post('/login', async (req: AuthRequest, res: Response) => {
 // Google Sign-In
 router.post('/google', async (req: Request, res: Response) => {
   try {
-    const { credential, role, intent } = req.body as {
+    const { credential, role, intent, termsAccepted } = req.body as {
       credential?: string;
       role?: 'client' | 'provider';
       intent?: 'login' | 'signup';
+      termsAccepted?: boolean;
     };
 
     if (!credential) {
@@ -222,10 +224,14 @@ router.post('/google', async (req: Request, res: Response) => {
         });
       }
 
+      if (termsAccepted !== true) {
+        return res.status(400).json({ error: 'You must agree to the Terms and Conditions to create an account' });
+      }
+
       const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
       const created = await pool.query(
-        `INSERT INTO users (email, name, password_hash, role, google_id, profile_image)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO users (email, name, password_hash, role, google_id, profile_image, terms_accepted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
          RETURNING id, email, name, role`,
         [email, name, passwordHash, role, googleId, picture]
       );
@@ -271,10 +277,14 @@ router.post('/check-email', async (req: Request, res: Response) => {
 // Signup endpoint
 router.post('/signup', async (req: AuthRequest, res: Response) => {
   try {
-    const { email, password, name, role } = req.body;
+    const { email, password, name, role, termsAccepted } = req.body;
 
     if (!email || !password || !name) {
       return res.status(400).json({ error: 'Email, password, and name required' });
+    }
+
+    if (termsAccepted !== true) {
+      return res.status(400).json({ error: 'You must agree to the Terms and Conditions to create an account' });
     }
 
     // Validate email format
@@ -312,7 +322,7 @@ router.post('/signup', async (req: AuthRequest, res: Response) => {
 
     // Insert new user (parameterized query - SQL injection safe)
     const result = await pool.query(
-      'INSERT INTO users (email, name, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, email, role, name',
+      'INSERT INTO users (email, name, password_hash, role, terms_accepted_at) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP) RETURNING id, email, role, name',
       [email.toLowerCase().trim(), name.trim(), passwordHash, userRole]
     );
 

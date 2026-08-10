@@ -15,6 +15,7 @@ import { ChatInterface } from './components/ChatInterface';
 import { MessagesPage } from './components/MessagesPage';
 import { SettingsPage } from './components/SettingsPage';
 import { HelpSupportPage } from './components/HelpSupportPage';
+import { TermsPage } from './components/TermsPage';
 import { BookingsPage } from './components/BookingsPage';
 import { AccountMenuTarget } from './components/UserAccountMenu';
 import { Notification } from './api/services/notificationService';
@@ -30,7 +31,7 @@ interface ChatContext {
 }
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'messages' | 'reset-password' | 'settings' | 'help' | 'bookings'>('landing');
+  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'messages' | 'reset-password' | 'settings' | 'help' | 'bookings' | 'terms'>('landing');
   const { user } = useAuth();
   const toast = useToast();
   const [bookingContext, setBookingContext] = useState<{ providerId?: string; providerName?: string; providerImage?: string; serviceId?: string } | null>(null);
@@ -301,9 +302,10 @@ export default function App() {
 
       <main>
         {currentView === 'reset-password' && <ResetPasswordPage />}
-        {currentView === 'settings' && <SettingsPage />}
+        {currentView === 'settings' && <SettingsPage onGoToTerms={() => setCurrentView('terms')} />}
         {currentView === 'bookings' && <BookingsPage />}
         {currentView === 'help' && <HelpSupportPage onGoToBookings={() => handleAccountMenuNavigate('bookings')} />}
+        {currentView === 'terms' && <TermsPage />}
         {currentView === 'landing' && (
           <LandingPage
             onViewChange={handleViewChange}
