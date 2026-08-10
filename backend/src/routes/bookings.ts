@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
+import { paymongoRequest, createRefund } from '../services/paymongoService';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -1800,6 +1801,32 @@ export async function autoConfirmPastCompletions() {
           console.error('Failed to send auto-confirm notifications (non-fatal):', notifError);
         }
 
+        // Post a system chat message and push it live, same as the manual confirm path,
+        // so anyone with the booking's chat open sees it instead of it going silently stale.
+        try {
+          const chatId = await ensureBookingChatExists(String(booking.id), clientUserId, providerUserId);
+          if (chatId) {
+            const inserted = await pool.query(
+              `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+               VALUES ($1, NULL, $2, TRUE)
+               RETURNING id, chat_id, sender_id, content, attachment_url, attachment_type, attachment_name, is_system, created_at, read_at`,
+              [chatId, 'This booking was automatically marked complete after 48 hours with no response, and payment has been released.']
+            );
+            await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+            const io = notificationService.getSocketIO();
+            if (io) {
+              io.to(`booking:${booking.id}`).emit('chat:message', {
+                bookingId: String(booking.id),
+                message: inserted.rows[0],
+              });
+              io.to(`booking:${booking.id}`).emit('booking:completed', { bookingId: String(booking.id), paymentReleased, releasedAmount });
+            }
+          }
+        } catch (chatError) {
+          console.error('Failed to send auto-confirm chat message (non-fatal):', chatError);
+        }
+
       } catch (bookingError) {
         await txClient.query('ROLLBACK');
         console.error(`Failed to auto-confirm booking ${booking.id}:`, bookingError);
@@ -1838,6 +1865,21 @@ export async function sendConfirmationWarnings() {
 
     for (const booking of warningNeeded.rows) {
       try {
+        // Atomically claim this booking before doing any work, so an overlapping run
+        // (or a slow run still in flight when the next interval fires) can't also send
+        // a warning for the same booking - only one UPDATE can win the IS NULL check.
+        const claimRes = await pool.query(
+          `UPDATE bookings
+           SET confirmation_warning_sent_at = CURRENT_TIMESTAMP
+           WHERE id::text = $1 AND confirmation_warning_sent_at IS NULL
+           RETURNING id`,
+          [String(booking.id)]
+        );
+        if (claimRes.rows.length === 0) {
+          // Another run already claimed and warned this booking - skip.
+          continue;
+        }
+
         // Resolve client user ID
         let clientUserId = String(booking.client_id);
         try {
@@ -1887,14 +1929,6 @@ export async function sendConfirmationWarnings() {
             auto_confirm_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
           }
         });
-
-        // Mark as warned
-        await pool.query(
-          `UPDATE bookings
-           SET confirmation_warning_sent_at = CURRENT_TIMESTAMP
-           WHERE id::text = $1`,
-          [String(booking.id)]
-        );
 
         console.log(`Sent confirmation warning for booking ${booking.id} to client ${clientUserId}`);
       } catch (bookingError) {
@@ -2002,7 +2036,9 @@ export async function autoResolveStaleDisputes() {
           [String(booking.id), autoResolution]
         );
 
-        // Release payment to provider
+        // Release payment to provider. This path always favors the provider (that's the
+        // whole point of the timeout), so there's never a client refund to issue here -
+        // no PayMongo call needed, unlike the admin resolve-dispute path.
         let paymentReleased = false;
         let releasedAmount = 0;
 
@@ -2097,6 +2133,38 @@ export async function autoResolveStaleDisputes() {
 
         console.log(`Auto-resolved dispute for booking ${booking.id} in favor of provider. Payment released: ${paymentReleased}`);
 
+        // Post a system chat message and push it live, same as the manual admin-resolve
+        // path, so anyone with the booking's chat/dispute view open sees it happen.
+        try {
+          const chatId = await ensureBookingChatExists(String(booking.id), clientUserId, providerUserId);
+          if (chatId) {
+            const inserted = await pool.query(
+              `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+               VALUES ($1, NULL, $2, TRUE)
+               RETURNING id, chat_id, sender_id, content, attachment_url, attachment_type, attachment_name, is_system, created_at, read_at`,
+              [chatId, `This dispute was automatically resolved in favor of the provider after ${DISPUTE_TIMEOUT_DAYS} days without admin action.`]
+            );
+            await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+            const io = notificationService.getSocketIO();
+            if (io) {
+              io.to(`booking:${booking.id}`).emit('chat:message', {
+                bookingId: String(booking.id),
+                message: inserted.rows[0],
+              });
+              io.to(`booking:${booking.id}`).emit('booking:dispute_resolved', {
+                bookingId: String(booking.id),
+                resolved_in_favor_of: 'provider',
+                final_status: 'completed',
+                paymentReleased,
+                releasedAmount,
+              });
+            }
+          }
+        } catch (chatError) {
+          console.error('Failed to send dispute auto-resolve chat message (non-fatal):', chatError);
+        }
+
       } catch (bookingError) {
         await txClient.query('ROLLBACK');
         console.error(`Failed to auto-resolve dispute for booking ${booking.id}:`, bookingError);
@@ -2167,6 +2235,20 @@ router.post('/:id/complete', verifyToken, evidenceUpload.array('evidence', 10), 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // Re-check status under a row lock so two concurrent complete requests
+      // (retry, double tab, etc.) can't both pass the earlier unlocked check.
+      const lockRes = await client.query(
+        `SELECT status FROM bookings WHERE id::text = $1 FOR UPDATE`,
+        [bookingId]
+      );
+      if (!lockRes.rows[0] || !['accepted', 'confirmed'].includes(lockRes.rows[0].status)) {
+        await client.query('ROLLBACK');
+        for (const file of files) {
+          try { fs.unlinkSync(file.path); } catch {}
+        }
+        return res.status(409).json({ error: 'This booking was already marked complete.' });
+      }
 
       // Parse evidence types (can be JSON array or comma-separated)
       let types: string[] = [];
@@ -2783,15 +2865,24 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
 
     // Get payment info
     const paymentRes = await dbClient.query(
-      `SELECT id, net_provider_amount, amount, status FROM payments WHERE booking_id::text = $1`,
+      `SELECT id, gross_amount, net_provider_amount, status, paymongo_payment_id, paymongo_payment_intent_id
+       FROM payments WHERE booking_id::text = $1`,
       [bookingId]
     );
     const payment = paymentRes.rows[0];
-    const paymentAmount = payment ? parseFloat(payment.net_provider_amount || payment.amount || 0) : 0;
+    // escrowAmount is what's actually sitting in the provider's wallet pending_balance
+    // (net of platform commission) - used only for wallet math below.
+    const escrowAmount = payment ? parseFloat(payment.net_provider_amount || 0) : 0;
+    // grossAmount is what the client actually paid via PayMongo - the real refund basis.
+    const grossAmount = payment ? parseFloat(payment.gross_amount || 0) : 0;
 
-    // Calculate refund and release amounts
-    const refundAmount = (paymentAmount * refundPct) / 100;
-    const releaseAmount = paymentAmount - refundAmount;
+    // Calculate escrow release/hold-back amounts (wallet-side bookkeeping only)
+    const refundAmount = (escrowAmount * refundPct) / 100;
+    const releaseAmount = escrowAmount - refundAmount;
+    // clientRefundAmount is what actually gets refunded to the client via PayMongo -
+    // must be based on gross_amount, not the commission-reduced escrow amount, or the
+    // client is shortchanged by the platform's cut.
+    const clientRefundAmount = Math.round(((grossAmount * refundPct) / 100) * 100) / 100;
 
     // Determine final status based on resolution. A partial refund still leaves the
     // provider paid for the work, so treat any released amount as a completed booking
@@ -2822,8 +2913,43 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
     let paymentReleased = false;
     let releasedAmount = 0;
     let refundedAmount = 0;
+    let paymongoRefundResult: { id: string; status: string } | null = null;
 
     if (payment && payment.status === 'succeeded') {
+      // If the client is owed money back, issue a real PayMongo refund first, before
+      // touching any balances. Nothing has been COMMITted yet, so if this throws, the
+      // outer catch rolls back the booking status update too - the booking stays
+      // 'disputed' and the admin can safely retry. The idempotency key is deterministic
+      // per booking, so a retry after a failure makes PayMongo return the same refund
+      // resource instead of refunding twice.
+      if (clientRefundAmount > 0) {
+        try {
+          let paymongoPaymentId = payment.paymongo_payment_id;
+          if (!paymongoPaymentId && payment.paymongo_payment_intent_id) {
+            // Payment may have succeeded before paymongo_payment_id capture existed -
+            // self-heal by reading it live off the payment intent.
+            const intentRes = await paymongoRequest(`/payment_intents/${payment.paymongo_payment_intent_id}`, 'GET');
+            paymongoPaymentId = intentRes.data.attributes.payments?.[0]?.id || null;
+          }
+          if (!paymongoPaymentId) {
+            throw new Error('No PayMongo payment ID on file for this payment; it may predate refund tracking and requires a manual refund via the PayMongo dashboard.');
+          }
+
+          const refundRes = await createRefund(
+            paymongoPaymentId,
+            Math.round(clientRefundAmount * 100),
+            'others',
+            `Dispute resolution for booking #${bookingId}`,
+            `dispute_refund_${bookingId}`
+          );
+          paymongoRefundResult = { id: refundRes.data.id, status: refundRes.data.attributes.status };
+        } catch (refundError: any) {
+          const err: any = new Error(`PayMongo refund failed: ${refundError.message}`);
+          err.isPaymongoRefundFailure = true;
+          throw err;
+        }
+      }
+
       // Get provider's wallet with FOR UPDATE lock
       const walletRes = await dbClient.query(
         `SELECT id, pending_balance, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
@@ -2845,16 +2971,16 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
       const currentAvailable = parseFloat(wallet.available_balance) || 0;
 
       // Validate: ensure pending balance is sufficient
-      if (currentPending < paymentAmount) {
-        console.warn(`Warning: Pending balance (${currentPending}) is less than payment amount (${paymentAmount}) for booking ${bookingId}`);
+      if (currentPending < escrowAmount) {
+        console.warn(`Warning: Pending balance (${currentPending}) is less than escrow amount (${escrowAmount}) for booking ${bookingId}`);
         // Adjust to what's available in pending
-        const actualPaymentAmount = Math.min(currentPending, paymentAmount);
-        const actualRefund = (actualPaymentAmount * refundPct) / 100;
-        const actualRelease = actualPaymentAmount - actualRefund;
+        const actualEscrowAmount = Math.min(currentPending, escrowAmount);
+        const actualRefund = (actualEscrowAmount * refundPct) / 100;
+        const actualRelease = actualEscrowAmount - actualRefund;
 
         if (actualRelease > 0) {
           // Release partial amount to provider
-          const newPending = currentPending - actualPaymentAmount;
+          const newPending = currentPending - actualEscrowAmount;
           const newAvailable = currentAvailable + actualRelease;
 
           await dbClient.query(
@@ -2873,25 +2999,19 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
         }
 
         if (actualRefund > 0) {
-          // Record refund transaction (funds removed from pending, refund to client)
+          // Record refund transaction against the provider's wallet ledger (this is the
+          // escrow-side hold-back, not the client-facing refund amount - see clientRefundAmount)
           await dbClient.query(
             `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
              VALUES ($1, $2, 'refund', $3, $4, $5, $6)`,
             [String(wallet.id), String(payment.id), -actualRefund, currentAvailable + (actualRelease || 0), `dispute_refund_${bookingId}`, `Refund issued after dispute resolved in client's favor (${refundPct}%)`]
-          );
-          refundedAmount = actualRefund;
-
-          // Update payment status to reflect partial/full refund
-          await dbClient.query(
-            `UPDATE payments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2`,
-            [refundPct === 100 ? 'refunded' : 'partially_refunded', String(payment.id)]
           );
         }
       } else {
         // Normal case: sufficient pending balance
         if (releaseAmount > 0) {
           // Release to provider
-          const newPending = currentPending - paymentAmount;
+          const newPending = currentPending - escrowAmount;
           const newAvailable = currentAvailable + releaseAmount;
 
           await dbClient.query(
@@ -2909,7 +3029,7 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
           releasedAmount = releaseAmount;
         } else {
           // Full refund case - just reduce pending balance
-          const newPending = currentPending - paymentAmount;
+          const newPending = currentPending - escrowAmount;
           await dbClient.query(
             `UPDATE wallets SET pending_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2`,
             [Math.max(0, newPending), String(wallet.id)]
@@ -2917,23 +3037,40 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
         }
 
         if (refundAmount > 0) {
-          // Record refund transaction
+          // Record refund transaction against the provider's wallet ledger (escrow-side
+          // hold-back only - see clientRefundAmount for what the client actually receives)
           await dbClient.query(
             `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
              VALUES ($1, $2, 'refund', $3, $4, $5, $6)`,
             [String(wallet.id), String(payment.id), -refundAmount, currentAvailable + (releaseAmount || 0), `dispute_refund_${bookingId}`, `Refund issued to client after dispute resolved (${refundPct}% refund)`]
           );
-          refundedAmount = refundAmount;
-
-          // Update payment status to reflect partial/full refund
-          await dbClient.query(
-            `UPDATE payments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2`,
-            [refundPct === 100 ? 'refunded' : 'partially_refunded', String(payment.id)]
-          );
         }
       }
 
-      console.log(`Dispute resolved for booking ${bookingId}: Released ₱${releasedAmount.toFixed(2)} to provider, Refunded ₱${refundedAmount.toFixed(2)} to client`);
+      // Consolidated payment status/refund bookkeeping - one update regardless of
+      // which wallet branch ran above.
+      if (clientRefundAmount > 0) {
+        refundedAmount = clientRefundAmount;
+        await dbClient.query(
+          `UPDATE payments
+           SET status = $1,
+               paymongo_refund_id = $2,
+               refund_status = $3,
+               refunded_amount = $4,
+               refunded_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id::text = $5`,
+          [
+            refundPct === 100 ? 'refunded' : 'partially_refunded',
+            paymongoRefundResult?.id || null,
+            paymongoRefundResult?.status || null,
+            refundedAmount,
+            String(payment.id)
+          ]
+        );
+      }
+
+      console.log(`Dispute resolved for booking ${bookingId}: Released ₱${releasedAmount.toFixed(2)} to provider, Refunded ₱${refundedAmount.toFixed(2)} to client${paymongoRefundResult ? ` (PayMongo refund ${paymongoRefundResult.id}, status: ${paymongoRefundResult.status})` : ''}`);
     }
 
     // Log audit entry for dispute resolution
@@ -2952,6 +3089,8 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
             refund_percentage: refundPct,
             released_amount: releasedAmount,
             refunded_amount: refundedAmount,
+            paymongo_refund_id: paymongoRefundResult?.id || null,
+            refund_status: paymongoRefundResult?.status || null,
             previous_status: booking.status,
             new_status: finalStatus
           }),
@@ -2965,29 +3104,35 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
 
     await dbClient.query('COMMIT');
 
-      // Notify both parties with resolved user IDs
-      await notificationService.notifyDisputeResolved(
-        clientUserId,
-        bookingId,
-        resolution,
-        resolved_in_favor_of
-      );
-      await notificationService.notifyDisputeResolved(
-        providerUserId,
-        bookingId,
-        resolution,
-        resolved_in_favor_of
-      );
-
-      // Notify provider about payment if released
-      if (paymentReleased) {
-        await notificationService.notifyPaymentReceived(
-          providerUserId,
+      // Notify both parties with resolved user IDs. The transaction already committed
+      // above, so a failure here must not be treated as "resolution failed" - log and
+      // continue, matching the audit-log and chat-message blocks around this.
+      try {
+        await notificationService.notifyDisputeResolved(
           clientUserId,
-          releasedAmount,
-          'Client',
-          bookingId
+          bookingId,
+          resolution,
+          resolved_in_favor_of
         );
+        await notificationService.notifyDisputeResolved(
+          providerUserId,
+          bookingId,
+          resolution,
+          resolved_in_favor_of
+        );
+
+        // Notify provider about payment if released
+        if (paymentReleased) {
+          await notificationService.notifyPaymentReceived(
+            providerUserId,
+            clientUserId,
+            releasedAmount,
+            'Client',
+            bookingId
+          );
+        }
+      } catch (notifyError) {
+        console.error('Failed to send dispute resolution notifications:', notifyError);
       }
 
       // Send system message in chat using resolved user IDs
@@ -3032,7 +3177,7 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
         responseMessage += ` ₱${releasedAmount.toFixed(2)} released to provider.`;
       }
       if (refundedAmount > 0) {
-        responseMessage += ` ₱${refundedAmount.toFixed(2)} refunded to client.`;
+        responseMessage += ` A refund of ₱${refundedAmount.toFixed(2)} was submitted to PayMongo${paymongoRefundResult ? ` (ref: ${paymongoRefundResult.id})` : ''}.`;
       }
 
       return res.json({
@@ -3041,12 +3186,20 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
         details: {
           released_to_provider: releasedAmount,
           refunded_to_client: refundedAmount,
-          refund_percentage: refundPct
+          refund_percentage: refundPct,
+          paymongo_refund_id: paymongoRefundResult?.id || null,
+          refund_status: paymongoRefundResult?.status || null
         }
       });
-  } catch (error) {
+  } catch (error: any) {
     await dbClient.query('ROLLBACK');
     console.error('Error resolving dispute:', error);
+    if (error?.isPaymongoRefundFailure) {
+      return res.status(502).json({
+        error: 'Refund could not be processed by PayMongo. The dispute was not resolved - please try again.',
+        detail: error.message
+      });
+    }
     return res.status(500).json({ error: 'Failed to resolve dispute' });
   } finally {
     dbClient.release();

@@ -81,6 +81,7 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR(255);`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users (google_id) WHERE google_id IS NOT NULL;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP;`);
 
     // Create services table (only if not exists)
     const servicesExist = await client.query(`SELECT to_regclass('public.services') as exists`);
@@ -540,7 +541,7 @@ export async function initializeTables() {
             commission_amount DECIMAL(12, 2) NOT NULL,
             net_provider_amount DECIMAL(12, 2) NOT NULL,
             currency VARCHAR(3) NOT NULL DEFAULT 'PHP',
-            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'cancelled', 'refunded')),
+            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'cancelled', 'refunded', 'partially_refunded')),
             payment_method_type VARCHAR(50),
             failure_reason TEXT,
             paid_at TIMESTAMP,
@@ -564,7 +565,7 @@ export async function initializeTables() {
             commission_amount DECIMAL(12, 2) NOT NULL,
             net_provider_amount DECIMAL(12, 2) NOT NULL,
             currency VARCHAR(3) NOT NULL DEFAULT 'PHP',
-            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'cancelled', 'refunded')),
+            status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'cancelled', 'refunded', 'partially_refunded')),
             payment_method_type VARCHAR(50),
             failure_reason TEXT,
             paid_at TIMESTAMP,
@@ -593,6 +594,33 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP;`);
     await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
     await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+    // Tracks the underlying PayMongo payment resource (distinct from the payment_intent),
+    // required to issue refunds, plus refund bookkeeping for dispute resolutions.
+    await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS paymongo_payment_id VARCHAR(255);`);
+    await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS paymongo_refund_id VARCHAR(255);`);
+    await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS refund_status VARCHAR(50);`);
+    await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS refunded_amount DECIMAL(12, 2);`);
+    await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMP;`);
+    // Atomic "have we already credited the provider's wallet for this payment" gate.
+    // A card can resolve to 'succeeded' synchronously during the attach-method call
+    // (no 3D Secure needed), so wallet crediting can't be keyed off "did *this* code
+    // path just flip status to succeeded" - attach-method, /confirm, and the webhook
+    // all race for the same payment, and whichever transitions status first must not
+    // be the only one allowed to credit. This column is the single source of truth.
+    await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS wallet_credited_at TIMESTAMP;`);
+
+    // Widen the payments status constraint to allow partial refunds (older databases
+    // may still have the constraint from before 'partially_refunded' was supported).
+    try {
+      await client.query(`ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_status_check;`);
+      await client.query(`
+        ALTER TABLE payments ADD CONSTRAINT payments_status_check
+        CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'cancelled', 'refunded', 'partially_refunded'));
+      `);
+      console.log('Updated payments status constraint to include partially_refunded.');
+    } catch (e) {
+      console.log('Could not update payments status constraint (may already be correct):', (e as Error).message);
+    }
 
     // Transactions table - tracks all wallet movements
     const transactionsExist = await client.query(`SELECT to_regclass('public.transactions') as exists`);
@@ -1236,6 +1264,52 @@ export async function initializeTables() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_user ON support_tickets (user_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets (status);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_support_tickets_created ON support_tickets (created_at DESC);`);
+    await client.query(`ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS category VARCHAR(50);`);
+
+    // ==================== SUPPORT MESSAGES TABLE ====================
+    const supportMessagesExist = await client.query(`SELECT to_regclass('public.support_messages') as exists`);
+    if (!supportMessagesExist.rows[0].exists) {
+      await client.query(`
+        CREATE TABLE support_messages (
+          id ${idType} PRIMARY KEY ${usesUUID ? 'DEFAULT gen_random_uuid()' : ''},
+          ticket_id ${refType} NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+          sender_id ${refType} REFERENCES users(id) ON DELETE SET NULL,
+          sender_role VARCHAR(20) NOT NULL CHECK (sender_role IN ('user', 'admin', 'system')),
+          content TEXT,
+          attachment_url TEXT,
+          attachment_type VARCHAR(20),
+          attachment_name TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          read_at TIMESTAMP
+        );
+      `);
+    }
+
+    // Support messages indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_support_messages_ticket ON support_messages (ticket_id, created_at);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_support_messages_unread ON support_messages (ticket_id) WHERE read_at IS NULL;`);
+
+    // Backfill: turn each pre-chat ticket's opening message + admin_reply into thread messages (idempotent).
+    try {
+      await client.query(`
+        INSERT INTO support_messages (ticket_id, sender_id, sender_role, content, created_at)
+        SELECT t.id, t.user_id, 'user', t.message, t.created_at
+        FROM support_tickets t
+        WHERE NOT EXISTS (SELECT 1 FROM support_messages m WHERE m.ticket_id::text = t.id::text)
+      `);
+      await client.query(`
+        INSERT INTO support_messages (ticket_id, sender_id, sender_role, content, created_at)
+        SELECT t.id, t.replied_by, 'admin', t.admin_reply, COALESCE(t.replied_at, t.updated_at)
+        FROM support_tickets t
+        WHERE t.admin_reply IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM support_messages m
+            WHERE m.ticket_id::text = t.id::text AND m.sender_role = 'admin'
+          )
+      `);
+    } catch (e) {
+      console.warn('Support messages backfill could not be completed:', e);
+    }
 
     console.log('Database tables initialized successfully');
     // Seed admin user if not present

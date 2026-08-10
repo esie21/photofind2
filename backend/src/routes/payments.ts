@@ -3,77 +3,17 @@ import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import crypto from 'crypto';
 import { notificationService } from '../services/notificationService';
-import { ensureProviderWallet } from '../services/walletService';
+import { settlePaymentSuccess } from '../services/walletService';
+import { paymongoRequest, PayMongoResponse } from '../services/paymongoService';
 
 const router = express.Router();
 
 // PayMongo API configuration
-const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY || '';
 const PAYMONGO_PUBLIC_KEY = process.env.PAYMONGO_PUBLIC_KEY || '';
 const PAYMONGO_WEBHOOK_SECRET = process.env.PAYMONGO_WEBHOOK_SECRET || '';
-const PAYMONGO_API_URL = 'https://api.paymongo.com/v1';
 
 // Commission rate (configurable)
 const PLATFORM_COMMISSION_RATE = parseFloat(process.env.PLATFORM_COMMISSION_RATE || '0.15'); // 15%
-
-// PayMongo API response types
-interface PayMongoError {
-  detail?: string;
-  code?: string;
-}
-
-interface PayMongoResponse {
-  data: {
-    id: string;
-    type: string;
-    attributes: {
-      amount: number;
-      currency: string;
-      status: string;
-      client_key?: string;
-      payment_method_type?: string;
-      next_action?: {
-        type: string;
-        redirect?: {
-          url: string;
-          return_url: string;
-        };
-      };
-      last_payment_error?: {
-        message?: string;
-      };
-      [key: string]: any;
-    };
-  };
-  errors?: PayMongoError[];
-}
-
-// Helper function for PayMongo API calls
-async function paymongoRequest(endpoint: string, method: string, data?: any, idempotencyKey?: string): Promise<PayMongoResponse> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Authorization': `Basic ${Buffer.from(PAYMONGO_SECRET_KEY + ':').toString('base64')}`,
-  };
-
-  if (idempotencyKey) {
-    headers['Idempotency-Key'] = idempotencyKey;
-  }
-
-  const response = await fetch(`${PAYMONGO_API_URL}${endpoint}`, {
-    method,
-    headers,
-    body: data ? JSON.stringify(data) : undefined,
-  });
-
-  const result = await response.json() as PayMongoResponse;
-
-  if (!response.ok) {
-    console.error('PayMongo API Error:', result);
-    throw new Error(result.errors?.[0]?.detail || 'PayMongo API error');
-  }
-
-  return result;
-}
 
 // Generate idempotency key for payment - deterministic to prevent duplicate payments
 function generateIdempotencyKey(bookingId: string, clientId: string): string {
@@ -290,6 +230,7 @@ router.post('/attach-method', verifyToken, async (req: Request & { userId?: stri
     if (String(paymentRes.rows[0].client_id) !== String(clientId)) {
       return res.status(403).json({ error: 'Access denied' });
     }
+    const paymentRecord = paymentRes.rows[0];
 
     // Attach payment method to intent
     const result = await paymongoRequest(`/payment_intents/${payment_intent_id}/attach`, 'POST', {
@@ -302,22 +243,60 @@ router.post('/attach-method', verifyToken, async (req: Request & { userId?: stri
     });
 
     const updatedIntent = result.data;
+    const capturedPaymentId = updatedIntent.attributes.payments?.[0]?.id || null;
+    const newStatus = updatedIntent.attributes.status === 'succeeded' ? 'succeeded' : 'processing';
 
-    // Update payment record
-    await pool.query(
-      `UPDATE payments
-       SET paymongo_payment_method_id = $1,
-           payment_method_type = $2,
-           status = $3,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE paymongo_payment_intent_id = $4`,
-      [
-        payment_method_id,
-        updatedIntent.attributes.payment_method_type || 'card',
-        updatedIntent.attributes.status === 'succeeded' ? 'succeeded' : 'processing',
-        payment_intent_id
-      ]
-    );
+    // A card without 3D Secure can resolve to 'succeeded' right here, synchronously -
+    // wrap the status update and settlement in a transaction so both land atomically.
+    const dbClient = await pool.connect();
+    let settleResult: Awaited<ReturnType<typeof settlePaymentSuccess>> = { settled: false, creditedAmount: 0 };
+    try {
+      await dbClient.query('BEGIN');
+
+      await dbClient.query(
+        `UPDATE payments
+         SET paymongo_payment_method_id = $1,
+             payment_method_type = $2,
+             status = $3,
+             paymongo_payment_id = COALESCE($5, paymongo_payment_id),
+             paid_at = CASE WHEN $3::varchar = 'succeeded' THEN COALESCE(paid_at, CURRENT_TIMESTAMP) ELSE paid_at END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE paymongo_payment_intent_id = $4`,
+        [
+          payment_method_id,
+          updatedIntent.attributes.payment_method_type || 'card',
+          newStatus,
+          payment_intent_id,
+          capturedPaymentId
+        ]
+      );
+
+      if (newStatus === 'succeeded') {
+        settleResult = await settlePaymentSuccess(dbClient, String(paymentRecord.id));
+      }
+
+      await dbClient.query('COMMIT');
+    } catch (txError) {
+      await dbClient.query('ROLLBACK');
+      throw txError;
+    } finally {
+      dbClient.release();
+    }
+
+    if (settleResult.settled) {
+      try {
+        const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [settleResult.clientId]);
+        await notificationService.notifyPaymentReceived(
+          String(settleResult.providerId),
+          String(settleResult.clientId),
+          settleResult.creditedAmount,
+          clientInfo.rows[0]?.name || 'Client',
+          String(settleResult.bookingId)
+        );
+      } catch (notifError) {
+        console.error('Failed to send payment notification (attach-method):', notifError);
+      }
+    }
 
     return res.json({
       data: {
@@ -370,98 +349,45 @@ router.post('/confirm', verifyToken, async (req: Request & { userId?: string }, 
     if (status === 'succeeded') {
       await dbClient.query('BEGIN');
 
-      // Re-fetch and lock the payment row. The PayMongo webhook may be processing
-      // this exact payment concurrently (it typically fires right around when the
-      // client's browser calls this endpoint after checkout) — locking and
-      // re-checking status here, instead of trusting the unlocked read above,
-      // ensures only one of the two paths ever credits the wallet.
+      // Re-fetch and lock the payment row. attach-method (for cards that don't need
+      // 3D Secure) or the webhook may already have marked this 'succeeded' - the
+      // status update below is an idempotent no-op in that case, and
+      // settlePaymentSuccess's own atomic claim (not this row lock) is what actually
+      // prevents crediting the wallet twice across all three paths.
       const lockedRes = await dbClient.query(
         'SELECT * FROM payments WHERE id::text = $1 FOR UPDATE',
         [payment.id]
       );
       const lockedPayment = lockedRes.rows[0];
+      const capturedPaymentId = paymentIntent.attributes.payments?.[0]?.id || null;
 
-      if (lockedPayment && lockedPayment.status !== 'succeeded') {
-        // Update payment status
-        await dbClient.query(
-          `UPDATE payments
-           SET status = 'succeeded',
-               paid_at = CURRENT_TIMESTAMP,
-               updated_at = CURRENT_TIMESTAMP
-           WHERE id::text = $1`,
-          [lockedPayment.id]
-        );
+      await dbClient.query(
+        `UPDATE payments
+         SET status = 'succeeded',
+             paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+             paymongo_payment_id = COALESCE($2, paymongo_payment_id),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $1`,
+        [lockedPayment.id, capturedPaymentId]
+      );
 
-        // Update booking payment status
-        await dbClient.query(
-          `UPDATE bookings SET payment_status = 'paid', updated_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
-          [lockedPayment.booking_id]
-        );
+      const settleResult = await settlePaymentSuccess(dbClient, String(lockedPayment.id));
 
-        // Credit provider wallet (to pending balance until service completion)
-        const walletId = await ensureProviderWallet(String(lockedPayment.provider_id));
+      await dbClient.query('COMMIT');
 
-        // Lock wallet row to prevent race conditions with concurrent payments
-        const walletLockRes = await dbClient.query(
-          'SELECT id, pending_balance FROM wallets WHERE id::text = $1 FOR UPDATE',
-          [walletId]
-        );
-
-        if (!walletLockRes.rows[0]) {
-          await dbClient.query('ROLLBACK');
-          return res.status(500).json({ error: 'Wallet not found' });
-        }
-
-        const currentPending = parseFloat(walletLockRes.rows[0].pending_balance) || 0;
-        const newPending = currentPending + parseFloat(lockedPayment.net_provider_amount);
-
-        // Add to pending balance
-        await dbClient.query(
-          `UPDATE wallets
-           SET pending_balance = $1, updated_at = CURRENT_TIMESTAMP
-           WHERE id::text = $2`,
-          [newPending, walletId]
-        );
-
-        // Record transaction
-        await dbClient.query(
-          `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
-           VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
-          [
-            walletId,
-            lockedPayment.id,
-            lockedPayment.net_provider_amount,
-            newPending,
-            payment_intent_id,
-            `Payment received for booking #${lockedPayment.booking_id} (after ${PLATFORM_COMMISSION_RATE * 100}% commission)`
-          ]
-        );
-
-        await dbClient.query('COMMIT');
-
-        // Notify provider of payment received
+      if (settleResult.settled) {
         try {
-          const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [lockedPayment.client_id]);
-          const bookingInfo = await pool.query(
-            `SELECT s.title FROM bookings b LEFT JOIN services s ON s.id::text = b.service_id::text WHERE b.id::text = $1`,
-            [lockedPayment.booking_id]
-          );
-          const clientName = clientInfo.rows[0]?.name || 'Client';
-          const serviceTitle = bookingInfo.rows[0]?.title || 'service';
-
+          const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [settleResult.clientId]);
           await notificationService.notifyPaymentReceived(
-            String(lockedPayment.provider_id),
-            String(lockedPayment.client_id),
-            parseFloat(lockedPayment.net_provider_amount),
-            clientName,
-            String(lockedPayment.booking_id)
+            String(settleResult.providerId),
+            String(settleResult.clientId),
+            settleResult.creditedAmount,
+            clientInfo.rows[0]?.name || 'Client',
+            String(settleResult.bookingId)
           );
         } catch (notifError) {
           console.error('Failed to send payment notification:', notifError);
         }
-      } else {
-        // Already credited by the webhook (or a prior confirm call) - nothing to do.
-        await dbClient.query('COMMIT');
       }
     } else if (status === 'failed') {
       await dbClient.query(
@@ -556,84 +482,50 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
 
       await dbClient.query('BEGIN');
 
-      // Lock the payment row - the client's /confirm call may be processing this
-      // exact payment concurrently. Whichever of the two gets here first wins;
-      // the other will see status = 'succeeded' below and skip crediting.
+      // Lock the payment row - attach-method (for cards that don't need 3D Secure) or
+      // the client's /confirm call may already have marked this 'succeeded'. The
+      // status update below is an idempotent no-op in that case; settlePaymentSuccess's
+      // own atomic claim is what actually prevents crediting the wallet twice.
       const paymentRes = await dbClient.query(
         'SELECT * FROM payments WHERE paymongo_payment_intent_id = $1 FOR UPDATE',
         [paymentIntentId]
       );
 
-      if (paymentRes.rows[0] && paymentRes.rows[0].status !== 'succeeded') {
-        const payment = paymentRes.rows[0];
+      let settleResult: { settled: boolean; creditedAmount: number; bookingId?: string; providerId?: string; clientId?: string } = { settled: false, creditedAmount: 0 };
 
-        // Update payment status
+      if (paymentRes.rows[0]) {
+        const payment = paymentRes.rows[0];
+        const capturedPaymentId = eventData?.attributes?.payments?.[0]?.id || null;
+
         await dbClient.query(
           `UPDATE payments
            SET status = 'succeeded',
-               paid_at = CURRENT_TIMESTAMP,
+               paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+               paymongo_payment_id = COALESCE($2, paymongo_payment_id),
                updated_at = CURRENT_TIMESTAMP
            WHERE id::text = $1`,
-          [payment.id]
+          [payment.id, capturedPaymentId]
         );
 
-        // Update booking
-        await dbClient.query(
-          `UPDATE bookings SET payment_status = 'paid', updated_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
-          [payment.booking_id]
-        );
+        settleResult = await settlePaymentSuccess(dbClient, String(payment.id));
+      }
 
-        // Credit provider wallet
-        const walletId = await ensureProviderWallet(String(payment.provider_id));
+      await dbClient.query('COMMIT');
 
-        await dbClient.query(
-          `UPDATE wallets
-           SET pending_balance = pending_balance + $1, updated_at = CURRENT_TIMESTAMP
-           WHERE id::text = $2`,
-          [payment.net_provider_amount, walletId]
-        );
-
-        const walletRes = await dbClient.query(
-          'SELECT pending_balance FROM wallets WHERE id::text = $1',
-          [walletId]
-        );
-
-        await dbClient.query(
-          `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
-           VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
-          [
-            walletId,
-            payment.id,
-            payment.net_provider_amount,
-            walletRes.rows[0].pending_balance,
-            paymentIntentId,
-            `Payment received for booking #${payment.booking_id}`
-          ]
-        );
-
-        // Notify provider of payment received (via webhook)
+      if (settleResult.settled) {
         try {
-          const clientInfo = await dbClient.query('SELECT name FROM users WHERE id::text = $1', [payment.client_id]);
-          const bookingInfo = await dbClient.query(
-            `SELECT s.title FROM bookings b LEFT JOIN services s ON s.id::text = b.service_id::text WHERE b.id::text = $1`,
-            [payment.booking_id]
-          );
-          const clientName = clientInfo.rows[0]?.name || 'Client';
-          const serviceTitle = bookingInfo.rows[0]?.title || 'service';
-
+          const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [settleResult.clientId]);
           await notificationService.notifyPaymentReceived(
-            String(payment.provider_id),
-            String(payment.client_id),
-            parseFloat(payment.net_provider_amount),
-            clientName,
-            String(payment.booking_id)
+            String(settleResult.providerId),
+            String(settleResult.clientId),
+            settleResult.creditedAmount,
+            clientInfo.rows[0]?.name || 'Client',
+            String(settleResult.bookingId)
           );
         } catch (notifError) {
           console.error('Failed to send webhook payment notification:', notifError);
         }
       }
-
-      await dbClient.query('COMMIT');
     } else if (eventType === 'payment_intent.failed') {
       const paymentIntentId = eventData?.id;
 
