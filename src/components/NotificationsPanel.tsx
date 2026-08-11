@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Bell, X, CheckCheck, Trash2, Loader2, RefreshCw } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import notificationService, { Notification } from '../api/services/notificationService';
+import { API_CONFIG } from '../api/config';
 import { NotificationItem } from './NotificationItem';
 import { useAuth } from '../context/AuthContext';
 
@@ -90,9 +91,7 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
   useEffect(() => {
     if (!user || !token) return;
 
-    const SOCKET_URL = ((import.meta as any).env?.VITE_API_URL as string)?.replace('/api', '') || 'http://localhost:3001';
-
-    const socket = io(SOCKET_URL, {
+    const socket = io(API_CONFIG.SOCKET_URL, {
       auth: { token },
       transports: ['websocket', 'polling'],
     });
@@ -244,9 +243,9 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
 
       {/* Dropdown Panel */}
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-96 max-h-[32rem] bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden z-50">
+        <div className="notifications-panel bg-white rounded-xl border border-gray-200 overflow-hidden z-50 flex flex-col">
           {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 flex-shrink-0">
             <div className="flex items-center gap-2">
               <h3 className="font-semibold text-gray-900">Notifications</h3>
               {unreadCount > 0 && (
@@ -291,7 +290,7 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
           </div>
 
           {/* Notifications List */}
-          <div className="overflow-y-auto max-h-[24rem]">
+          <div className="notifications-list overflow-y-auto flex-1">
             {loading && notifications.length === 0 ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="w-6 h-6 animate-spin text-purple-600" />

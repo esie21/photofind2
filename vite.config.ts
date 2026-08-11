@@ -65,9 +65,24 @@
     },
     server: {
       port: 3000,
+      // Fail loudly if 3000 is taken. Without this Vite silently falls through to the
+      // next port - and since the backend binds IPv4 while Vite binds IPv6, it can
+      // "successfully" take 3001 alongside the backend. localhost:3001 then resolves to
+      // Vite instead of the API, which looks like broken CORS / Google origin_mismatch.
+      strictPort: true,
       open: true,
+      // Proxy backend traffic through the dev server so the browser only ever talks to
+      // one origin (localhost:3000). This mirrors production, where the frontend calls
+      // a relative /api that Vercel rewrites to the backend - without it, dev is the
+      // only environment making cross-origin requests and needing CORS.
+      proxy: {
+        '/api': { target: 'http://localhost:3001', changeOrigin: true },
+        '/uploads': { target: 'http://localhost:3001', changeOrigin: true },
+        '/socket.io': { target: 'http://localhost:3001', changeOrigin: true, ws: true },
+      },
     },
     preview: {
       port: 3000,
+      strictPort: true,
     },
   });

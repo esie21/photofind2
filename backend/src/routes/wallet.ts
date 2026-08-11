@@ -37,14 +37,6 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
       [providerId]
     );
 
-    // Get total earnings
-    const earningsRes = await pool.query(
-      `SELECT COALESCE(SUM(net_provider_amount), 0) as total
-       FROM payments
-       WHERE provider_id::text = $1 AND status = 'succeeded'`,
-      [providerId]
-    );
-
     // Get total paid out
     const paidOutRes = await pool.query(
       `SELECT COALESCE(SUM(amount), 0) as total
@@ -53,15 +45,28 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
       [providerId]
     );
 
+    const availableBalance = parseFloat(wallet.available_balance);
+    const pendingBalance = parseFloat(wallet.pending_balance);
+    const totalPaidOut = parseFloat(paidOutRes.rows[0].total);
+    const pendingPayoutsTotal = parseFloat(pendingPayoutsRes.rows[0].total);
+
+    // Total earnings is derived from the balances rather than summed independently from
+    // the payments table. Summing payments let the two disagree - a payment could be
+    // marked succeeded without ever crediting the wallet, so the UI showed earnings the
+    // provider had no balance for. Deriving it means it can never contradict the numbers
+    // displayed next to it: it is every peso that is in the wallet, on its way out of it,
+    // or already withdrawn from it.
+    const totalEarnings = availableBalance + pendingBalance + totalPaidOut + pendingPayoutsTotal;
+
     return res.json({
       data: {
         ...wallet,
-        available_balance: parseFloat(wallet.available_balance),
-        pending_balance: parseFloat(wallet.pending_balance),
-        total_earnings: parseFloat(earningsRes.rows[0].total),
-        total_paid_out: parseFloat(paidOutRes.rows[0].total),
+        available_balance: availableBalance,
+        pending_balance: pendingBalance,
+        total_earnings: totalEarnings,
+        total_paid_out: totalPaidOut,
         pending_payouts_count: parseInt(pendingPayoutsRes.rows[0].count),
-        pending_payouts_total: parseFloat(pendingPayoutsRes.rows[0].total),
+        pending_payouts_total: pendingPayoutsTotal,
         minimum_payout_amount: MINIMUM_PAYOUT_AMOUNT,
       }
     });

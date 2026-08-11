@@ -750,11 +750,57 @@ export async function initializeTables() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_payments_provider ON payments (provider_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_payments_status ON payments (status);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_payments_paymongo_intent ON payments (paymongo_payment_intent_id);`);
+
+    // A booking may have several payment rows (a new one is created after each failed
+    // attempt), but at most ONE of them may ever be 'succeeded'. The application check
+    // in POST /payments/create-intent enforces this too; this partial unique index is
+    // the backstop that makes charging a booking twice impossible even if a concurrent
+    // request slips past that check. Created CONCURRENTLY-free since it's tiny, and
+    // guarded so a pre-existing duplicate can't stop the server booting.
+    try {
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS payments_one_succeeded_per_booking
+        ON payments (booking_id) WHERE status = 'succeeded';
+      `);
+    } catch (e) {
+      console.error(
+        'Could not create payments_one_succeeded_per_booking - a booking already has ' +
+        'more than one succeeded payment, which means someone was charged twice. ' +
+        'Investigate before relying on this guard:', (e as Error).message
+      );
+    }
     await client.query(`CREATE INDEX IF NOT EXISTS idx_wallets_provider ON wallets (provider_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_transactions_wallet ON transactions (wallet_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_transactions_created ON transactions (created_at DESC);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_payouts_provider ON payouts (provider_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_payouts_status ON payouts (status);`);
+
+    // Backfill wallet_credited_at for payments credited before that column existed.
+    // settlePaymentSuccess() claims a payment with "wallet_credited_at IS NULL", so
+    // without this a payment that was already credited would be credited a SECOND time
+    // the next time that code runs for it (a webhook retry, a revisited payment
+    // callback). The wallet ledger is the evidence of the original credit, so stamp
+    // each payment with the time of its first 'payment_received' transaction.
+    // Idempotent - the IS NULL guard makes re-running on every boot a no-op.
+    try {
+      const backfilled = await client.query(`
+        UPDATE payments p
+        SET wallet_credited_at = t.first_credit
+        FROM (
+          SELECT payment_id, MIN(created_at) AS first_credit
+          FROM transactions
+          WHERE type = 'payment_received' AND payment_id IS NOT NULL
+          GROUP BY payment_id
+        ) t
+        WHERE t.payment_id::text = p.id::text
+          AND p.wallet_credited_at IS NULL
+      `);
+      if (backfilled.rowCount) {
+        console.log(`Backfilled wallet_credited_at for ${backfilled.rowCount} already-credited payment(s).`);
+      }
+    } catch (e) {
+      console.log('wallet_credited_at backfill skipped (non-fatal):', (e as Error).message);
+    }
 
     // Add payment_status to bookings if not exists
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_status VARCHAR(50) DEFAULT 'unpaid';`);

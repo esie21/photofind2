@@ -9,7 +9,7 @@ export interface Booking {
   startDate: string;
   endDate: string;
   status: 'pending' | 'accepted' | 'rejected' | 'confirmed' | 'completed' | 'cancelled' | 'awaiting_confirmation' | 'disputed';
-  booking_mode?: 'instant' | 'request';
+  booking_mode?: 'request';
   accepted_at?: string | null;
   rejected_at?: string | null;
   cancelled_at?: string | null;
@@ -67,7 +67,6 @@ export interface CreateBookingData {
   start_date: string;
   end_date?: string;
   total_price: number;
-  booking_mode?: 'instant' | 'request';
   slot_ids?: string[];
   duration_minutes?: number;
 }

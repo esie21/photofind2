@@ -3,6 +3,8 @@ import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
 import { paymongoRequest, createRefund } from '../services/paymongoService';
+import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
+import { releaseEscrow } from '../services/walletService';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -209,7 +211,9 @@ router.get('/', verifyToken, async (req: Request & { userId?: string }, res: Res
 // Create a new booking (protected)
 router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   const clientId = req.userId; // from verifyToken
-  const { provider_id, service_id, start_date, end_date, total_price, booking_mode } = req.body;
+  // booking_mode is deliberately not read from the body - see the comment where
+  // `mode` is set below.
+  const { provider_id, service_id, start_date, end_date, total_price } = req.body;
 
   if (!clientId) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -248,15 +252,23 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     const servicePrice = parseFloat(service.price) || 0;
     const packagePrice = parseFloat(service.package_price) || servicePrice;
     const packageDuration = service.duration_minutes || 60;
-    const platformFeeRate = 0.15;
+    const platformFeeRate = PLATFORM_COMMISSION_RATE;
 
     // Validate total_price is not less than expected (with platform fee)
     const submittedPrice = parseFloat(total_price) || 0;
 
-    // For hourly pricing, we can't validate exact price here (depends on duration)
-    // But we can ensure it's not suspiciously low
+    // Hourly pricing scales with how long the booking actually is. This used to check
+    // against a single hour's rate no matter the duration, so an 8-hour booking could
+    // be submitted at 1 hour's price and pass - and create-intent's own check compares
+    // against the same single-hour figure, so it went through there too.
     if (service.pricing_type === 'hourly') {
-      const minPrice = servicePrice * (1 + platformFeeRate);
+      const startForPrice = new Date(String(start_date));
+      const endForPrice = end_date
+        ? new Date(String(end_date))
+        : new Date(startForPrice.getTime() + packageDuration * 60 * 1000);
+      const durationMinutes = Math.round((endForPrice.getTime() - startForPrice.getTime()) / (1000 * 60));
+      const hours = Math.max(1, durationMinutes / 60);
+      const minPrice = servicePrice * hours * (1 + platformFeeRate);
       if (submittedPrice < minPrice * 0.99) {
         return res.status(400).json({
           error: 'Invalid price',
@@ -309,9 +321,14 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
 
     if (end.getTime() <= start.getTime()) return res.status(400).json({ error: 'end_date must be after start_date' });
 
-    const mode = booking_mode === 'instant' ? 'instant' : 'request';
-    const initialStatus = mode === 'instant' ? 'accepted' : 'pending';
-    const acceptedAt = mode === 'instant' ? new Date().toISOString() : null;
+    // Every booking is a request the provider has to accept - instant booking was
+    // removed so that payment can be gated on that acceptance (see the status check
+    // in POST /payments/create-intent). This deliberately ignores `booking_mode`
+    // from the request body: honouring it would let a crafted call create a booking
+    // that is already 'accepted' and pay for it before the provider ever saw it.
+    const mode = 'request';
+    const initialStatus = 'pending';
+    const acceptedAt = null;
 
     const client = await pool.connect();
     try {
@@ -385,24 +402,14 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
         const providerName = providerInfo.rows[0]?.name || 'Provider';
         const serviceTitle = serviceInfo.rows[0]?.title || 'a service';
 
-        if (mode === 'instant') {
-          // Instant booking - notify client that booking is confirmed
-          await notificationService.notifyBookingAccepted(
-            clientUserIdStr,
-            providerUserIdStr,
-            providerName,
-            String(booking.id)
-          );
-        } else {
-          // Request booking - notify provider of new request
-          await notificationService.notifyBookingRequest(
-            providerUserIdStr,
-            clientUserIdStr,
-            clientName,
-            String(booking.id),
-            serviceTitle
-          );
-        }
+        // Always a request now, so the provider is the one who needs telling.
+        await notificationService.notifyBookingRequest(
+          providerUserIdStr,
+          clientUserIdStr,
+          clientName,
+          String(booking.id),
+          serviceTitle
+        );
       } catch (notifError) {
         console.error('Failed to send booking notification:', notifError);
         // Don't fail the booking creation if notification fails
@@ -1706,64 +1713,25 @@ export async function autoConfirmPastCompletions() {
 
         // Get payment record for this booking
         const paymentRes = await txClient.query(
-          `SELECT id, net_provider_amount, status FROM payments WHERE booking_id::text = $1`,
+          `SELECT id, net_provider_amount, status FROM payments
+           WHERE booking_id::text = $1 AND status = 'succeeded'
+           ORDER BY created_at DESC LIMIT 1`,
           [String(booking.id)]
         );
         const payment = paymentRes.rows[0];
 
         if (payment && payment.status === 'succeeded') {
           const amount = parseFloat(payment.net_provider_amount);
+          const { released } = await releaseEscrow(txClient, providerUserId, amount, {
+            bookingId: String(booking.id),
+            paymentId: String(payment.id),
+            referenceId: `booking_${booking.id}_auto_confirmed`,
+            description: `Payment auto-released for booking #${booking.id} (48-hour timeout)`,
+          });
 
-          // Get provider's wallet using resolved user ID with FOR UPDATE lock to prevent race conditions
-          const walletRes = await txClient.query(
-            `SELECT id, pending_balance, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
-            [providerUserId]
-          );
-          let wallet = walletRes.rows[0];
-
-          // Create wallet if it doesn't exist
-          if (!wallet) {
-            const newWalletRes = await txClient.query(
-              `INSERT INTO wallets (provider_id, available_balance, pending_balance)
-               VALUES ($1, 0, 0)
-               RETURNING id, pending_balance, available_balance`,
-              [providerUserId]
-            );
-            wallet = newWalletRes.rows[0];
-          }
-
-          // Move funds from pending to available balance
-          const currentPending = parseFloat(wallet.pending_balance) || 0;
-          const currentAvailable = parseFloat(wallet.available_balance) || 0;
-          const newPending = Math.max(0, currentPending - amount);
-          const newAvailable = currentAvailable + amount;
-
-          await txClient.query(
-            `UPDATE wallets
-             SET pending_balance = $1,
-                 available_balance = $2,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE id::text = $3`,
-            [newPending, newAvailable, String(wallet.id)]
-          );
-
-          // Create transaction record
-          await txClient.query(
-            `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
-             VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
-            [
-              String(wallet.id),
-              String(payment.id),
-              amount,
-              newAvailable,
-              `booking_${booking.id}_auto_confirmed`,
-              `Payment auto-released for booking #${booking.id} (48-hour timeout)`
-            ]
-          );
-
-          paymentReleased = true;
-          releasedAmount = amount;
-          console.log(`Auto-released payment of ${amount} to provider ${providerUserId} for booking ${booking.id}`);
+          paymentReleased = released > 0;
+          releasedAmount = released;
+          console.log(`Auto-released payment of ${released} to provider ${providerUserId} for booking ${booking.id}`);
         }
 
         // Warn if auto-confirmed but payment wasn't released
@@ -2043,48 +2011,24 @@ export async function autoResolveStaleDisputes() {
         let releasedAmount = 0;
 
         const paymentRes = await txClient.query(
-          `SELECT id, net_provider_amount, status FROM payments WHERE booking_id::text = $1`,
+          `SELECT id, net_provider_amount, status FROM payments
+           WHERE booking_id::text = $1 AND status = 'succeeded'
+           ORDER BY created_at DESC LIMIT 1`,
           [String(booking.id)]
         );
         const payment = paymentRes.rows[0];
 
         if (payment && payment.status === 'succeeded') {
           const amount = parseFloat(payment.net_provider_amount);
+          const { released } = await releaseEscrow(txClient, providerUserId, amount, {
+            bookingId: String(booking.id),
+            paymentId: String(payment.id),
+            referenceId: `dispute_auto_resolved_${booking.id}`,
+            description: `Payment auto-released after dispute timeout (${DISPUTE_TIMEOUT_DAYS} days)`,
+          });
 
-          const walletRes = await txClient.query(
-            `SELECT id, pending_balance, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
-            [providerUserId]
-          );
-          let wallet = walletRes.rows[0];
-
-          if (!wallet) {
-            const newWalletRes = await txClient.query(
-              `INSERT INTO wallets (provider_id, available_balance, pending_balance)
-               VALUES ($1, 0, 0)
-               RETURNING id, pending_balance, available_balance`,
-              [providerUserId]
-            );
-            wallet = newWalletRes.rows[0];
-          }
-
-          const currentPending = parseFloat(wallet.pending_balance) || 0;
-          const currentAvailable = parseFloat(wallet.available_balance) || 0;
-          const newPending = Math.max(0, currentPending - amount);
-          const newAvailable = currentAvailable + amount;
-
-          await txClient.query(
-            `UPDATE wallets SET pending_balance = $1, available_balance = $2, updated_at = CURRENT_TIMESTAMP WHERE id::text = $3`,
-            [newPending, newAvailable, String(wallet.id)]
-          );
-
-          await txClient.query(
-            `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
-             VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
-            [String(wallet.id), String(payment.id), amount, newAvailable, `dispute_auto_resolved_${booking.id}`, `Payment auto-released after dispute timeout (${DISPUTE_TIMEOUT_DAYS} days)`]
-          );
-
-          paymentReleased = true;
-          releasedAmount = amount;
+          paymentReleased = released > 0;
+          releasedAmount = released;
         }
 
         // Log audit entry for the auto-resolution
@@ -2498,7 +2442,9 @@ router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string 
 
       // Get payment record for this booking
       const paymentRes = await client.query(
-        `SELECT id, net_provider_amount, status FROM payments WHERE booking_id::text = $1`,
+        `SELECT id, net_provider_amount, status FROM payments
+           WHERE booking_id::text = $1 AND status = 'succeeded'
+           ORDER BY created_at DESC LIMIT 1`,
         [bookingId]
       );
       const payment = paymentRes.rows[0];
@@ -2506,56 +2452,16 @@ router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string 
       if (payment && payment.status === 'succeeded') {
         const amount = parseFloat(payment.net_provider_amount);
 
-        // Get provider's wallet using resolved provider user ID with FOR UPDATE lock
-        const walletRes = await client.query(
-          `SELECT id, pending_balance, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
-          [providerUserId]
-        );
-        let wallet = walletRes.rows[0];
+        const { released } = await releaseEscrow(client, providerUserId, amount, {
+          bookingId,
+          paymentId: String(payment.id),
+          referenceId: `booking_${bookingId}_completed`,
+          description: `Payment released for completed booking #${bookingId}`,
+        });
 
-        // Create wallet if it doesn't exist
-        if (!wallet) {
-          const newWalletRes = await client.query(
-            `INSERT INTO wallets (provider_id, available_balance, pending_balance)
-             VALUES ($1, 0, 0)
-             RETURNING id, pending_balance, available_balance`,
-            [providerUserId]
-          );
-          wallet = newWalletRes.rows[0];
-        }
-
-        // Move funds from pending to available balance
-        const currentPending = parseFloat(wallet.pending_balance) || 0;
-        const currentAvailable = parseFloat(wallet.available_balance) || 0;
-        const newPending = Math.max(0, currentPending - amount);
-        const newAvailable = currentAvailable + amount;
-
-        await client.query(
-          `UPDATE wallets
-           SET pending_balance = $1,
-               available_balance = $2,
-               updated_at = CURRENT_TIMESTAMP
-           WHERE id::text = $3`,
-          [newPending, newAvailable, String(wallet.id)]
-        );
-
-        // Create transaction record
-        await client.query(
-          `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
-           VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
-          [
-            String(wallet.id),
-            String(payment.id),
-            amount,
-            newAvailable,
-            `booking_${bookingId}_completed`,
-            `Payment released for completed booking #${bookingId}`
-          ]
-        );
-
-        paymentReleased = true;
-        releasedAmount = amount;
-        console.log(`Payment of ${amount} released to provider ${providerUserId} for booking ${bookingId}`);
+        paymentReleased = released > 0;
+        releasedAmount = released;
+        console.log(`Payment of ${released} released to provider ${providerUserId} for booking ${bookingId}`);
       } else if (!payment) {
         // No payment record - log warning but allow completion (could be free service or test)
         console.warn(`No payment record found for booking ${bookingId} - completing without payment release`);

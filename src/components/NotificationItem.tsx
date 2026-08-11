@@ -88,7 +88,7 @@ export function NotificationItem({ notification, onMarkAsRead, onDelete, onClick
             e.stopPropagation();
             onDelete(notification.id);
           }}
-          className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all flex-shrink-0 self-center"
+          className="notification-delete-btn p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all flex-shrink-0 self-center"
           title="Delete notification"
         >
           <Trash2 className="w-4 h-4" />

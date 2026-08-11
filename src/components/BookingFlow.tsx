@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import { Check, Calendar as CalendarIcon, Clock, CreditCard, ChevronRight, MessageSquare, AlertCircle, Loader, Timer, Info, Ban } from 'lucide-react';
+import { Check, Calendar as CalendarIcon, Clock, CreditCard, ChevronRight, MessageSquare, AlertCircle, Loader, Timer, Info, Ban, PhilippinePeso } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import bookingService from '../api/services/bookingService';
 import serviceService, { Service } from '../api/services/serviceService';
 import availabilityService from '../api/services/availabilityService';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
-import { PaymentSummary } from './PaymentSummary';
 
 interface TimeSlot {
   id: string;
@@ -32,14 +31,11 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
   const [selectedService, setSelectedService] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<Date | undefined>(undefined);
   const [selectedSlots, setSelectedSlots] = useState<TimeSlot[]>([]); // Multi-slot selection
-  const [bookingMode, setBookingMode] = useState<'request' | 'instant'>('request');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [submittedStatus, setSubmittedStatus] = useState<string | null>(null);
   const [providerServices, setProviderServices] = useState<Service[]>([]);
   const [isLoadingServices, setIsLoadingServices] = useState(true);
-  const [createdBookingId, setCreatedBookingId] = useState<string | null>(null);
   const [showPayment, setShowPayment] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
   // Hourly booking specific state
@@ -385,12 +381,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
         { number: 1, name: 'Select Service', icon: Check },
         { number: 2, name: 'Pricing Type', icon: Check },
         { number: 3, name: 'Date & Time', icon: CalendarIcon },
-        { number: 4, name: 'Confirm & Pay', icon: CreditCard },
+        { number: 4, name: 'Review & Send', icon: Check },
       ]
     : [
         { number: 1, name: 'Select Service', icon: Check },
         { number: 2, name: 'Date & Time', icon: CalendarIcon },
-        { number: 3, name: 'Confirm & Pay', icon: CreditCard },
+        { number: 3, name: 'Review & Send', icon: Check },
       ];
 
   // Get max steps
@@ -795,16 +791,19 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
         slot_ids: heldSlotIds,
         duration_minutes: totalDurationMinutes,
         total_price: Number(total.toFixed(2)),
-        booking_mode: bookingMode,
       };
 
       console.log('Submitting booking:', bookingData);
       const created = await bookingService.createBooking(bookingData);
-      setSubmittedStatus((created as any)?.status || null);
-      setCreatedBookingId((created as any)?.id || null);
 
-      // Show payment modal
-      setShowPayment(true);
+      // No payment here. The booking is only a request until the provider accepts
+      // it, and the backend refuses to create a payment intent before that, so the
+      // client pays from the Bookings page once it has been confirmed.
+      setSuccess(true);
+      toast.success('Request sent!', `${providerName} will review your booking request.`);
+      setTimeout(() => {
+        onComplete();
+      }, 2500);
     } catch (err: any) {
       console.error('Booking error:', err);
       const errorMsg = err?.message || 'Failed to create booking. Please try again.';
@@ -814,44 +813,11 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     }
   };
 
-  const handlePaymentSuccess = () => {
-    setShowPayment(false);
-    setSuccess(true);
-    toast.success('Booking confirmed!', `Your booking with ${providerName} has been confirmed.`);
-    setTimeout(() => {
-      onComplete();
-    }, 2000);
-  };
-
-  const handlePaymentFailed = (errorMsg: string) => {
-    setError(`Payment failed: ${errorMsg}. Your booking has been saved. You can pay later from your dashboard.`);
-    toast.error('Payment failed', errorMsg);
-  };
-
-  const handlePaymentCancel = () => {
-    setShowPayment(false);
-    // Booking is already created, inform user they can pay later
-    setError('Payment cancelled. Your booking has been saved but requires payment to confirm. You can complete payment from your dashboard.');
-    toast.warning('Payment cancelled', 'You can complete payment from your dashboard.');
-  };
-
   return (
     <div className="min-h-screen bg-gray-50 py-8">
-      {/* Payment Modal */}
-      {showPayment && createdBookingId && selectedServiceData && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <PaymentSummary
-            bookingId={createdBookingId}
-            serviceName={selectedServiceData.name}
-            providerName={providerName}
-            totalAmount={total}
-            onPaymentSuccess={handlePaymentSuccess}
-            onPaymentFailed={handlePaymentFailed}
-            onCancel={handlePaymentCancel}
-          />
-        </div>
-      )}
-
+      {/* The payment modal used to live here and opened the moment the booking was
+          created. It now lives on BookingsPage, which only offers it once the
+          provider has accepted. */}
       <div className="max-w-4xl mx-auto px-4">
         {/* Error Alert */}
         {error && (
@@ -880,8 +846,8 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
           <div className="mb-6 bg-green-50 border border-green-200 rounded-2xl p-4 flex items-start gap-3">
             <Check className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-green-900">Booking Submitted!</p>
-              <p className="text-sm text-green-700 mt-1">{submittedStatus === 'accepted' ? 'Your booking is confirmed instantly.' : 'Your booking request has been sent to the provider.'} Redirecting...</p>
+              <p className="text-sm font-medium text-green-900">Request Sent!</p>
+              <p className="text-sm text-green-700 mt-1">Your booking request has been sent to the provider. You&apos;ll be asked to pay once they confirm it. Redirecting...</p>
             </div>
           </div>
         )}
@@ -901,12 +867,22 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
               </div>
 
               <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center ${submittedStatus === 'accepted' ? 'bg-green-500 text-white' : 'bg-yellow-500 text-white'}`}>
-                  {submittedStatus === 'accepted' ? <Check className="w-4 h-4" /> : <Clock className="w-4 h-4" />}
+                <div className="w-8 h-8 rounded-full flex items-center justify-center bg-yellow-500 text-white">
+                  <Clock className="w-4 h-4" />
                 </div>
                 <div className="flex-1">
-                  <div className="text-sm text-gray-900">{submittedStatus === 'accepted' ? 'Accepted' : 'Pending'}</div>
-                  <div className="text-xs text-gray-500">{submittedStatus === 'accepted' ? 'Provider accepted instantly' : 'Waiting for provider approval'}</div>
+                  <div className="text-sm text-gray-900">Pending</div>
+                  <div className="text-xs text-gray-500">Waiting for provider approval</div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-full flex items-center justify-center bg-gray-200 text-gray-500">
+                  <PhilippinePeso className="w-4 h-4" />
+                </div>
+                <div className="flex-1">
+                  <div className="text-sm text-gray-900">Payment</div>
+                  <div className="text-xs text-gray-500">Pay from your Bookings page once confirmed</div>
                 </div>
               </div>
 
@@ -1685,84 +1661,21 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       </div>
                     )}
 
-                    {/* Booking Mode - Redesigned */}
-                    <div className="rounded-2xl overflow-hidden border border-gray-200 bg-white shadow-sm">
-                      <div className="px-4 sm:px-6 py-4 border-b border-gray-100">
-                        <label className="text-sm sm:text-base font-semibold text-gray-900">Booking Mode</label>
-                        <p className="text-xs sm:text-sm text-gray-500 mt-0.5">How would you like to book?</p>
-                      </div>
-                      <div className="p-4 sm:p-6">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <button
-                            type="button"
-                            onClick={() => setBookingMode('request')}
-                            className={`p-4 sm:p-5 rounded-xl text-left transition-all duration-200 ${
-                              bookingMode === 'request'
-                                ? 'bg-gradient-to-br from-purple-600 to-purple-700 text-white shadow-lg shadow-purple-200 scale-[1.02]'
-                                : 'bg-gray-50 border border-gray-200 hover:border-purple-300 hover:bg-purple-50'
-                            }`}
-                          >
-                            <div className="flex items-start gap-3">
-                              <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                                bookingMode === 'request' ? 'bg-white/20' : 'bg-purple-100'
-                              }`}>
-                                <MessageSquare className={`w-5 h-5 ${bookingMode === 'request' ? 'text-white' : 'text-purple-600'}`} />
-                              </div>
-                              <div>
-                                <div className={`text-sm sm:text-base font-semibold ${bookingMode === 'request' ? 'text-white' : 'text-gray-900'}`}>
-                                  Request Approval
-                                </div>
-                                <div className={`text-xs sm:text-sm mt-1 ${bookingMode === 'request' ? 'text-purple-200' : 'text-gray-500'}`}>
-                                  Provider will review and confirm
-                                </div>
-                              </div>
-                            </div>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setBookingMode('instant')}
-                            className={`p-4 sm:p-5 rounded-xl text-left transition-all duration-200 ${
-                              bookingMode === 'instant'
-                                ? 'bg-gradient-to-br from-green-600 to-green-700 text-white shadow-lg shadow-green-200 scale-[1.02]'
-                                : 'bg-gray-50 border border-gray-200 hover:border-green-300 hover:bg-green-50'
-                            }`}
-                          >
-                            <div className="flex items-start gap-3">
-                              <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                                bookingMode === 'instant' ? 'bg-white/20' : 'bg-green-100'
-                              }`}>
-                                <Check className={`w-5 h-5 ${bookingMode === 'instant' ? 'text-white' : 'text-green-600'}`} />
-                              </div>
-                              <div>
-                                <div className={`text-sm sm:text-base font-semibold ${bookingMode === 'instant' ? 'text-white' : 'text-gray-900'}`}>
-                                  Instant Booking
-                                </div>
-                                <div className={`text-xs sm:text-sm mt-1 ${bookingMode === 'instant' ? 'text-green-200' : 'text-gray-500'}`}>
-                                  Book immediately, no waiting
-                                </div>
-                              </div>
-                            </div>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* How it works info */}
-                    <div className={`rounded-xl p-4 border transition-all ${
-                      bookingMode === 'instant'
-                        ? 'bg-green-50 border-green-200'
-                        : 'bg-purple-50 border-purple-200'
-                    }`}>
+                    {/* How it works info. Booking Mode used to be a picker here
+                        (Request Approval vs Instant Booking); instant booking was
+                        removed so that payment can be held until the provider
+                        accepts, so every booking is a request now and there is
+                        nothing left to choose. */}
+                    <div className="rounded-xl p-4 border bg-purple-50 border-purple-200">
                       <div className="flex items-start gap-3">
-                        <Info className={`w-5 h-5 flex-shrink-0 mt-0.5 ${bookingMode === 'instant' ? 'text-green-600' : 'text-purple-600'}`} />
+                        <Info className="w-5 h-5 flex-shrink-0 mt-0.5 text-purple-600" />
                         <div>
-                          <p className={`text-sm font-medium ${bookingMode === 'instant' ? 'text-green-800' : 'text-purple-800'}`}>
+                          <p className="text-sm font-medium text-purple-800">
                             How it works
                           </p>
-                          <p className={`text-xs sm:text-sm mt-1 ${bookingMode === 'instant' ? 'text-green-700' : 'text-purple-700'}`}>
-                            {bookingMode === 'instant'
-                              ? 'Your booking will be confirmed immediately and the time slot will be reserved.'
-                              : 'Your booking request will be sent to the provider. They will review and confirm.'}
+                          <p className="text-xs sm:text-sm mt-1 text-purple-700">
+                            Your booking request will be sent to the provider. Once they
+                            confirm it, you&apos;ll be asked to pay from your Bookings page.
                           </p>
                         </div>
                       </div>
@@ -1775,7 +1688,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
               {currentStepType === 'confirm' && (
                 <div>
                   <h2 className="text-gray-900 mb-2">Review & Confirm</h2>
-                  <p className="text-gray-600 mb-6">Review your booking details before proceeding to payment</p>
+                  <p className="text-gray-600 mb-6">Review your booking details before sending the request</p>
 
                   <div className="space-y-6">
                     {/* Booking Details Summary */}
@@ -1833,12 +1746,6 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                             </span>
                           </div>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">Booking Mode</span>
-                          <span className="font-medium text-gray-900">
-                            {bookingMode === 'instant' ? 'Instant Booking' : 'Request Approval'}
-                          </span>
-                        </div>
                       </div>
 
                       <div className="border-t border-gray-200 pt-4 space-y-2">
@@ -1871,8 +1778,8 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       <div className="flex items-start gap-3">
                         <Check className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
                         <div className="text-sm text-green-800">
-                          <p className="mb-1"><strong>Secure Payment via PayMongo</strong></p>
-                          <p>After confirming, you'll be prompted to enter your payment details securely. Your card information is encrypted and never stored on our servers.</p>
+                          <p className="mb-1"><strong>You pay after the provider confirms</strong></p>
+                          <p>Sending this request doesn&apos;t charge you. Once {providerName} accepts, a &quot;Pay now&quot; button appears on your Bookings page. Payment is handled securely by PayMongo and your card details are never stored on our servers.</p>
                         </div>
                       </div>
                     </div>
@@ -2070,7 +1977,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                   </>
                 ) : (
                   <>
-                    {currentStepType === 'confirm' ? 'Confirm & Pay' : 'Continue'}
+                    {currentStepType === 'confirm' ? 'Send Request' : 'Continue'}
                     {currentStepType !== 'confirm' && <ChevronRight className="w-5 h-5" />}
                   </>
                 )}

@@ -281,6 +281,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           end_date: b.end_date,
           amount: Number(b.total_price || b.totalPrice || 0),
           status: b.status,
+          payment_status: b.payment_status,
           image: clientImage,
           reschedule_pending_approval: b.reschedule_pending_approval,
           rescheduled_by: b.rescheduled_by,
@@ -372,6 +373,20 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   }, [user]);
 
   const bookingRequests = providerBookings;
+
+  // Clients now pay only after the provider accepts, so an accepted booking can sit
+  // unpaid for a while. Surface that instead of letting the provider assume the money
+  // is already in escrow. payment_status is 'unpaid' until an intent exists and
+  // 'pending' while one is in flight - only 'paid' means it actually landed.
+  const renderPaymentPill = (booking: any) => {
+    if (!['accepted', 'confirmed'].includes(booking.status)) return null;
+    const paid = booking.payment_status === 'paid';
+    return (
+      <span className={`px-3 py-1 rounded-full text-sm ${paid ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+        {paid ? 'Paid' : 'Unpaid'}
+      </span>
+    );
+  };
 
   const getBookingCategory = (status: string) => {
     if (status === 'completed') return 'completed';
@@ -590,6 +605,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                 booking.status === 'disputed' ? 'Disputed' :
                                   booking.status === 'completed' ? 'Completed' : 'Confirmed'}
                             </span>
+                            {renderPaymentPill(booking)}
                             {['accepted', 'confirmed'].includes(booking.status) &&
                               new Date(booking.start_date || booking.date) <= new Date() && (
                                 <button
@@ -1769,6 +1785,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                 {statusLabels[booking.status] || booking.status.replace('_', ' ')}
                               </span>
                             </div>
+                            <div className="mb-2">{renderPaymentPill(booking)}</div>
                             <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600 mb-3">
                               <div className="flex items-center gap-1">
                                 <Calendar className="w-4 h-4" />

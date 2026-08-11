@@ -33,9 +33,15 @@ export function PaymentSummary({
     cvc: '',
   });
 
-  const commissionRate = 0.15;
-  const commissionAmount = Math.round(totalAmount * commissionRate * 100) / 100;
-  const providerAmount = Math.round((totalAmount - commissionAmount) * 100) / 100;
+  // Show the split the server actually applied. The rate is configurable via
+  // PLATFORM_COMMISSION_RATE on the backend, so hardcoding it here meant the breakdown
+  // shown to the client could quietly disagree with what was really charged. The local
+  // calculation is only a placeholder for the moment before the intent resolves.
+  const FALLBACK_COMMISSION_RATE = 0.15;
+  const fallbackCommission = Math.round(totalAmount * FALLBACK_COMMISSION_RATE * 100) / 100;
+  const commissionAmount = paymentIntent?.commission ?? fallbackCommission;
+  const providerAmount = paymentIntent?.provider_amount ?? Math.round((totalAmount - fallbackCommission) * 100) / 100;
+  const commissionRate = totalAmount > 0 ? commissionAmount / totalAmount : FALLBACK_COMMISSION_RATE;
 
   // Create payment intent on mount
   useEffect(() => {
@@ -203,7 +209,7 @@ export function PaymentSummary({
             <span className="text-gray-900">PHP {totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
           </div>
           <div className="flex justify-between text-sm">
-            <span className="text-gray-600">Platform Fee (15%)</span>
+            <span className="text-gray-600">Platform Fee ({Math.round(commissionRate * 100)}%)</span>
             <span className="text-gray-900">PHP {commissionAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
           </div>
           <div className="flex justify-between text-sm border-t border-gray-200 pt-2 mt-2">

@@ -8,6 +8,7 @@ import { ChatInterface } from './ChatInterface';
 import { RescheduleModal } from './RescheduleModal';
 import { ConfirmCompletionModal } from './ConfirmCompletionModal';
 import { ReviewForm } from './ReviewForm';
+import { PaymentSummary } from './PaymentSummary';
 import bookingService from '../api/services/bookingService';
 import reviewService from '../api/services/reviewService';
 
@@ -25,6 +26,15 @@ const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }>
 };
 
 const RESCHEDULABLE_STATUSES = ['pending', 'accepted', 'confirmed'];
+
+// A booking is payable once the provider has accepted it and it has not been paid
+// for yet. This mirrors the server-side gate in POST /payments/create-intent, which
+// is what actually enforces the rule - payment_status is 'unpaid' before an intent
+// exists and 'pending' once one does, so only 'paid' means the money actually landed.
+const PAYABLE_STATUSES = ['accepted', 'confirmed'];
+function isPayable(booking: { status: string; payment_status?: string }) {
+  return PAYABLE_STATUSES.includes(booking.status) && booking.payment_status !== 'paid';
+}
 
 type StatusFilter = 'all' | 'upcoming' | 'completed' | 'cancelled';
 
@@ -64,6 +74,7 @@ export function BookingsPage() {
   const [reviewBooking, setReviewBooking] = useState<any>(null);
   const [reviewedBookingIds, setReviewedBookingIds] = useState<Set<string>>(new Set());
   const [reschedulingId, setReschedulingId] = useState<string | null>(null);
+  const [payingBooking, setPayingBooking] = useState<any>(null);
 
   const fetchBookings = async () => {
     setLoading(true);
@@ -99,6 +110,7 @@ export function BookingsPage() {
           end_date: b.end_date,
           price: Number(b.total_price || b.totalPrice || b.price || 0),
           status: b.status,
+          payment_status: b.payment_status,
           dispute_reason: b.dispute_reason,
           provider_completed_at: b.provider_completed_at,
           completion_notes: b.completion_notes,
@@ -294,7 +306,24 @@ export function BookingsPage() {
                           <span className={`px-3 py-1 rounded-full text-xs font-semibold ${statusStyle.bg} ${statusStyle.text}`}>
                             {statusStyle.label}
                           </span>
+                          {PAYABLE_STATUSES.includes(booking.status) && (
+                            <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                              booking.payment_status === 'paid'
+                                ? 'bg-green-100 text-green-700'
+                                : 'bg-amber-100 text-amber-700'
+                            }`}>
+                              {booking.payment_status === 'paid' ? 'Paid' : 'Payment due'}
+                            </span>
+                          )}
                           <div className="flex items-center gap-4">
+                            {!isProvider && isPayable(booking) && (
+                              <button
+                                onClick={() => setPayingBooking(booking)}
+                                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm"
+                              >
+                                Pay now
+                              </button>
+                            )}
                             <button
                               onClick={() => {
                                 setChatParty(booking.otherParty);
@@ -508,6 +537,30 @@ export function BookingsPage() {
           }}
           onSuccess={handleReviewSuccess}
         />
+      )}
+
+      {/* Payment moved here from BookingFlow: the client is only asked to pay once
+          the provider has accepted, so this is the only place PaymentSummary is
+          reachable from. The overlay matches the one BookingFlow used to render. */}
+      {payingBooking && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <PaymentSummary
+            bookingId={String(payingBooking.id)}
+            serviceName={payingBooking.service}
+            providerName={payingBooking.otherParty.name}
+            totalAmount={payingBooking.price}
+            onPaymentSuccess={() => {
+              setPayingBooking(null);
+              toast.success('Payment complete', 'Your booking is paid and confirmed.');
+              fetchBookings();
+            }}
+            onPaymentFailed={(err) => {
+              // Leave the modal open so the client can retry with another card.
+              toast.error('Payment failed', err);
+            }}
+            onCancel={() => setPayingBooking(null)}
+          />
+        </div>
       )}
     </div>
   );

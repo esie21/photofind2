@@ -6,6 +6,7 @@ import { LandingPage } from './components/LandingPage';
 import { AuthModal } from './components/AuthModal';
 import { ForgotPasswordModal } from './components/ForgotPasswordModal';
 import { ResetPasswordPage } from './components/ResetPasswordPage';
+import { PaymentCallbackPage } from './components/PaymentCallbackPage';
 import { ClientDashboard } from './components/ClientDashboard';
 import { ProviderDashboard } from './components/ProviderDashboard';
 import { ProviderProfilePage } from './components/ProviderProfilePage';
@@ -31,7 +32,7 @@ interface ChatContext {
 }
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'messages' | 'reset-password' | 'settings' | 'help' | 'bookings' | 'terms'>('landing');
+  const [currentView, setCurrentView] = useState<'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'provider-profile' | 'messages' | 'reset-password' | 'settings' | 'help' | 'bookings' | 'terms' | 'payment-callback'>('landing');
   const { user } = useAuth();
   const toast = useToast();
   const [bookingContext, setBookingContext] = useState<{ providerId?: string; providerName?: string; providerImage?: string; serviceId?: string } | null>(null);
@@ -42,15 +43,35 @@ export default function App() {
   const [landingCategory, setLandingCategory] = useState<string | undefined>(undefined);
   const [providerTabRequest, setProviderTabRequest] = useState<{ tab: ProviderTab; requestId: number } | null>(null);
 
+  // Switch views and put the URL back to "/" at the same time.
+  //
+  // Only /bookings and /reset-password have their own paths; every other view
+  // lives at "/". Navigating with a bare setCurrentView left the path behind:
+  // after visiting /bookings, clicking "Provider Dashboard" showed the dashboard
+  // while the URL still read /bookings, so the next refresh re-ran the mount
+  // route check, matched /bookings and dropped the user on the Upcoming Bookings
+  // page instead of where they actually were - permanently, since nothing ever
+  // cleared the path again.
+  //
+  // replaceState rather than pushState: this rewrites the entry the user is
+  // already on instead of stacking a duplicate, so Back still returns to
+  // whatever came before /bookings.
+  const navigateTo = (view: typeof currentView) => {
+    if (window.location.pathname !== '/') {
+      window.history.replaceState({}, '', '/');
+    }
+    setCurrentView(view);
+  };
+
   const handleAccountMenuNavigate = (target: AccountMenuTarget) => {
     const isProvider = user?.role === 'provider';
 
     if (target === 'settings') {
-      setCurrentView('settings');
+      navigateTo('settings');
       return;
     }
     if (target === 'help') {
-      setCurrentView('help');
+      navigateTo('help');
       return;
     }
     if (target === 'bookings') {
@@ -62,7 +83,7 @@ export default function App() {
     if (isProvider) {
       const tab: ProviderTab = target === 'profile' ? 'profile' : target === 'wallet' ? 'wallet' : 'reviews';
       setProviderTabRequest({ tab, requestId: Date.now() });
-      setCurrentView('provider');
+      navigateTo('provider');
     } else {
       toast.info('Coming soon', "This isn't available for client accounts yet.");
     }
@@ -73,6 +94,13 @@ export default function App() {
     const path = window.location.pathname;
     if (path === '/reset-password') {
       setCurrentView('reset-password');
+      return;
+    }
+    // Checked before the admin short-circuit below: someone coming back from a 3D
+    // Secure redirect needs their payment confirmed whatever their role, and losing
+    // that would leave the payment unsettled with no way to retry.
+    if (path === '/payment/callback') {
+      setCurrentView('payment-callback');
       return;
     }
     // Admins always land on the admin dashboard, regardless of whatever path the
@@ -101,6 +129,8 @@ export default function App() {
       const path = window.location.pathname;
       if (path === '/reset-password') {
         setCurrentView('reset-password');
+      } else if (path === '/payment/callback') {
+        setCurrentView('payment-callback');
       } else if (user?.role === 'admin') {
         setCurrentView('admin');
       } else if (path === '/bookings' && user) {
@@ -138,12 +168,12 @@ export default function App() {
         return;
       }
     }
-    setCurrentView(view);
+    navigateTo(view);
   };
 
   const handleViewProviderProfile = (providerId: string) => {
     setViewingProviderId(providerId);
-    setCurrentView('provider-profile');
+    navigateTo('provider-profile');
   };
 
   // Handle notification click navigation
@@ -302,7 +332,10 @@ export default function App() {
 
       <main>
         {currentView === 'reset-password' && <ResetPasswordPage />}
-        {currentView === 'settings' && <SettingsPage onGoToTerms={() => setCurrentView('terms')} />}
+        {currentView === 'payment-callback' && (
+          <PaymentCallbackPage onDone={() => handleAccountMenuNavigate('bookings')} />
+        )}
+        {currentView === 'settings' && <SettingsPage onGoToTerms={() => navigateTo('terms')} />}
         {currentView === 'bookings' && <BookingsPage />}
         {currentView === 'help' && <HelpSupportPage onGoToBookings={() => handleAccountMenuNavigate('bookings')} />}
         {currentView === 'terms' && <TermsPage />}
@@ -326,7 +359,7 @@ export default function App() {
           key={dashboardKey}
           initialSearchQuery={landingSearchQuery}
           initialCategory={landingCategory}
-          onContactSupport={() => setCurrentView('help')}
+          onContactSupport={() => navigateTo('help')}
           onStartBooking={(provider?: unknown) => {
             if (!user) {
               setAuthMode('login');
@@ -342,7 +375,7 @@ export default function App() {
             } else {
               setBookingContext(null);
             }
-            setCurrentView('booking');
+            navigateTo('booking');
           }}
           onViewProvider={handleViewProviderProfile}
         />}
@@ -357,7 +390,7 @@ export default function App() {
           <BookingFlow
             onComplete={() => {
               setDashboardKey(k => k + 1);
-              setCurrentView('client');
+              navigateTo('client');
             }}
             providerId={bookingContext?.providerId}
             providerName={bookingContext?.providerName}
@@ -380,9 +413,9 @@ export default function App() {
                 providerImage: provider.profile_image || provider.image,
                 serviceId: service?.id ? String(service.id) : undefined,
               });
-              setCurrentView('booking');
+              navigateTo('booking');
             }}
-            onBack={() => setCurrentView('client')}
+            onBack={() => navigateTo('client')}
           />
         )}
       </main>
@@ -393,7 +426,7 @@ export default function App() {
           onClose={() => setShowAuthModal(false)}
           onSuccess={(role) => {
             setShowAuthModal(false);
-            setCurrentView(role === 'provider' ? 'provider' : 'client');
+            navigateTo(role === 'provider' ? 'provider' : 'client');
           }}
           onForgotPassword={() => {
             setShowAuthModal(false);

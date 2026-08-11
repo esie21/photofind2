@@ -1,5 +1,5 @@
 import { apiClient } from '../client';
-import { API_CONFIG } from '../config';
+import { API_CONFIG, getUploadUrl } from '../config';
 import { User } from './authService';
 
 const userService = {
@@ -18,8 +18,13 @@ const userService = {
       ? `${API_CONFIG.ENDPOINTS.PROVIDERS.GET_ALL}?${queryString}`
       : API_CONFIG.ENDPOINTS.PROVIDERS.GET_ALL;
     const resp = await apiClient.get<{ data: User[]; meta?: any }>(url);
-    // Normalize property `profile_image` -> `image` for UI compatibility
-    const data = (resp.data || []).map((u: any) => ({ ...u, image: u.profile_image || (u as any).image }));
+    // Normalize property `profile_image` -> `image` for UI compatibility, resolving it
+    // to the current environment's upload host (stored values may be bare paths or
+    // absolute URLs pinned to a different backend host).
+    const data = (resp.data || []).map((u: any) => {
+      const raw = u.profile_image || (u as any).image;
+      return { ...u, image: raw ? getUploadUrl(raw) : raw };
+    });
     return { data, meta: resp.meta };
   },
 

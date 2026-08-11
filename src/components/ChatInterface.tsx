@@ -121,7 +121,7 @@ const participantId = useMemo(() => {
         const token = localStorage.getItem('authToken');
         if (!token) return;
 
-        const socket = createSocket(API_CONFIG.BASE_URL.replace(/\/api$/i, ''), {
+        const socket = createSocket(API_CONFIG.SOCKET_URL, {
           transports: ['websocket'],
           auth: { token },
         });

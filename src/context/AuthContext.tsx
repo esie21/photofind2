@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import authService, { User } from '../api/services/authService';
-import { API_CONFIG } from '../api/config';
+import { getUploadUrl } from '../api/config';
 
 interface AuthContextProps {
   user: User | null;
@@ -104,13 +104,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 function normalizeUserImages(user: User) {
   if (!user) return user;
-  const apiBase = API_CONFIG.BASE_URL.replace(/\/api$/i, '');
+  // Delegate to getUploadUrl so upload paths resolve the same way everywhere - it also
+  // re-points legacy absolute URLs that hardcode a backend host.
   const resolveUrl = (url?: string | null) => {
     if (!url) return url;
-    // If already an absolute URL, just return
-    if (/^https?:\/\//i.test(url)) return url;
-    if (url.startsWith('/uploads')) return `${apiBase}${url}`;
-    return url;
+    if (!/^https?:\/\//i.test(url) && !url.startsWith('/uploads')) return url;
+    return getUploadUrl(url);
   };
 
   return {

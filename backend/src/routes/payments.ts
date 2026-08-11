@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { notificationService } from '../services/notificationService';
 import { settlePaymentSuccess } from '../services/walletService';
 import { paymongoRequest, PayMongoResponse } from '../services/paymongoService';
+import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
 
 const router = express.Router();
 
@@ -12,8 +13,7 @@ const router = express.Router();
 const PAYMONGO_PUBLIC_KEY = process.env.PAYMONGO_PUBLIC_KEY || '';
 const PAYMONGO_WEBHOOK_SECRET = process.env.PAYMONGO_WEBHOOK_SECRET || '';
 
-// Commission rate (configurable)
-const PLATFORM_COMMISSION_RATE = parseFloat(process.env.PLATFORM_COMMISSION_RATE || '0.15'); // 15%
+// Commission rate - shared with bookings.ts price validation, see commissionConfig.ts
 
 // Generate idempotency key for payment - deterministic to prevent duplicate payments
 function generateIdempotencyKey(bookingId: string, clientId: string): string {
@@ -60,6 +60,22 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
       return res.status(403).json({ error: 'Access denied' });
     }
 
+    // Payment only opens once the provider has accepted. Every booking starts as
+    // 'pending' now, so this is what actually enforces "pay after confirmation" -
+    // hiding the button in the UI alone would leave the endpoint open. It also
+    // closes an existing hole: without a status check a client could pay for a
+    // booking that was already cancelled or rejected, putting money into escrow
+    // for work nobody is going to do.
+    const bookingStatus = String(booking.status);
+    if (!['accepted', 'confirmed'].includes(bookingStatus)) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({
+        error: bookingStatus === 'pending'
+          ? 'This booking is still waiting for the provider to confirm it.'
+          : `Cannot pay for a ${bookingStatus} booking`,
+      });
+    }
+
     // Validate payment amount against service price (prevent underpayment)
     const bookingPrice = parseFloat(booking.total_price || 0);
     const servicePrice = parseFloat(booking.service_price || 0);
@@ -72,34 +88,49 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
       });
     }
 
-    // Check if payment already exists
-    const existingPayment = await dbClient.query(
-      'SELECT * FROM payments WHERE booking_id::text = $1',
+    // A booking can accumulate several payment rows - a new one is inserted below
+    // whenever the previous attempt ended 'failed'. So "has this already been paid?"
+    // has to be asked of ALL of them, not of whichever row Postgres happens to return
+    // first: reading rows[0] from an unordered query could hand back the failed
+    // attempt, fall through both guards, and let the client be charged a second time.
+    const settledPayment = await dbClient.query(
+      `SELECT id FROM payments WHERE booking_id::text = $1 AND status = 'succeeded' LIMIT 1`,
+      [booking_id]
+    );
+    if (settledPayment.rows[0]) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({ error: 'Payment already completed for this booking' });
+    }
+
+    // Otherwise reuse the most recent still-open attempt, if there is one.
+    const openPayment = await dbClient.query(
+      `SELECT * FROM payments
+       WHERE booking_id::text = $1 AND status IN ('pending', 'processing')
+       ORDER BY created_at DESC
+       LIMIT 1`,
       [booking_id]
     );
 
-    if (existingPayment.rows[0]) {
-      const payment = existingPayment.rows[0];
-
-      // If already succeeded, return error
-      if (payment.status === 'succeeded') {
-        await dbClient.query('ROLLBACK');
-        return res.status(400).json({ error: 'Payment already completed for this booking' });
-      }
-
-      // If pending/processing, return existing payment intent
-      if (payment.status === 'pending' || payment.status === 'processing') {
-        await dbClient.query('ROLLBACK');
-        return res.json({
-          data: {
-            payment_id: payment.id,
-            payment_intent_id: payment.paymongo_payment_intent_id,
-            client_key: payment.paymongo_client_key,
-            amount: parseFloat(payment.gross_amount),
-            status: payment.status,
-          }
-        });
-      }
+    if (openPayment.rows[0]) {
+      const payment = openPayment.rows[0];
+      await dbClient.query('ROLLBACK');
+      // Must return the same shape as the fresh-intent response below. PaymentSummary
+      // authenticates to PayMongo with `btoa(public_key + ':')`, so omitting public_key
+      // here made every retry send "Basic undefined:" and fail with a 401 - once a
+      // client closed the payment modal they could never pay for that booking again.
+      const reusedGross = parseFloat(payment.gross_amount);
+      return res.json({
+        data: {
+          payment_id: payment.id,
+          payment_intent_id: payment.paymongo_payment_intent_id,
+          client_key: payment.paymongo_client_key,
+          amount: reusedGross,
+          commission: parseFloat(payment.commission_amount),
+          provider_amount: parseFloat(payment.net_provider_amount),
+          status: payment.status,
+          public_key: PAYMONGO_PUBLIC_KEY,
+        }
+      });
     }
 
     // Calculate amounts
@@ -231,6 +262,23 @@ router.post('/attach-method', verifyToken, async (req: Request & { userId?: stri
       return res.status(403).json({ error: 'Access denied' });
     }
     const paymentRecord = paymentRes.rows[0];
+
+    // Re-check the booking here too, not just at create-intent. An intent obtained
+    // while the booking was accepted stays attachable afterwards, so without this a
+    // client could capture money into escrow for a booking that has since been
+    // cancelled or rejected.
+    const attachBookingRes = await pool.query(
+      'SELECT status FROM bookings WHERE id::text = $1',
+      [String(paymentRecord.booking_id)]
+    );
+    const attachBookingStatus = String(attachBookingRes.rows[0]?.status || '');
+    if (!['accepted', 'confirmed'].includes(attachBookingStatus)) {
+      return res.status(400).json({
+        error: attachBookingStatus === 'pending'
+          ? 'This booking is still waiting for the provider to confirm it.'
+          : `Cannot pay for a ${attachBookingStatus || 'missing'} booking`,
+      });
+    }
 
     // Attach payment method to intent
     const result = await paymongoRequest(`/payment_intents/${payment_intent_id}/attach`, 'POST', {

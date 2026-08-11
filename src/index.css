@@ -2378,6 +2378,55 @@ html {
 .border-red-200 { border-color: oklch(.885 .062 18.334); }
 .text-red-800 { color: oklch(.444 .177 26.899); }
 
+/* Solid button backgrounds. Each of these was written in a component alongside
+   `text-white`, but the background utility had no rule here while `.text-white`
+   did - so the buttons rendered as white text on a white card: fully clickable,
+   completely invisible. That is how the provider's "Mark Complete" button
+   disappeared (ProviderDashboard.tsx:605, 1683, 1829), and the same pairing hit
+   the admin approve/reject buttons, the dispute-resolution buttons, and the
+   client's Dispute button in ConfirmCompletionModal.
+   The hover partners were missing too, so these buttons also had no hover
+   feedback. `@media (hover: hover)` matches the generated rules above (see
+   .hover\:bg-gray-50) and keeps hover styling off touch devices. */
+.bg-blue-600 { background-color: var(--color-blue-600); }
+.bg-red-600 { background-color: var(--color-red-600); }
+/* No --color-orange-600/700 in the theme layer, so these use Tailwind v4's
+   literal defaults - same as .text-orange-600 above. */
+.bg-orange-600 { background-color: oklch(.646 .222 41.116); }
+
+@media (hover: hover) {
+  .hover\:bg-blue-700:hover { background-color: var(--color-blue-700); }
+}
+
+@media (hover: hover) {
+  .hover\:bg-red-700:hover { background-color: var(--color-red-700); }
+}
+
+@media (hover: hover) {
+  .hover\:bg-orange-700:hover { background-color: oklch(.553 .195 38.402); }
+}
+
+/* Caption pill overlaid on evidence photos - white text again, so without this
+   the caption was unreadable against a light photo. Mirrors .bg-black\/50 above,
+   including its color-mix progressive enhancement. */
+.bg-black\/60 {
+  background-color: #00000099;
+}
+
+@supports (color: color-mix(in lab, red, red)) {
+  .bg-black\/60 {
+    background-color: color-mix(in oklab, var(--color-black) 60%, transparent);
+  }
+}
+
+/* Modal width caps. Without .max-w-lg every dialog using it (the Complete
+   Service modal among them) stretched to the full window width instead of
+   32rem. No --container-lg/xl/xs tokens in the theme layer, hence the literals. */
+.max-w-xs { max-width: 20rem; }
+.max-w-lg { max-width: 32rem; }
+.max-w-xl { max-width: 36rem; }
+.max-w-full { max-width: 100%; }
+
 @keyframes pulse {
   50% { opacity: .5; }
 }
@@ -2465,5 +2514,50 @@ html {
 @media (prefers-reduced-motion: reduce) {
   .account-menu-panel {
     transition: none;
+  }
+}
+
+.notifications-panel {
+  position: absolute;
+  right: 0;
+  margin-top: 0.5rem;
+  width: 24rem;
+  max-height: 32rem;
+  box-shadow: 0 12px 32px -8px rgba(17, 12, 34, 0.18), 0 4px 12px -4px rgba(17, 12, 34, 0.1);
+}
+
+.notifications-list {
+  min-height: 0;
+}
+
+/* Below the sm breakpoint the bell isn't at the screen edge, so an anchored dropdown
+   can overflow off the side of the viewport - switch to a viewport-anchored sheet
+   instead of scaling the anchored width down. */
+@media (max-width: 639px) {
+  .notifications-panel {
+    position: fixed;
+    left: 0.75rem;
+    right: 0.75rem;
+    top: 4rem;
+    margin-top: 0;
+    width: auto;
+    max-height: 70vh;
+  }
+}
+
+.notification-delete-btn {
+  opacity: 1;
+}
+
+/* Hover-to-reveal only makes sense where hover exists - on mobile the button must
+   stay visible since :hover never fires on touch. */
+@media (min-width: 640px) {
+  .notification-delete-btn {
+    opacity: 0;
+  }
+
+  .group:hover .notification-delete-btn,
+  .group:focus-within .notification-delete-btn {
+    opacity: 1;
   }
 }
