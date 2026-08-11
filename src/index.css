@@ -2419,6 +2419,13 @@ html {
   }
 }
 
+/* Disabled-state utilities. These are used on buttons all over the app (Save,
+   Add Images, Upload Documents, the payment submit) but had no rule here, so a
+   disabled button looked exactly like an enabled one - the only clue was that
+   clicking did nothing. */
+.disabled\:opacity-50:disabled { opacity: .5; }
+.disabled\:cursor-not-allowed:disabled { cursor: not-allowed; }
+
 /* Modal width caps. Without .max-w-lg every dialog using it (the Complete
    Service modal among them) stretched to the full window width instead of
    32rem. No --container-lg/xl/xs tokens in the theme layer, hence the literals. */

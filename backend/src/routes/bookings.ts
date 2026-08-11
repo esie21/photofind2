@@ -68,9 +68,12 @@ async function getIdForForeignKey(userId: string, columnName: string, targetTabl
     const refTable = fkCheck.rows[0]?.foreign_table_name;
 
     if (refTable && refTable !== 'users' && refTable === targetTable) {
-      // Need to get or create record in the referenced table
+      // Need to get or create record in the referenced table. ORDER BY so a user who
+      // somehow has more than one row here always resolves to the same one - taking
+      // rows[0] of an unordered query is what let a provider's services and bookings
+      // end up split across two providers rows.
       const existingResult = await pool.query(
-        `SELECT id FROM ${targetTable} WHERE user_id::text = $1`,
+        `SELECT id FROM ${targetTable} WHERE user_id::text = $1 ORDER BY created_at ASC, id ASC LIMIT 1`,
         [userId]
       );
 

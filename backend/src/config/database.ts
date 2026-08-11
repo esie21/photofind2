@@ -744,6 +744,54 @@ export async function initializeTables() {
       await client.query(`ALTER TABLE transactions ADD CONSTRAINT fk_transactions_payout FOREIGN KEY (payout_id) REFERENCES payouts(id) ON DELETE SET NULL;`);
     }
 
+    // One providers row per user.
+    //
+    // providers.user_id had no unique constraint, and the "create the row on first use"
+    // helpers in services.ts / bookings.ts did a plain INSERT after a SELECT miss - so
+    // two concurrent requests for the same brand-new provider could each insert a row.
+    // A user with two rows then had their services and bookings split across both, and
+    // the ownership check ("You can only update your own services") rejected whichever
+    // half wasn't under the row that got resolved.
+    //
+    // Fold every duplicate onto the oldest row, then add the constraint so it can't
+    // recur. Both steps are idempotent and no-op once the data is clean.
+    try {
+      const dupes = await client.query(`
+        SELECT user_id, COUNT(*) AS n FROM providers GROUP BY user_id HAVING COUNT(*) > 1
+      `);
+      for (const row of dupes.rows) {
+        const all = await client.query(
+          `SELECT id FROM providers WHERE user_id = $1 ORDER BY created_at ASC, id ASC`,
+          [row.user_id]
+        );
+        const keep = all.rows[0].id;
+        const drop = all.rows.slice(1).map((r: any) => String(r.id));
+        for (const table of ['services', 'bookings', 'reviews', 'portfolio']) {
+          await client.query(
+            `UPDATE ${table} SET provider_id = $1 WHERE provider_id::text = ANY($2::text[])`,
+            [keep, drop]
+          );
+        }
+        await client.query(`DELETE FROM providers WHERE id::text = ANY($1::text[])`, [drop]);
+        console.log(
+          `Merged ${drop.length} duplicate providers row(s) for user ${row.user_id} into ${keep}.`
+        );
+      }
+    } catch (e) {
+      console.error('providers de-duplication skipped (non-fatal):', (e as Error).message);
+    }
+
+    try {
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS providers_user_id_unique ON providers (user_id);
+      `);
+    } catch (e) {
+      console.error(
+        'Could not create providers_user_id_unique - a user still has more than one ' +
+        'providers row, so services and bookings may be split across them:', (e as Error).message
+      );
+    }
+
     // Payment system indexes
     await client.query(`CREATE INDEX IF NOT EXISTS idx_payments_booking ON payments (booking_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_payments_client ON payments (client_id);`);

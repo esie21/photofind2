@@ -22,22 +22,35 @@ async function getProviderIdFromUserId(userId: string): Promise<string> {
     `);
     
     if (tableCheck.rows.length > 0 && tableCheck.rows[0].foreign_table_name === 'providers') {
-      // Get provider ID from providers table
+      // Oldest row wins, deterministically. This used to take rows[0] of an unordered
+      // query, so for a user who had ended up with more than one providers row it
+      // returned an arbitrary one - and any service filed under the other row then
+      // failed the ownership check with "You can only update your own services".
       const providerResult = await pool.query(
-        'SELECT id FROM providers WHERE user_id = $1',
+        'SELECT id FROM providers WHERE user_id = $1 ORDER BY created_at ASC, id ASC LIMIT 1',
         [userId]
       );
-      
+
       if (providerResult.rows.length > 0) {
         return providerResult.rows[0].id;
       }
-      
-      // Create provider record if it doesn't exist
+
+      // Create on first use. ON CONFLICT makes two concurrent callers safe - a plain
+      // INSERT here is how duplicate rows got created in the first place.
       const newProvider = await pool.query(
-        'INSERT INTO providers (user_id) VALUES ($1) RETURNING id',
+        `INSERT INTO providers (user_id) VALUES ($1)
+         ON CONFLICT (user_id) DO NOTHING
+         RETURNING id`,
         [userId]
       );
-      return newProvider.rows[0].id;
+      if (newProvider.rows[0]) {
+        return newProvider.rows[0].id;
+      }
+      const existing = await pool.query(
+        'SELECT id FROM providers WHERE user_id = $1 ORDER BY created_at ASC, id ASC LIMIT 1',
+        [userId]
+      );
+      return existing.rows[0].id;
     }
   } catch (error) {
     // If providers table doesn't exist, use userId directly
@@ -45,6 +58,24 @@ async function getProviderIdFromUserId(userId: string): Promise<string> {
   }
   
   return userId;
+}
+
+// True when `providerIdOnRow` belongs to `userId` - either it IS the user id (older
+// schemas where services referenced users directly) or it is one of that user's rows in
+// the providers table. Checking membership rather than equality against a single
+// resolved id means a user who ended up with more than one providers row can still
+// manage every service they own.
+async function ownsProviderRow(userId: string, providerIdOnRow: string): Promise<boolean> {
+  if (String(providerIdOnRow) === String(userId)) return true;
+  try {
+    const r = await pool.query(
+      'SELECT 1 FROM providers WHERE id::text = $1 AND user_id::text = $2 LIMIT 1',
+      [String(providerIdOnRow), String(userId)]
+    );
+    return r.rows.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 // Get all services (public)
@@ -314,6 +345,13 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       return res.status(400).json({ error: 'Title and price are required' });
     }
 
+    // A zero price isn't just cosmetic: booking price validation and the payment
+    // underpayment check are both guarded by `servicePrice > 0`, so a free service
+    // skips price validation entirely and can be booked for any amount.
+    if (Number(price) <= 0 || !Number.isFinite(Number(price))) {
+      return res.status(400).json({ error: 'Price must be greater than zero' });
+    }
+
     // Get provider_id from user_id (handles both direct users reference and providers table)
     const providerId = await getProviderIdFromUserId(userId);
 
@@ -447,6 +485,11 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
+    // Same zero-price rule as service creation - see the comment there.
+    if (price !== undefined && price !== null && (Number(price) <= 0 || !Number.isFinite(Number(price)))) {
+      return res.status(400).json({ error: 'Price must be greater than zero' });
+    }
+
     // Get provider ID from user ID
     const providerId = await getProviderIdFromUserId(userId);
 
@@ -461,7 +504,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     }
 
     // Compare as strings to handle both UUID and integer
-    if (String(checkResult.rows[0].provider_id) !== String(providerId)) {
+    if (!(await ownsProviderRow(String(userId), String(checkResult.rows[0].provider_id)))) {
       return res.status(403).json({ error: 'You can only update your own services' });
     }
 
@@ -583,7 +626,7 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
     }
 
     // Compare as strings to handle both UUID and integer
-    if (String(checkResult.rows[0].provider_id) !== String(providerId)) {
+    if (!(await ownsProviderRow(String(userId), String(checkResult.rows[0].provider_id)))) {
       return res.status(403).json({ error: 'You can only delete your own services' });
     }
 

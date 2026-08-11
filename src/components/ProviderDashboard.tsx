@@ -44,6 +44,9 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   const verificationFileRef = useRef<HTMLInputElement | null>(null);
   const [uploadingVerification, setUploadingVerification] = useState(false);
   const [editMode, setEditMode] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
+  const [uploadingPortfolio, setUploadingPortfolio] = useState(false);
   const [packages, setPackages] = useState<any[]>([]);
   const [isLoadingPackages, setIsLoadingPackages] = useState(false);
   const [packagesError, setPackagesError] = useState<string | null>(null);
@@ -70,20 +73,61 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   const [allBookingPage, setAllBookingPage] = useState(1);
   const recentBookingItemsPerPage = 5;
   const allBookingItemsPerPage = 10;
-  const [formState, setFormState] = useState<any>({
-    name: user?.name || 'Sarah Johnson',
-    title: user?.title || '',
-    bio: user?.bio || '',
-    location: user?.location || '',
-    category: user?.category || 'Photography',
-    years_experience: user?.years_experience || 10,
-    profile_image: user?.profile_image
-      ? getUploadUrl(user.profile_image)
+  // Seed the form from what the provider actually has. This used to fall back to
+  // 'Sarah Johnson', 10 years and 'Photography', which were then written to the
+  // account on the first Save - inventing data the provider never entered. Real
+  // values only; the sample text lives in each input's placeholder instead.
+  const seedFormState = (u: any) => ({
+    name: u?.name ?? '',
+    title: u?.title ?? '',
+    bio: u?.bio ?? '',
+    location: u?.location ?? '',
+    category: u?.category ?? '',
+    // '' rather than 0 so an unset value stays unset instead of claiming zero years.
+    years_experience: u?.years_experience ?? '',
+    profile_image: u?.profile_image
+      ? getUploadUrl(u.profile_image)
       : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
-    portfolio_images: (user?.portfolio_images || []).map(
-      (img: string) => getUploadUrl(img)
-    ),
+    portfolio_images: (u?.portfolio_images || []).map((img: string) => getUploadUrl(img)),
   });
+
+  const [formState, setFormState] = useState<any>(() => seedFormState(user));
+
+  // Mirrors the limits PUT /api/users/:id enforces (which in turn mirror the column
+  // widths). Catching it here means the common mistakes never round-trip.
+  // A service priced at 0 isn't just odd: booking price validation and the payment
+  // underpayment check are both guarded by `servicePrice > 0`, so a free service skips
+  // price validation entirely and can be booked for any amount. The backend rejects it
+  // too; this stops the provider getting there in the first place.
+  const validatePackages = (pkgs: any[]): string | null => {
+    for (const pkg of pkgs) {
+      const label = pkg.title?.trim() || 'Untitled service';
+      if (!pkg.title || !String(pkg.title).trim()) return 'Every service needs a name.';
+      if (!pkg.enable_hourly && !pkg.enable_package) {
+        return `"${label}" needs either an hourly rate or a package price.`;
+      }
+      if (pkg.enable_hourly && !(Number(pkg.hourly_rate) > 0)) {
+        return `"${label}" needs an hourly rate greater than zero.`;
+      }
+      if (pkg.enable_package && !(Number(pkg.package_price) > 0)) {
+        return `"${label}" needs a package price greater than zero.`;
+      }
+    }
+    return null;
+  };
+
+  const validateProfile = (f: any): string | null => {
+    if (!f.name || !String(f.name).trim()) return 'Name is required.';
+    if (String(f.name).trim().length > 100) return 'Name must be 100 characters or fewer.';
+    if (String(f.title || '').trim().length > 255) return 'Title must be 255 characters or fewer.';
+    if (String(f.location || '').trim().length > 255) return 'Location must be 255 characters or fewer.';
+    if (String(f.bio || '').trim().length > 5000) return 'Bio must be 5000 characters or fewer.';
+    if (f.years_experience !== '' && f.years_experience !== null && f.years_experience !== undefined) {
+      const y = Number(f.years_experience);
+      if (!Number.isInteger(y) || y < 0 || y > 80) return 'Years of experience must be a whole number between 0 and 80.';
+    }
+    return null;
+  };
 
 
   useEffect(() => {
@@ -121,25 +165,15 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
     ];
   })();
 
-  // Sync formState when user changes
+  // Re-seed the form when the signed-in user changes - but never while they are
+  // editing. refreshUser() runs after portfolio uploads, portfolio deletes and
+  // verification uploads, and this effect would fire on the resulting `user` change
+  // and silently throw away everything typed but not yet saved.
   useEffect(() => {
-    if (!user) return;
-
-    setFormState({
-      name: user.name || 'Sarah Johnson',
-      title: user.title || '',
-      bio: user.bio || '',
-      location: user.location || '',
-      category: user.category || 'Photography',
-      years_experience: user.years_experience || 10,
-      profile_image: user.profile_image
-        ? getUploadUrl(user.profile_image)
-        : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
-      portfolio_images: (user.portfolio_images || []).map(
-        (img: string) => getUploadUrl(img)
-      ),
-    });
-  }, [user]);
+    if (!user || editMode) return;
+    setFormState(seedFormState(user));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, editMode]);
 
   // Load services/packages for the provider
   useEffect(() => {
@@ -187,21 +221,18 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
             enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
           })));
         } else {
-          // Initialize with default packages if none exist
-          setPackages([
-            { id: null, title: 'Basic Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 300, package_price: 1200, duration_minutes: 240, enable_hourly: true, enable_package: true },
-            { id: null, title: 'Standard Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 400, package_price: 2400, duration_minutes: 480, enable_hourly: true, enable_package: true },
-            { id: null, title: 'Premium Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 500, package_price: 3600, duration_minutes: 720, enable_hourly: true, enable_package: true },
-          ]);
+          // Start empty. This used to seed three placeholder packages with id: null -
+          // which looked like real services in the editor, so the next profile save
+          // (even one that only changed the bio) created all three as genuine bookable
+          // services at prices the provider never chose.
+          setPackages([]);
         }
-      } catch (error) {
+      } catch (error: any) {
+        // Same reasoning as above - never invent services the provider didn't create,
+        // least of all when we don't even know what they already have.
         console.error('Failed to load packages:', error);
-        // Initialize with default packages on error
-        setPackages([
-          { id: null, title: 'Basic Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 300, package_price: 1200, duration_minutes: 240, enable_hourly: true, enable_package: true },
-          { id: null, title: 'Standard Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 400, package_price: 2400, duration_minutes: 480, enable_hourly: true, enable_package: true },
-          { id: null, title: 'Premium Package', description: 'Description of package features and benefits...', category: 'Photography', hourly_rate: 500, package_price: 3600, duration_minutes: 720, enable_hourly: true, enable_package: true },
-        ]);
+        setPackagesError(error?.message || 'Could not load your services.');
+        setPackages([]);
       } finally {
         setIsLoadingPackages(false);
       }
@@ -387,6 +418,18 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
       </span>
     );
   };
+
+  // Distinct clients this provider has actually served (a booking that never went
+  // anywhere doesn't count).
+  const distinctClientCount = useMemo(() => {
+    const ids = new Set(
+      providerBookings
+        .filter((b: any) => !['cancelled', 'rejected'].includes(b.status))
+        .map((b: any) => String(b.client_id ?? b.client))
+        .filter((id: string) => id && id !== 'undefined')
+    );
+    return ids.size;
+  }, [providerBookings]);
 
   const getBookingCategory = (status: string) => {
     if (status === 'completed') return 'completed';
@@ -941,15 +984,26 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                 ) : (
                   <div className="flex gap-2">
                     <button
+                      disabled={isSavingProfile}
                       onClick={async () => {
-                        if (!user) return;
+                        if (!user || isSavingProfile) return;
+
+                        const validationError = validateProfile(formState) || validatePackages(packages);
+                        if (validationError) {
+                          setProfileSaveError(validationError);
+                          toast.error('Check your profile', validationError);
+                          return;
+                        }
+
+                        setIsSavingProfile(true);
+                        setProfileSaveError(null);
                         try {
                           // Save profile information
                           const payload: any = {
                             name: formState.name,
                             title: formState.title,
                             bio: formState.bio,
-                            years_experience: formState.years_experience,
+                            years_experience: formState.years_experience === '' ? null : Number(formState.years_experience),
                             location: formState.location,
                             category: formState.category,
                             profile_image: formState.profile_image,
@@ -1011,44 +1065,58 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                 enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly' || s.pricing_type === 'both'),
                                 enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
                               })));
-                            } catch (packageError) {
+                            } catch (packageError: any) {
+                              // This used to be swallowed with "continue even if packages
+                              // fail to save", so the profile reported success while the
+                              // services silently didn't persist.
                               console.error('Failed to save packages:', packageError);
-                              // Continue even if packages fail to save
+                              throw new Error(packageError?.message || 'Your profile saved, but the services could not be saved.');
                             }
                           }
 
                           await refreshUser();
                           setEditMode(false);
-                        } catch (err) {
+                          toast.success('Profile saved', 'Your changes are live.');
+                        } catch (err: any) {
+                          // Previously just a console.error - the save failed, edit mode
+                          // stayed on, and nothing told the provider why.
+                          const message = err?.message || 'Could not save your profile. Please try again.';
                           console.error('Failed to save profile', err);
+                          setProfileSaveError(message);
+                          toast.error('Save failed', message);
+                        } finally {
+                          setIsSavingProfile(false);
                         }
                       }}
-                      className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2"
+                      className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Save
+                      {isSavingProfile ? 'Saving...' : 'Save'}
                     </button>
                     <button
+                      disabled={isSavingProfile}
                       onClick={() => {
-                        setFormState((s: any) => ({
-                          ...s,
-                          name: user?.name || s.name,
-                          title: (user as any)?.title || s.title,
-                          bio: (user as any)?.bio || s.bio,
-                          years_experience: (user as any)?.years_experience || s.years_experience,
-                          location: (user as any)?.location || s.location,
-                          category: (user as any)?.category || s.category,
-                          profile_image: (user as any)?.profile_image || s.profile_image,
-                          portfolio_images: (user as any)?.portfolio_images || s.portfolio_images,
-                        }));
+                        // Reseed straight from the server copy. The old version restored
+                        // with `user?.field || s.field`, so a field the provider had
+                        // *cleared* fell back to the edited (empty) value and Cancel
+                        // silently kept the change.
+                        setFormState(seedFormState(user));
+                        setProfileSaveError(null);
                         setEditMode(false);
                       }}
-                      className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
+                      className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Cancel
                     </button>
                   </div>
                 )}
               </div>
+
+              {profileSaveError && (
+                <div className="mb-6 flex items-start gap-3 p-4 bg-red-50 border border-red-200 rounded-xl">
+                  <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                  <p className="text-sm text-red-800">{profileSaveError}</p>
+                </div>
+              )}
 
               <div className="space-y-6">
                 <div className="flex items-start gap-6">
@@ -1090,6 +1158,8 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                         id="profile-name"
                         name="name"
                         value={formState.name}
+                        maxLength={100}
+                        placeholder="Your name"
                         onChange={(e) => setFormState((s: any) => ({ ...s, name: e.target.value }))}
                         className="text-xl text-gray-900 font-semibold border border-gray-200 rounded-md px-2 py-1"
                       />
@@ -1101,20 +1171,32 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                         id="profile-title"
                         name="title"
                         value={formState.title}
+                        maxLength={255}
+                        placeholder="e.g. Wedding Photographer"
                         onChange={(e) => setFormState((s: any) => ({ ...s, title: e.target.value }))}
                         className="text-sm text-gray-600 border border-gray-200 rounded-md px-2 py-1 mb-2"
                       />
                     ) : (
                       <p className="text-gray-600 mb-4">{formState.title}</p>
                     )}
+                    {/* These were hardcoded to "4.9 (127 reviews)" and "156 clients" for
+                        every provider, including brand-new ones with no history at all.
+                        reviewStats is already fetched by fetchReviews() above, and the
+                        client count comes from the bookings this dashboard already has. */}
                     <div className="flex items-center gap-4 text-sm text-gray-600">
                       <div className="flex items-center gap-1">
                         <Star className="w-4 h-4 fill-yellow-400 text-yellow-400" />
-                        <span>4.9 (127 reviews)</span>
+                        <span>
+                          {reviewStats.totalReviews > 0
+                            ? `${reviewStats.averageRating} (${reviewStats.totalReviews} review${reviewStats.totalReviews === 1 ? '' : 's'})`
+                            : 'No reviews yet'}
+                        </span>
                       </div>
                       <div className="flex items-center gap-1">
                         <Users className="w-4 h-4" />
-                        <span>156 clients</span>
+                        <span>
+                          {distinctClientCount} client{distinctClientCount === 1 ? '' : 's'}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -1140,8 +1222,16 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       id="profile-years-experience"
                       name="years_experience"
                       type="number"
+                      min={0}
+                      max={80}
+                      placeholder="e.g. 5"
                       value={formState.years_experience}
-                      onChange={(e) => setFormState((s: any) => ({ ...s, years_experience: Number(e.target.value) }))}
+                      onChange={(e) => setFormState((s: any) => ({
+                        ...s,
+                        // Keep '' as "not set" - Number('') is 0, which turned a cleared
+                        // field into a claim of zero years.
+                        years_experience: e.target.value === '' ? '' : Number(e.target.value),
+                      }))}
                       readOnly={!editMode}
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                     />
@@ -1153,6 +1243,8 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       name="location"
                       type="text"
                       value={formState.location}
+                      maxLength={255}
+                      placeholder="City, Province"
                       onChange={(e) => setFormState((s: any) => ({ ...s, location: e.target.value }))}
                       readOnly={!editMode}
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
@@ -1174,6 +1266,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       onChange={(e) => setFormState((s: any) => ({ ...s, category: e.target.value }))}
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none bg-white"
                     >
+                      <option value="">Select a category</option>
                       {CATEGORY_OPTIONS.map((cat) => (
                         <option key={cat} value={cat}>{cat}</option>
                       ))}
@@ -1290,22 +1383,34 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                   onChange={async (e) => {
                     const files = Array.from(e.target.files || []);
                     if (!user || files.length === 0) return;
+                    setUploadingPortfolio(true);
                     try {
                       const resp = await userService.uploadPortfolioImages(user.id, files);
+                      // Update the form directly rather than relying on refreshUser():
+                      // the resync effect is deliberately paused while editing, so the
+                      // new images would otherwise not appear until the edit ended.
+                      setFormState((s: any) => ({
+                        ...s,
+                        portfolio_images: (resp.portfolio_images || []).map((img: string) => getUploadUrl(img)),
+                      }));
                       await refreshUser();
-                      setFormState((s: any) => ({ ...s, portfolio_images: resp.portfolio_images }));
-                    } catch (err) {
+                      toast.success('Images added', `${files.length} image${files.length > 1 ? 's' : ''} uploaded.`);
+                    } catch (err: any) {
                       console.error('Portfolio update failed', err);
+                      toast.error('Upload failed', err?.message || 'Could not upload those images.');
+                    } finally {
+                      setUploadingPortfolio(false);
+                      if (portfolioFileRef.current) portfolioFileRef.current.value = '';
                     }
                   }}
                 />
                 <button
                   onClick={() => { if (editMode) portfolioFileRef.current?.click(); }}
-                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2"
-                  disabled={!editMode}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={!editMode || uploadingPortfolio}
                 >
                   <Plus className="w-4 h-4" />
-                  Add Images
+                  {uploadingPortfolio ? 'Uploading...' : 'Add Images'}
                 </button>
               </div>
 
@@ -1320,15 +1425,18 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                     {editMode && (
                       <button
                         onClick={async () => {
+                          if (!user) return;
                           const arr = (formState.portfolio_images || []).filter((_: any, i: number) => i !== index);
-                          setFormState((s: any) => ({ ...s, portfolio_images: arr }));
-                          if (user) {
-                            try {
-                              await userService.updateUser(user.id, { portfolio_images: arr });
-                              await refreshUser();
-                            } catch (err) {
-                              console.error('Failed to remove image', err);
-                            }
+                          try {
+                            // Persist first, then update the UI. Removing it locally up
+                            // front meant a failed request still looked like a successful
+                            // delete, and the image reappeared on the next refresh.
+                            await userService.updateUser(user.id, { portfolio_images: arr });
+                            setFormState((s: any) => ({ ...s, portfolio_images: arr }));
+                            await refreshUser();
+                          } catch (err: any) {
+                            console.error('Failed to remove image', err);
+                            toast.error('Could not remove image', err?.message || 'Please try again.');
                           }
                         }}
                         className="absolute top-2 right-2 p-2 bg-white rounded-md hover:bg-gray-100"
@@ -1337,14 +1445,25 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                         <XCircle className="w-4 h-4 text-red-600" />
                       </button>
                     )}
-                    <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center">
-                      <button className="p-2 bg-white rounded-lg hover:bg-gray-100">
-                        <Upload className="w-5 h-5 text-gray-700" />
-                      </button>
-                    </div>
+                    {editMode && (
+                      <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center">
+                        <button
+                          onClick={() => portfolioFileRef.current?.click()}
+                          className="p-2 bg-white rounded-lg hover:bg-gray-100"
+                          title="Add more images"
+                        >
+                          <Upload className="w-5 h-5 text-gray-700" />
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
-                <button className="aspect-square border-2 border-dashed border-gray-300 rounded-xl hover:border-purple-500 hover:bg-purple-50 transition-all flex items-center justify-center">
+                <button
+                  onClick={() => { if (editMode) portfolioFileRef.current?.click(); }}
+                  disabled={!editMode || uploadingPortfolio}
+                  title={editMode ? 'Add images' : 'Click "Edit Profile" to add images'}
+                  className="aspect-square border-2 border-dashed border-gray-300 rounded-xl hover:border-purple-500 hover:bg-purple-50 transition-all flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                >
                   <Plus className="w-8 h-8 text-gray-400" />
                 </button>
               </div>
@@ -1381,6 +1500,18 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                   {Array.from({ length: 3 }).map((_, i) => (
                     <ServiceCardSkeleton key={i} />
                   ))}
+                </div>
+              ) : packagesError ? (
+                <InlineError message={packagesError} onRetry={() => setPackages([])} />
+              ) : packages.length === 0 ? (
+                <div className="p-8 border-2 border-dashed border-gray-200 rounded-xl text-center">
+                  <Tag className="w-8 h-8 text-gray-300 mx-auto mb-3" />
+                  <p className="text-gray-900 font-medium mb-1">No services yet</p>
+                  <p className="text-sm text-gray-500">
+                    {editMode
+                      ? 'Use "Add Service" above to create your first one.'
+                      : 'Click "Edit Profile" above, then "Add Service", to create your first one.'}
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -1421,18 +1552,22 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                               </span>
                             )}
                           </div>
-                          {editMode && packages.length > 1 && (
+                          {editMode && (
                             <button
                               onClick={async () => {
                                 if (pkg.id && user) {
                                   try {
                                     await serviceService.deleteService(pkg.id);
-                                  } catch (error) {
+                                  } catch (error: any) {
+                                    // setPackages used to run regardless, so a refused
+                                    // delete still removed the row from the list and the
+                                    // service quietly came back on reload.
                                     console.error('Failed to delete service:', error);
+                                    toast.error('Could not delete service', error?.message || 'Please try again.');
+                                    return;
                                   }
                                 }
-                                const updated = packages.filter((_, i) => i !== index);
-                                setPackages(updated);
+                                setPackages(packages.filter((_, i) => i !== index));
                               }}
                               className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                               title="Delete package"

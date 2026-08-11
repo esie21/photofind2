@@ -156,6 +156,42 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
     const { name, bio, years_experience, location, category, title, profile_image, portfolio_images } = req.body;
     console.log('Update user payload', { reqUserId: req.userId, targetId: userId, payload: { name, bio, years_experience, location, category, title, profile_image, portfolio_images } });
 
+    // Validate before touching the database. Without this, values that simply don't fit
+    // the column (a name over 100 chars, a location over 255, a years_experience outside
+    // int range) made Postgres throw and surfaced as a generic 500 - which the profile
+    // form swallowed, so Save looked like it did nothing. Meanwhile an empty name or a
+    // negative years_experience sailed through and were stored as-is.
+    const LIMITS: Record<string, number> = { name: 100, location: 255, title: 255, category: 100, bio: 5000 };
+    const tooLong = (v: unknown, max: number) => typeof v === 'string' && v.trim().length > max;
+
+    if (name !== undefined) {
+      if (typeof name !== 'string' || name.trim().length === 0) {
+        return res.status(400).json({ error: 'Name is required' });
+      }
+      if (tooLong(name, LIMITS.name)) {
+        return res.status(400).json({ error: `Name must be ${LIMITS.name} characters or fewer` });
+      }
+    }
+    for (const [field, value] of Object.entries({ location, title, category, bio })) {
+      if (value !== undefined && value !== null) {
+        if (typeof value !== 'string') {
+          return res.status(400).json({ error: `${field} must be text` });
+        }
+        if (tooLong(value, LIMITS[field])) {
+          return res.status(400).json({ error: `${field} must be ${LIMITS[field]} characters or fewer` });
+        }
+      }
+    }
+    if (years_experience !== undefined && years_experience !== null && years_experience !== '') {
+      const years = Number(years_experience);
+      if (!Number.isInteger(years) || years < 0 || years > 80) {
+        return res.status(400).json({ error: 'Years of experience must be a whole number between 0 and 80' });
+      }
+    }
+    if (portfolio_images !== undefined && portfolio_images !== null && !Array.isArray(portfolio_images)) {
+      return res.status(400).json({ error: 'portfolio_images must be an array' });
+    }
+
     // Build dynamic update
     const updates = [] as string[];
     const values: any[] = [];
@@ -163,19 +199,22 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
 
     if (name !== undefined) {
       updates.push(`name = $${idx++}`);
-      values.push(name);
+      values.push(name.trim());
     }
     if (bio !== undefined) {
       updates.push(`bio = $${idx++}`);
-      values.push(bio);
+      values.push(bio === null ? null : String(bio).trim());
     }
     if (years_experience !== undefined) {
       updates.push(`years_experience = $${idx++}`);
-      values.push(years_experience);
+      // '' from an emptied number input means "not set", not 0.
+      values.push(
+        years_experience === null || years_experience === '' ? null : Number(years_experience)
+      );
     }
     if (location !== undefined) {
       updates.push(`location = $${idx++}`);
-      values.push(location);
+      values.push(location === null ? null : String(location).trim());
     }
     if (profile_image !== undefined) {
       updates.push(`profile_image = $${idx++}`);
@@ -187,11 +226,11 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
     }
     if (category !== undefined) {
       updates.push(`category = $${idx++}`);
-      values.push(category);
+      values.push(category === null ? null : String(category).trim());
     }
     if (title !== undefined) {
       updates.push(`title = $${idx++}`);
-      values.push(title);
+      values.push(title === null ? null : String(title).trim());
     }
 
     if (updates.length === 0) {
