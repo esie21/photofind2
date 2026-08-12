@@ -2,7 +2,15 @@ import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
-import { MINIMUM_PAYOUT_AMOUNT } from '../config/payoutConfig';
+import {
+  MINIMUM_PAYOUT_AMOUNT,
+  MAX_CONCURRENT_PAYOUT_REQUESTS,
+  PAYOUT_METHODS,
+  isPayoutMethod,
+  toCentavos,
+  validatePayoutDetails,
+} from '../config/payoutConfig';
+import { ensureProviderWallet } from '../services/walletService';
 import { auditService, AuditAction } from '../services/auditService';
 
 const router = express.Router();
@@ -21,8 +29,10 @@ router.post('/request', verifyToken, async (req: Request & { userId?: string }, 
     return res.status(403).json({ error: 'Only providers can request payouts' });
   }
 
-  const payoutAmount = parseFloat(amount);
-  if (isNaN(payoutAmount) || payoutAmount <= 0) {
+  // Rounded to centavos before anything is compared against it, so the amount that is
+  // checked is the same amount that gets stored - see toCentavos.
+  const payoutAmount = toCentavos(parseFloat(amount));
+  if (!Number.isFinite(payoutAmount) || payoutAmount <= 0) {
     return res.status(400).json({ error: 'Invalid payout amount' });
   }
 
@@ -33,12 +43,27 @@ router.post('/request', verifyToken, async (req: Request & { userId?: string }, 
     });
   }
 
-  if (!payout_method) {
-    return res.status(400).json({ error: 'payout_method is required' });
+  // Was `if (!payout_method)` and nothing else: any truthy string was stored as the
+  // method, and payout_details was never looked at, so a request could name a payment
+  // rail that doesn't exist or carry no destination at all.
+  if (!isPayoutMethod(payout_method)) {
+    return res.status(400).json({
+      error: `payout_method must be one of: ${PAYOUT_METHODS.join(', ')}`,
+      valid_methods: PAYOUT_METHODS,
+    });
+  }
+
+  const destination = validatePayoutDetails(payout_method, payout_details);
+  if (destination.error) {
+    return res.status(400).json({ error: destination.error });
   }
 
   const dbClient = await pool.connect();
   try {
+    // GET /wallet/my creates the wallet on demand but this route only looked one up, so
+    // a provider who reached the form without it having loaded hit a dead-end 404.
+    await ensureProviderWallet(providerId);
+
     await dbClient.query('BEGIN');
 
     // Get wallet with lock
@@ -71,23 +96,31 @@ router.post('/request', verifyToken, async (req: Request & { userId?: string }, 
       [providerId]
     );
 
-    if (parseInt(pendingPayouts.rows[0].count) >= 3) {
+    const pendingCount = parseInt(pendingPayouts.rows[0].count);
+    if (pendingCount >= MAX_CONCURRENT_PAYOUT_REQUESTS) {
       await dbClient.query('ROLLBACK');
-      return res.status(400).json({ error: 'You have too many pending payout requests. Please wait for them to be processed.' });
+      return res.status(400).json({
+        error: `You already have ${pendingCount} payout requests in progress. Wait for one to be processed, or cancel a pending request first.`,
+        pending_payouts_count: pendingCount,
+        max_concurrent_payouts: MAX_CONCURRENT_PAYOUT_REQUESTS,
+      });
     }
 
-    // Create payout request
+    // Create payout request. The stored details are the validated and normalised ones -
+    // a mobile number always lands as 09XXXXXXXXX and an account number as bare digits,
+    // whatever shape the client typed them in.
     const payoutRes = await dbClient.query(
       `INSERT INTO payouts (provider_id, wallet_id, amount, payout_method, payout_details, status)
        VALUES ($1, $2, $3, $4, $5, 'pending')
        RETURNING *`,
-      [providerId, wallet.id, payoutAmount, payout_method, JSON.stringify(payout_details || {})]
+      [providerId, wallet.id, payoutAmount, payout_method, JSON.stringify(destination.details)]
     );
 
     const payout = payoutRes.rows[0];
 
-    // Deduct from available balance (hold for payout)
-    const newAvailableBalance = availableBalance - payoutAmount;
+    // Deduct from available balance (hold for payout). Rounded because the subtraction
+    // is float arithmetic: 1000.10 - 500.05 lands on 500.04999999999995.
+    const newAvailableBalance = toCentavos(availableBalance - payoutAmount);
     await dbClient.query(
       'UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2',
       [newAvailableBalance, wallet.id]

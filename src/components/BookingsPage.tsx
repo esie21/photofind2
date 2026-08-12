@@ -32,8 +32,33 @@ const RESCHEDULABLE_STATUSES = ['pending', 'accepted', 'confirmed'];
 // is what actually enforces the rule - payment_status is 'unpaid' before an intent
 // exists and 'pending' once one does, so only 'paid' means the money actually landed.
 const PAYABLE_STATUSES = ['accepted', 'confirmed'];
-function isPayable(booking: { status: string; payment_status?: string }) {
-  return PAYABLE_STATUSES.includes(booking.status) && booking.payment_status !== 'paid';
+function isPayable(booking: { status: string; payment_status?: string; payment_due_at?: string | null }) {
+  if (!PAYABLE_STATUSES.includes(booking.status) || booking.payment_status === 'paid') return false;
+  // The deadline closes payment on the server (create-intent and attach-method both check
+  // it), so the button has to disappear at the same moment or it just leads to a refusal.
+  // The sweep that cancels the booking runs every 10 minutes, so there is a window where
+  // the booking still looks accepted but can no longer be paid.
+  if (booking.payment_due_at && new Date(booking.payment_due_at).getTime() < Date.now()) return false;
+  return true;
+}
+
+// How long the client has left to pay, in words. Returns null once there is no deadline
+// left to talk about.
+function describePaymentDeadline(dueAt?: string | null): { text: string; urgent: boolean } | null {
+  if (!dueAt) return null;
+  const msLeft = new Date(dueAt).getTime() - Date.now();
+  if (isNaN(msLeft)) return null;
+  if (msLeft <= 0) return { text: 'Payment window closed', urgent: true };
+
+  const hours = Math.floor(msLeft / (60 * 60 * 1000));
+  const minutes = Math.floor((msLeft % (60 * 60 * 1000)) / (60 * 1000));
+  const left = hours >= 24
+    ? `${Math.floor(hours / 24)} day${Math.floor(hours / 24) === 1 ? '' : 's'}`
+    : hours >= 1
+      ? `${hours}h ${minutes}m`
+      : `${minutes} minute${minutes === 1 ? '' : 's'}`;
+
+  return { text: `Pay within ${left} or the slot is released`, urgent: hours < 6 };
 }
 
 type StatusFilter = 'all' | 'upcoming' | 'completed' | 'cancelled';
@@ -75,10 +100,18 @@ export function BookingsPage() {
   const [reviewedBookingIds, setReviewedBookingIds] = useState<Set<string>>(new Set());
   const [reschedulingId, setReschedulingId] = useState<string | null>(null);
   const [payingBooking, setPayingBooking] = useState<any>(null);
+  const [checkingPaymentFor, setCheckingPaymentFor] = useState<string | null>(null);
 
-  const fetchBookings = async () => {
-    setLoading(true);
-    setError(null);
+  // `silent` skips the full-page spinner, for refreshes that happen behind an open modal
+  // or behind a button's own pending state. `resetPage` is off for those too - a refresh
+  // triggered by closing the payment modal shouldn't throw the reader back to page 1.
+  // Returns the mapped rows so a caller can act on fresh data instead of state that
+  // hasn't re-rendered yet.
+  const fetchBookings = async ({ silent = false, resetPage = true } = {}): Promise<any[]> => {
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const data = isProvider
         ? await bookingService.getMyProviderBookings()
@@ -111,6 +144,8 @@ export function BookingsPage() {
           price: Number(b.total_price || b.totalPrice || b.price || 0),
           status: b.status,
           payment_status: b.payment_status,
+          payment_due_at: b.payment_due_at,
+          cancellation_reason: b.cancellation_reason,
           dispute_reason: b.dispute_reason,
           provider_completed_at: b.provider_completed_at,
           completion_notes: b.completion_notes,
@@ -126,13 +161,43 @@ export function BookingsPage() {
       });
 
       setBookings(mapped);
-      setPage(1);
+      if (resetPage) setPage(1);
+      return mapped;
     } catch (err: any) {
       console.error('Failed to fetch bookings', err);
+      // A silent refresh is a background nicety - it must not blank the list the reader
+      // is looking at or replace it with a full-page error. Keep what's on screen and
+      // hand the caller the snapshot it already had.
+      if (silent) return bookings;
       setError(err?.message || 'Failed to load bookings');
       setBookings([]);
+      return [];
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
+    }
+  };
+
+  // Opening the payment modal re-reads the booking first. The list is a snapshot, and a
+  // booking paid moments ago (in this tab or another) still looked payable in it - which
+  // is how a client ended up staring at "Payment Failed / already completed" for a
+  // booking they had in fact just paid for.
+  const openPayment = async (booking: any) => {
+    setCheckingPaymentFor(String(booking.id));
+    try {
+      const fresh = await fetchBookings({ silent: true, resetPage: false });
+      const current = fresh.find((b: any) => String(b.id) === String(booking.id)) || booking;
+
+      if (!isPayable(current)) {
+        if (current.payment_status === 'paid') {
+          toast.success('Already paid', 'This booking has been paid for - nothing more to do.');
+        } else {
+          toast.info('Payment not available', `This booking can't be paid while it is ${current.status}.`);
+        }
+        return;
+      }
+      setPayingBooking(current);
+    } finally {
+      setCheckingPaymentFor(null);
     }
   };
 
@@ -232,7 +297,7 @@ export function BookingsPage() {
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 text-center">
             <p className="text-sm text-red-600 mb-3">{error}</p>
             <button
-              onClick={fetchBookings}
+              onClick={() => fetchBookings()}
               className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm"
             >
               Try again
@@ -302,6 +367,26 @@ export function BookingsPage() {
                           </span>
                         </div>
 
+                        {/* The payment deadline, while it still matters. Clients used to
+                            get no warning at all that an unpaid booking would lose its
+                            slot - the first they heard was the cancellation. */}
+                        {!isProvider && PAYABLE_STATUSES.includes(booking.status)
+                          && booking.payment_status !== 'paid'
+                          && describePaymentDeadline(booking.payment_due_at) && (
+                          <p className={`flex items-center gap-2 text-xs mt-2 ${
+                            describePaymentDeadline(booking.payment_due_at)!.urgent ? 'text-red-600' : 'text-amber-700'
+                          }`}>
+                            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                            {describePaymentDeadline(booking.payment_due_at)!.text}
+                          </p>
+                        )}
+
+                        {/* Says why, so an expiry doesn't read as the other party walking
+                            away - 'cancelled' now covers both. */}
+                        {booking.status === 'cancelled' && booking.cancellation_reason && (
+                          <p className="text-xs text-gray-500 mt-2">{booking.cancellation_reason}</p>
+                        )}
+
                         <div className="flex flex-wrap items-center justify-between gap-3 mt-3">
                           <span className={`px-3 py-1 rounded-full text-xs font-semibold ${statusStyle.bg} ${statusStyle.text}`}>
                             {statusStyle.label}
@@ -318,10 +403,11 @@ export function BookingsPage() {
                           <div className="flex items-center gap-4">
                             {!isProvider && isPayable(booking) && (
                               <button
-                                onClick={() => setPayingBooking(booking)}
-                                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm"
+                                onClick={() => openPayment(booking)}
+                                disabled={checkingPaymentFor === String(booking.id)}
+                                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                               >
-                                Pay now
+                                {checkingPaymentFor === String(booking.id) ? 'Checking...' : 'Pay now'}
                               </button>
                             )}
                             <button
@@ -552,13 +638,26 @@ export function BookingsPage() {
             onPaymentSuccess={() => {
               setPayingBooking(null);
               toast.success('Payment complete', 'Your booking is paid and confirmed.');
-              fetchBookings();
+              fetchBookings({ resetPage: false });
             }}
             onPaymentFailed={(err) => {
-              // Leave the modal open so the client can retry with another card.
+              // Leave the modal open so the client can retry with another card, but
+              // re-read the booking behind it: a "failure" that was really a settled
+              // payment must not leave a stale Pay button waiting underneath.
               toast.error('Payment failed', err);
+              fetchBookings({ silent: true, resetPage: false });
             }}
-            onCancel={() => setPayingBooking(null)}
+            onAlreadyPaid={() => {
+              setPayingBooking(null);
+              toast.success('Already paid', 'That booking was already paid for - your list is up to date now.');
+              fetchBookings({ resetPage: false });
+            }}
+            // Every exit refreshes. Closing without one is what let the list keep
+            // offering Pay for a booking that had already been paid.
+            onCancel={() => {
+              setPayingBooking(null);
+              fetchBookings({ resetPage: false });
+            }}
           />
         </div>
       )}

@@ -4,6 +4,7 @@ import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
 import { paymongoRequest, createRefund } from '../services/paymongoService';
 import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
+import { computePaymentDueAt, PAYMENT_REMINDER_LEAD_HOURS } from '../config/paymentConfig';
 import { releaseEscrow } from '../services/walletService';
 import { auditService } from '../services/auditService';
 import {
@@ -74,11 +75,71 @@ const requireBookingProvider = async (req: any, res: Response, next: any) => {
   }
 };
 
+// A booking can only be completed once its money is actually in escrow.
+//
+// Completing moves the booking to 'awaiting_confirmation', and POST /payments/create-intent
+// only issues an intent for 'accepted' or 'confirmed' - so completing an unpaid booking
+// permanently locked the client out of paying it, and the 48-hour auto-confirm then closed
+// it as 'completed' while releasing nothing. A provider following the dashboard's own
+// "Ready to Mark Complete" prompt could work for free and have no way back.
+//
+// Runs before multer, so a refused request writes no evidence files to disk.
+const requireBookingPaid = async (req: any, res: Response, next: any) => {
+  try {
+    const bookingId = safeSegment(req.params.id);
+    const paid = await pool.query(
+      `SELECT 1 FROM payments WHERE booking_id::text = $1 AND status = 'succeeded' LIMIT 1`,
+      [bookingId]
+    );
+    if (!paid.rows[0]) {
+      return res.status(400).json({
+        error: "This booking hasn't been paid yet, so it can't be marked complete. Ask the client to pay, or cancel the booking.",
+        unpaid: true,
+      });
+    }
+    return next();
+  } catch {
+    return res.status(400).json({ error: 'Invalid booking id' });
+  }
+};
+
 function parseId(v: any): string | null {
   if (!v) return null;
   const str = String(v).trim();
   if (!str || str === 'undefined' || str === 'null') return null;
   return str;
+}
+
+/**
+ * Puts a booking's time slots back on sale.
+ *
+ * Bookings made through the slot picker (POST /availability/slots/book) mark their
+ * time_slots rows 'booked' and stamp the booking id on them. Nothing in this file ever
+ * put them back, so every terminal outcome - client cancels, provider cancels, provider
+ * rejects, admin deletes, payment deadline lapses - freed the booking while leaving the
+ * slot showing as taken in the picker, permanently. time_slots.booking_id has no foreign
+ * key either, so the admin hard-delete left rows pointing at a booking that no longer
+ * existed and could never be cleaned up by anything.
+ *
+ * Always called after COMMIT and against the pool, never inside a caller's transaction:
+ * a failure here must not abort the cancellation that has already been agreed, and
+ * swallowing an error inside someone else's transaction would leave it poisoned for
+ * every statement after it.
+ */
+async function releaseBookingSlots(bookingId: string): Promise<void> {
+  try {
+    const released = await pool.query(
+      `UPDATE time_slots
+       SET status = 'available', booking_id = NULL, held_by = NULL, hold_expires_at = NULL
+       WHERE booking_id::text = $1 AND status = 'booked'`,
+      [String(bookingId)]
+    );
+    if (released.rowCount) {
+      console.log(`Released ${released.rowCount} time slot(s) held by booking ${bookingId}.`);
+    }
+  } catch (e) {
+    console.error(`Failed to release time slots for booking ${bookingId}:`, e);
+  }
 }
 
 // Get the correct ID for a foreign key column (handles both direct users reference and separate tables)
@@ -800,6 +861,9 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
       if (role === 'admin') {
         await client.query('DELETE FROM bookings WHERE id::text = $1', [bookingId]);
         await client.query('COMMIT');
+        // The row is gone but its slots still name it, and nothing else would ever match
+        // them again - time_slots.booking_id has no foreign key to cascade from.
+        await releaseBookingSlots(bookingId);
         return res.json({ success: true });
       }
 
@@ -815,6 +879,8 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
         [bookingId]
       );
       await client.query('COMMIT');
+
+      await releaseBookingSlots(bookingId);
 
       // Send cancellation notification to the other party
       try {
@@ -914,7 +980,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const hasClientsTable = existingTables.includes('clients');
 
     const existingRes = await pool.query(
-      'SELECT id, client_id, provider_id, status, start_date, end_date, dispute_raised FROM bookings WHERE id::text = $1',
+      'SELECT id, client_id, provider_id, status, start_date, end_date, dispute_raised, payment_due_at FROM bookings WHERE id::text = $1',
       [bookingId]
     );
     const existing = existingRes.rows[0];
@@ -1017,6 +1083,13 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
 
       if (isAccept) {
         updates.push(`accepted_at = COALESCE(accepted_at, CURRENT_TIMESTAMP)`);
+        // Accepting is what opens payment, so it is what starts the clock. Only set on
+        // the first accept (COALESCE above), so flipping accepted -> confirmed doesn't
+        // hand the client a fresh 24 hours.
+        if (!existing.payment_due_at) {
+          updates.push(`payment_due_at = $${idx++}`);
+          values.push(computePaymentDueAt(new Date(), existing.start_date ? new Date(existing.start_date) : null));
+        }
       }
       if (isReject) {
         updates.push(`rejected_at = COALESCE(rejected_at, CURRENT_TIMESTAMP)`);
@@ -1033,6 +1106,13 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       );
       const updated = updateRes.rows[0];
       await client.query('COMMIT');
+
+      // Rejecting frees the date as surely as cancelling does: a slot-picker booking marks
+      // its slots 'booked' the moment it is created, while it is still only 'pending', so a
+      // provider declining the request left them held with nothing to hold them for.
+      if (isCancel || isReject) {
+        await releaseBookingSlots(bookingId);
+      }
 
       // Send notifications based on status change
       if (String(existing.status) !== String(nextStatus)) {
@@ -1454,15 +1534,27 @@ router.put('/:id/reschedule/approve', verifyToken, async (req: Request & { userI
       return res.status(403).json({ error: 'You proposed this reschedule; waiting for the other party to respond' });
     }
 
+    // Agreeing a new time restarts the payment clock, when the booking is still unpaid.
+    // The original deadline was measured from the original acceptance and against the
+    // original start - keeping it would let a booking expire for non-payment during the
+    // very negotiation that moved its date, or leave the "2 hours before the start"
+    // cutoff pointing at a time that no longer exists.
+    const stillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid';
+    const newDueAt = stillUnpaid
+      ? computePaymentDueAt(new Date(), booking.start_date ? new Date(booking.start_date) : null)
+      : null;
+
     const updateResult = await dbClient.query(
       `UPDATE bookings
        SET reschedule_pending_approval = FALSE,
            reschedule_previous_start_date = NULL,
            reschedule_previous_end_date = NULL,
+           payment_due_at = COALESCE($2, payment_due_at),
+           payment_reminder_sent_at = CASE WHEN $2::timestamp IS NULL THEN payment_reminder_sent_at ELSE NULL END,
            updated_at = CURRENT_TIMESTAMP
        WHERE id::text = $1
        RETURNING *`,
-      [bookingId]
+      [bookingId, newDueAt]
     );
 
     await dbClient.query('COMMIT');
@@ -1599,6 +1691,18 @@ router.put('/:id/reschedule/reject', verifyToken, async (req: Request & { userId
       });
     }
 
+    // Same reasoning as the approve path: the booking reverts to its original time, but
+    // the clock restarts from now, because the client shouldn't lose their slot over days
+    // spent negotiating a change that was then declined. Measured against the time being
+    // reverted to.
+    const rejectStillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid';
+    const revertedDueAt = rejectStillUnpaid
+      ? computePaymentDueAt(
+          new Date(),
+          booking.reschedule_previous_start_date ? new Date(booking.reschedule_previous_start_date) : null
+        )
+      : null;
+
     const updateResult = await dbClient.query(
       `UPDATE bookings
        SET start_date = reschedule_previous_start_date,
@@ -1606,10 +1710,12 @@ router.put('/:id/reschedule/reject', verifyToken, async (req: Request & { userId
            reschedule_pending_approval = FALSE,
            reschedule_previous_start_date = NULL,
            reschedule_previous_end_date = NULL,
+           payment_due_at = COALESCE($2, payment_due_at),
+           payment_reminder_sent_at = CASE WHEN $2::timestamp IS NULL THEN payment_reminder_sent_at ELSE NULL END,
            updated_at = CURRENT_TIMESTAMP
        WHERE id::text = $1
        RETURNING *`,
-      [bookingId]
+      [bookingId, revertedDueAt]
     );
 
     await dbClient.query('COMMIT');
@@ -1660,19 +1766,231 @@ router.put('/:id/reschedule/reject', verifyToken, async (req: Request & { userId
   }
 });
 
+// ==================== EXPIRE UNPAID BOOKINGS ====================
+
+/**
+ * Cancels bookings whose payment deadline has passed without the money arriving.
+ *
+ * Without this an accepted booking sat unpaid forever - past its own date - and kept
+ * holding the provider's slot, because the booking-conflict check only ignores
+ * 'cancelled' and 'rejected'. The provider lost both the fee and the chance to sell that
+ * date to somebody else.
+ *
+ * Cancelled rather than a new status, so the conflict checks, status maps and list
+ * filters all keep working untouched; cancellation_reason is what distinguishes this from
+ * a person pressing cancel.
+ */
+export async function expireUnpaidBookings() {
+  try {
+    const overdue = await pool.query(
+      `SELECT b.id, b.client_id, b.provider_id, b.start_date, b.total_price, s.title AS service_title,
+              EXISTS (
+                SELECT 1 FROM payments p
+                WHERE p.booking_id::text = b.id::text AND p.status = 'processing'
+              ) AS payment_in_flight
+       FROM bookings b
+       LEFT JOIN services s ON s.id::text = b.service_id::text
+       WHERE b.status IN ('accepted', 'confirmed')
+         AND COALESCE(b.payment_status, 'unpaid') <> 'paid'
+         AND b.payment_due_at IS NOT NULL
+         AND b.payment_due_at < NOW()`
+    );
+
+    if (overdue.rows.length === 0) return;
+    console.log(`Found ${overdue.rows.length} unpaid booking(s) past their payment deadline`);
+
+    for (const booking of overdue.rows) {
+      // A 'processing' payment means a card is already attached and PayMongo may be about
+      // to capture it. The webhook that settles a capture does not check booking status,
+      // so cancelling now could leave money credited into escrow against a cancelled
+      // booking. Leave it be - either it succeeds (and payment_status becomes 'paid') or
+      // it fails, and the next sweep picks it up.
+      if (booking.payment_in_flight) {
+        console.log(`Booking ${booking.id} is past its deadline but a payment is in flight - leaving it.`);
+        continue;
+      }
+
+      try {
+        // Atomically claim it. The conditions are repeated here so a payment that landed
+        // between the SELECT above and this UPDATE wins.
+        const claimRes = await pool.query(
+          `UPDATE bookings
+           SET status = 'cancelled',
+               cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP),
+               cancellation_reason = $2,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id::text = $1
+             AND status IN ('accepted', 'confirmed')
+             AND COALESCE(payment_status, 'unpaid') <> 'paid'
+           RETURNING id`,
+          [String(booking.id), 'Payment was not received before the deadline']
+        );
+        if (claimRes.rows.length === 0) continue;
+
+        // Any payment intent left open for this booking is now dead. Mark it so, or
+        // create-intent's "reuse the most recent open attempt" branch would hand the same
+        // intent back if the booking were ever revived.
+        await pool.query(
+          `UPDATE payments
+           SET status = 'cancelled',
+               failure_reason = COALESCE(failure_reason, 'Booking expired before payment was completed'),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE booking_id::text = $1 AND status IN ('pending', 'processing')`,
+          [String(booking.id)]
+        );
+
+        // Put the date back on sale - the whole point of expiring the booking.
+        await releaseBookingSlots(String(booking.id));
+
+        let clientUserId = String(booking.client_id);
+        let providerUserId = String(booking.provider_id);
+        try {
+          const c = await pool.query('SELECT user_id FROM clients WHERE id::text = $1', [String(booking.client_id)]);
+          if (c.rows[0]?.user_id) clientUserId = String(c.rows[0].user_id);
+        } catch { /* clients table absent, or client_id already references users */ }
+        try {
+          const p = await pool.query('SELECT user_id FROM providers WHERE id::text = $1', [String(booking.provider_id)]);
+          if (p.rows[0]?.user_id) providerUserId = String(p.rows[0].user_id);
+        } catch { /* providers table absent, or provider_id already references users */ }
+
+        const serviceTitle = booking.service_title || 'the booking';
+        try {
+          await notificationService.create({
+            userId: clientUserId,
+            type: 'booking_cancelled',
+            title: 'Booking Cancelled - Payment Not Received',
+            message: `Your booking for "${serviceTitle}" was cancelled because payment wasn't completed in time. You can book the slot again if it's still free.`,
+            data: { booking_id: String(booking.id), reason: 'payment_expired' },
+          });
+          await notificationService.create({
+            userId: providerUserId,
+            type: 'booking_cancelled',
+            title: 'Unpaid Booking Released',
+            message: `The booking for "${serviceTitle}" was cancelled because the client didn't pay in time. That date is free again.`,
+            data: { booking_id: String(booking.id), reason: 'payment_expired' },
+          });
+        } catch (notifError) {
+          console.error(`Failed to notify about expired booking ${booking.id}:`, notifError);
+        }
+
+        console.log(`Booking ${booking.id} cancelled - payment deadline passed.`);
+      } catch (bookingError) {
+        console.error(`Failed to expire unpaid booking ${booking.id}:`, bookingError);
+      }
+    }
+  } catch (e) {
+    console.log('expireUnpaidBookings error (non-fatal):', e);
+  }
+}
+
+/**
+ * Warns the client while they can still act on it. Nothing asked a client to pay before
+ * this - notificationService had 'payment received' and 'payment failed' and nothing in
+ * between - so the first they heard about the deadline was the cancellation.
+ */
+export async function sendPaymentReminders() {
+  try {
+    const dueSoon = await pool.query(
+      `SELECT b.id, b.client_id, b.total_price, b.payment_due_at, s.title AS service_title
+       FROM bookings b
+       LEFT JOIN services s ON s.id::text = b.service_id::text
+       WHERE b.status IN ('accepted', 'confirmed')
+         AND COALESCE(b.payment_status, 'unpaid') <> 'paid'
+         AND b.payment_due_at IS NOT NULL
+         AND b.payment_due_at > NOW()
+         AND b.payment_due_at < NOW() + ($1 || ' hours')::interval
+         AND b.payment_reminder_sent_at IS NULL`,
+      [String(PAYMENT_REMINDER_LEAD_HOURS)]
+    );
+
+    if (dueSoon.rows.length === 0) return;
+
+    for (const booking of dueSoon.rows) {
+      try {
+        // Claim before sending, same as sendConfirmationWarnings - only one UPDATE can
+        // win the IS NULL check, so overlapping runs can't double-remind.
+        const claimRes = await pool.query(
+          `UPDATE bookings
+           SET payment_reminder_sent_at = CURRENT_TIMESTAMP
+           WHERE id::text = $1 AND payment_reminder_sent_at IS NULL
+           RETURNING id`,
+          [String(booking.id)]
+        );
+        if (claimRes.rows.length === 0) continue;
+
+        let clientUserId = String(booking.client_id);
+        try {
+          const c = await pool.query('SELECT user_id FROM clients WHERE id::text = $1', [String(booking.client_id)]);
+          if (c.rows[0]?.user_id) clientUserId = String(c.rows[0].user_id);
+        } catch { /* clients table absent, or client_id already references users */ }
+
+        const amount = parseFloat(booking.total_price || 0);
+        const due = new Date(booking.payment_due_at);
+        await notificationService.create({
+          userId: clientUserId,
+          type: 'payment_due',
+          title: 'Payment Due Soon',
+          message: `Pay PHP ${amount.toLocaleString()} for "${booking.service_title || 'your booking'}" by ${due.toLocaleString('en-PH', { timeZone: 'Asia/Manila' })} or the booking will be cancelled and the slot released.`,
+          data: { booking_id: String(booking.id), amount, payment_due_at: booking.payment_due_at },
+        });
+      } catch (reminderError) {
+        console.error(`Failed to send payment reminder for booking ${booking.id}:`, reminderError);
+      }
+    }
+  } catch (e) {
+    console.log('sendPaymentReminders error (non-fatal):', e);
+  }
+}
+
 // ==================== AUTO-CONFIRM PAST COMPLETIONS (48-hour timeout) ====================
 
 export async function autoConfirmPastCompletions() {
   try {
     // Find bookings that need auto-confirmation (don't update yet - use transaction per booking)
+    //
+    // The EXISTS is the important part: without it an *unpaid* booking that a provider had
+    // marked complete would auto-confirm to 'completed' here, and releaseEscrow would move
+    // zero pesos (it releases min(amount, pending_balance)). The booking ended up looking
+    // finished and settled while the provider was paid nothing and the client owed nothing,
+    // silently and permanently. POST /:id/complete now refuses unpaid bookings so nothing
+    // new reaches that state; anything already stuck in it is reported below instead of
+    // being quietly finished off.
     const pendingResult = await pool.query(
       `SELECT id, client_id, provider_id, service_id
-       FROM bookings
+       FROM bookings b
        WHERE status = 'awaiting_confirmation'
          AND provider_completed_at IS NOT NULL
          AND provider_completed_at < NOW() - INTERVAL '48 hours'
-         AND client_confirmed_at IS NULL`
+         AND client_confirmed_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM payments p
+           WHERE p.booking_id::text = b.id::text AND p.status = 'succeeded'
+         )`
     );
+
+    try {
+      const stuck = await pool.query(
+        `SELECT id FROM bookings b
+         WHERE status = 'awaiting_confirmation'
+           AND provider_completed_at IS NOT NULL
+           AND provider_completed_at < NOW() - INTERVAL '48 hours'
+           AND client_confirmed_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM payments p
+             WHERE p.booking_id::text = b.id::text AND p.status = 'succeeded'
+           )`
+      );
+      if (stuck.rows.length > 0) {
+        console.error(
+          `[autoConfirmPastCompletions] ${stuck.rows.length} booking(s) are awaiting confirmation ` +
+          `past the 48-hour mark with no successful payment, so they are NOT being auto-completed - ` +
+          `completing them would release nothing to the provider. Needs a decision per booking ` +
+          `(chase the client, or cancel): ${stuck.rows.map(r => r.id).join(', ')}`
+        );
+      }
+    } catch (stuckError) {
+      console.error('Failed to check for unpaid awaiting-confirmation bookings:', stuckError);
+    }
 
     if (pendingResult.rows.length === 0) return;
 
@@ -2163,6 +2481,7 @@ export async function autoResolveStaleDisputes() {
 router.post('/:id/complete',
   verifyToken,
   requireBookingProvider,
+  requireBookingPaid,
   handleUpload(evidenceUpload.array('evidence', 10)),
   verifyUploadedContent,
   async (req: Request & { userId?: string }, res: Response) => {

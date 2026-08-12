@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { ensureProviderWallet } from '../services/walletService';
-import { MINIMUM_PAYOUT_AMOUNT } from '../config/payoutConfig';
+import { MINIMUM_PAYOUT_AMOUNT, MAX_CONCURRENT_PAYOUT_REQUESTS } from '../config/payoutConfig';
 
 const router = express.Router();
 
@@ -68,6 +68,10 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
         pending_payouts_count: parseInt(pendingPayoutsRes.rows[0].count),
         pending_payouts_total: pendingPayoutsTotal,
         minimum_payout_amount: MINIMUM_PAYOUT_AMOUNT,
+        // So the wallet page can tell the provider how many requests they have left
+        // before POST /payouts/request starts refusing them, instead of that limit only
+        // ever showing up as a rejection after the form has been filled in.
+        max_concurrent_payouts: MAX_CONCURRENT_PAYOUT_REQUESTS,
       }
     });
   } catch (error: any) {

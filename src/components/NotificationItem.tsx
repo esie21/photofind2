@@ -17,6 +17,9 @@ const typeConfig: Record<NotificationType, { icon: any; color: string; bgColor: 
   booking_completed: { icon: CheckCircle, color: 'text-purple-600', bgColor: 'bg-purple-100' },
   payment_received: { icon: PhilippinePeso, color: 'text-green-600', bgColor: 'bg-green-100' },
   payment_failed: { icon: CreditCard, color: 'text-red-600', bgColor: 'bg-red-100' },
+  // Amber rather than red: this one is a deadline the client can still act on, not a
+  // failure that already happened.
+  payment_due: { icon: CreditCard, color: 'text-amber-700', bgColor: 'bg-amber-100' },
   payout_approved: { icon: PhilippinePeso, color: 'text-blue-600', bgColor: 'bg-blue-100' },
   payout_completed: { icon: PhilippinePeso, color: 'text-green-600', bgColor: 'bg-green-100' },
   payout_rejected: { icon: XCircle, color: 'text-red-600', bgColor: 'bg-red-100' },

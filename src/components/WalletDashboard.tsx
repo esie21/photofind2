@@ -1,9 +1,31 @@
 import { useState, useEffect } from 'react';
-import { Wallet, ArrowUpRight, ArrowDownLeft, Clock, CheckCircle, XCircle, Loader2, RefreshCw, TrendingUp, History } from 'lucide-react';
+import { Wallet, ArrowUpRight, ArrowDownLeft, Clock, CheckCircle, XCircle, Loader2, RefreshCw, TrendingUp, History, AlertCircle } from 'lucide-react';
 import walletService, { payoutService, Wallet as WalletType, Transaction, Payout } from '../api/services/walletService';
 import { PayoutRequestForm } from './PayoutRequestForm';
+import { useToast } from '../context/ToastContext';
+
+const DEFAULT_MINIMUM_PAYOUT = 500;
+const DEFAULT_MAX_CONCURRENT_PAYOUTS = 3;
+
+// Every amount on this page goes through here. toLocaleString with only a minimum set
+// let float dust print in full ("PHP 1,234.5600000000001"), and a wallet row missing a
+// column threw inside render because `wallet?.available_balance.toLocaleString()` only
+// guards against the wallet being absent, not the number.
+const php = (value: number | null | undefined) =>
+  `PHP ${(Number(value) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+// What the provider asked us to send the money to, read back out of the stored details.
+const describeDestination = (payout: Payout): string | null => {
+  const details = payout.payout_details;
+  if (!details) return null;
+  const account = String(details.account_number || details.phone_number || '').trim();
+  const bank = String(details.bank_name || '').trim();
+  if (!account) return bank || null;
+  return bank ? `${bank} ${account}` : account;
+};
 
 export function WalletDashboard() {
+  const toast = useToast();
   const [wallet, setWallet] = useState<WalletType | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [payouts, setPayouts] = useState<Payout[]>([]);
@@ -12,6 +34,11 @@ export function WalletDashboard() {
   const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'payouts'>('overview');
   const [showPayoutForm, setShowPayoutForm] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  // Which row is asking "cancel this?", and which one is mid-request. Cancel used to be
+  // a bare confirm()/alert() pair with no in-flight guard, so a second click fired a
+  // second DELETE and the provider was shown the 409 from it as a raw browser alert.
+  const [confirmingCancelId, setConfirmingCancelId] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchData();
@@ -46,17 +73,31 @@ export function WalletDashboard() {
 
   const handlePayoutSuccess = () => {
     setShowPayoutForm(false);
+    toast.success('Payout requested', 'The amount is on hold until an admin processes it.');
     fetchData();
   };
 
   const handleCancelPayout = async (payoutId: string) => {
-    if (!confirm('Are you sure you want to cancel this payout request?')) return;
+    if (cancellingId) return;
+    setCancellingId(payoutId);
 
     try {
-      await payoutService.cancelPayout(payoutId);
-      fetchData();
+      const result = await payoutService.cancelPayout(payoutId);
+      setConfirmingCancelId(null);
+      toast.success(
+        'Payout cancelled',
+        result.refunded_amount > 0
+          ? `${php(result.refunded_amount)} is back in your available balance.`
+          : 'The request has been withdrawn.'
+      );
+      await fetchData();
     } catch (err: any) {
-      alert(err.message || 'Failed to cancel payout');
+      toast.error('Could not cancel payout', err?.message || 'Please try again.');
+      // Re-read the list: the most likely reason a cancel fails is that the request has
+      // already moved on to approved or been cancelled elsewhere.
+      await fetchData();
+    } finally {
+      setCancellingId(null);
     }
   };
 
@@ -114,6 +155,22 @@ export function WalletDashboard() {
     });
   };
 
+  // Why the Request Payout button is or isn't available. The button was simply greyed
+  // out below the minimum with nothing said about it, and the concurrent-request limit
+  // wasn't reflected here at all - the provider met it as a rejection after filling in
+  // the entire form, even though pending_payouts_count was already on screen's data.
+  const availableBalance = Number(wallet?.available_balance) || 0;
+  const minimumPayout = Number(wallet?.minimum_payout_amount) || DEFAULT_MINIMUM_PAYOUT;
+  const maxConcurrentPayouts = Number(wallet?.max_concurrent_payouts) || DEFAULT_MAX_CONCURRENT_PAYOUTS;
+  const pendingPayoutsCount = Number(wallet?.pending_payouts_count) || 0;
+  const atPayoutLimit = pendingPayoutsCount >= maxConcurrentPayouts;
+  const belowMinimum = availableBalance < minimumPayout;
+  const payoutBlockedReason = atPayoutLimit
+    ? `You have ${pendingPayoutsCount} payout requests in progress, the most allowed at once. Cancel a pending request or wait for one to be processed.`
+    : belowMinimum
+      ? `You need at least ${php(minimumPayout)} available to request a payout. You have ${php(availableBalance)}.`
+      : null;
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -160,10 +217,12 @@ export function WalletDashboard() {
             </div>
             <span className="text-purple-100">Available Balance</span>
           </div>
-          <p className="text-3xl font-bold">
-            PHP {wallet?.available_balance.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+          <p className="text-3xl font-bold">{php(wallet?.available_balance)}</p>
+          <p className="text-sm text-purple-200 mt-2">
+            {pendingPayoutsCount > 0
+              ? `${php(wallet?.pending_payouts_total)} already requested`
+              : 'Ready to withdraw'}
           </p>
-          <p className="text-sm text-purple-200 mt-2">Ready to withdraw</p>
         </div>
 
         <div className="bg-white border border-gray-200 rounded-2xl p-6">
@@ -173,9 +232,7 @@ export function WalletDashboard() {
             </div>
             <span className="text-gray-600">Pending Balance</span>
           </div>
-          <p className="text-3xl font-bold text-gray-900">
-            PHP {wallet?.pending_balance.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-          </p>
+          <p className="text-3xl font-bold text-gray-900">{php(wallet?.pending_balance)}</p>
           <p className="text-sm text-gray-500 mt-2">Released after service completion</p>
         </div>
 
@@ -186,21 +243,36 @@ export function WalletDashboard() {
             </div>
             <span className="text-gray-600">Total Earnings</span>
           </div>
-          <p className="text-3xl font-bold text-gray-900">
-            PHP {wallet?.total_earnings.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-          </p>
-          <p className="text-sm text-gray-500 mt-2">
-            Paid out: PHP {wallet?.total_paid_out.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-          </p>
+          <p className="text-3xl font-bold text-gray-900">{php(wallet?.total_earnings)}</p>
+          <p className="text-sm text-gray-500 mt-2">Paid out: {php(wallet?.total_paid_out)}</p>
         </div>
       </div>
 
-      {/* Request Payout Button */}
-      <div className="flex justify-end">
+      {/* Request Payout */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="flex items-start gap-2 text-sm text-gray-600">
+          {payoutBlockedReason ? (
+            <>
+              <AlertCircle className="w-5 h-5 text-amber-700 flex-shrink-0 mt-0.5" />
+              <p>{payoutBlockedReason}</p>
+            </>
+          ) : pendingPayoutsCount > 0 ? (
+            <>
+              <Clock className="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5" />
+              <p>
+                {pendingPayoutsCount} of {maxConcurrentPayouts} payout requests in progress,
+                totalling {php(wallet?.pending_payouts_total)}.
+              </p>
+            </>
+          ) : (
+            <span />
+          )}
+        </div>
         <button
           onClick={() => setShowPayoutForm(true)}
-          disabled={(wallet?.available_balance || 0) < (wallet?.minimum_payout_amount ?? 500)}
-          className="px-6 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          disabled={!!payoutBlockedReason}
+          title={payoutBlockedReason || undefined}
+          className="px-6 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 flex-shrink-0"
         >
           <ArrowUpRight className="w-5 h-5" />
           Request Payout
@@ -257,7 +329,7 @@ export function WalletDashboard() {
                     </div>
                   </div>
                   <p className={`font-medium ${getTransactionColor(tx.type)}`}>
-                    {tx.amount > 0 ? '+' : ''}PHP {tx.amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                    {tx.amount > 0 ? '+' : ''}{php(tx.amount)}
                   </p>
                 </div>
               ))}
@@ -284,10 +356,10 @@ export function WalletDashboard() {
                   <div className="flex items-center gap-3">
                     <ArrowUpRight className="w-5 h-5 text-gray-400" />
                     <div>
-                      <p className="text-sm font-medium text-gray-900">
-                        PHP {payout.amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                      <p className="text-sm font-medium text-gray-900">{php(payout.amount)}</p>
+                      <p className="text-xs text-gray-500">
+                        {payout.payout_method?.replace(/_/g, ' ')}
                       </p>
-                      <p className="text-xs text-gray-500">{payout.payout_method}</p>
                     </div>
                   </div>
                   {getPayoutStatusBadge(payout.status)}
@@ -330,11 +402,11 @@ export function WalletDashboard() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`font-medium ${getTransactionColor(tx.type)}`}>
-                        {tx.amount > 0 ? '+' : ''}PHP {tx.amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                        {tx.amount > 0 ? '+' : ''}{php(tx.amount)}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                      PHP {tx.balance_after.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                      {php(tx.balance_after)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {formatDate(tx.created_at)}
@@ -360,7 +432,7 @@ export function WalletDashboard() {
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Amount</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Method</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Sent to</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Status</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Requested</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Actions</th>
@@ -370,12 +442,19 @@ export function WalletDashboard() {
                 {payouts.map((payout) => (
                   <tr key={payout.id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap font-medium text-gray-900">
-                      PHP {payout.amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                      {php(payout.amount)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                      {payout.payout_method}
+                    {/* The destination was never shown anywhere after the request was
+                        made, so a provider had no way to check where their money was
+                        being sent - or to spot a typo while the request was still
+                        cancellable. */}
+                    <td className="px-6 py-4 text-sm text-gray-600">
+                      <p className="whitespace-nowrap">{payout.payout_method?.replace(/_/g, ' ')}</p>
+                      {describeDestination(payout) && (
+                        <p className="text-xs text-gray-500 font-mono break-all">{describeDestination(payout)}</p>
+                      )}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
+                    <td className="px-6 py-4">
                       {getPayoutStatusBadge(payout.status)}
                       {payout.rejection_reason && (
                         <p className="text-xs text-red-500 mt-1">{payout.rejection_reason}</p>
@@ -386,12 +465,34 @@ export function WalletDashboard() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       {payout.status === 'pending' && (
-                        <button
-                          onClick={() => handleCancelPayout(payout.id)}
-                          className="text-sm text-red-600 hover:text-red-700"
-                        >
-                          Cancel
-                        </button>
+                        confirmingCancelId === payout.id ? (
+                          // Replaces the browser confirm() dialog, which was the only
+                          // native prompt left in this flow.
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs text-gray-600">Cancel and refund?</span>
+                            <button
+                              onClick={() => handleCancelPayout(payout.id)}
+                              disabled={cancellingId === payout.id}
+                              className="text-sm font-medium text-red-600 hover:text-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {cancellingId === payout.id ? 'Cancelling...' : 'Yes'}
+                            </button>
+                            <button
+                              onClick={() => setConfirmingCancelId(null)}
+                              disabled={cancellingId === payout.id}
+                              className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              No
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmingCancelId(payout.id)}
+                            className="text-sm text-red-600 hover:text-red-700"
+                          >
+                            Cancel
+                          </button>
+                        )
                       )}
                     </td>
                   </tr>
@@ -408,16 +509,15 @@ export function WalletDashboard() {
         </div>
       )}
 
-      {/* Payout Request Modal */}
+      {/* Payout Request Modal. The form owns its own backdrop now, so it can scroll when
+          it is taller than the viewport and can refuse to close mid-submit. */}
       {showPayoutForm && wallet && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <PayoutRequestForm
-            availableBalance={wallet.available_balance}
-            minimumPayout={wallet.minimum_payout_amount ?? 500}
-            onSuccess={handlePayoutSuccess}
-            onCancel={() => setShowPayoutForm(false)}
-          />
-        </div>
+        <PayoutRequestForm
+          availableBalance={availableBalance}
+          minimumPayout={minimumPayout}
+          onSuccess={handlePayoutSuccess}
+          onCancel={() => setShowPayoutForm(false)}
+        />
       )}
     </div>
   );

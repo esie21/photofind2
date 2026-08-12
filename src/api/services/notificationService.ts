@@ -8,6 +8,7 @@ export type NotificationType =
   | 'booking_completed'
   | 'payment_received'
   | 'payment_failed'
+  | 'payment_due'
   | 'payout_approved'
   | 'payout_completed'
   | 'payout_rejected'

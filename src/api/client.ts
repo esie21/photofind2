@@ -5,6 +5,25 @@ interface RequestOptions extends RequestInit {
   isForm?: boolean;
 }
 
+/**
+ * Thrown for any non-2xx response. `message` stays exactly what it always was - the
+ * server's `error` string - so existing `err.message` handling is unaffected; `status`
+ * and `body` are additions for callers that need to tell one 4xx apart from another
+ * rather than pattern-matching on prose. PaymentSummary uses it to distinguish "this
+ * booking is already paid" from a genuine payment failure.
+ */
+export class ApiError extends Error {
+  status: number;
+  body: any;
+
+  constructor(message: string, status: number, body: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
 class APIClient {
   private token: string | null = null;
 
@@ -85,14 +104,15 @@ class APIClient {
           this.setToken(null);
         }
         let errorText = `API Error: ${response.status} ${response.statusText}`;
+        let errBody: any = null;
         try {
-          const errJson = await response.json();
-          if (errJson?.error) errorText = errJson.error;
-          else if (errJson?.message) errorText = errJson.message;
+          errBody = await response.json();
+          if (errBody?.error) errorText = errBody.error;
+          else if (errBody?.message) errorText = errBody.message;
         } catch (e) {
           // ignore JSON parse errors - keep original error text
         }
-        throw new Error(errorText);
+        throw new ApiError(errorText, response.status, errBody);
       }
 
       return await response.json();

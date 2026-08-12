@@ -190,6 +190,44 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
 
+    // Payment deadline tracking. Clients pay after the provider confirms, and until now
+    // nothing bounded that wait - an accepted booking could sit unpaid past its own date
+    // indefinitely while still blocking the slot. See config/paymentConfig.ts.
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_due_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_reminder_sent_at TIMESTAMP;`);
+    // Why a booking was cancelled. 'cancelled' now covers both a person cancelling and a
+    // payment deadline passing, and those read very differently to whoever it happened to.
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;`);
+    await client.query(
+      `CREATE INDEX IF NOT EXISTS idx_bookings_payment_due ON bookings (payment_due_at)
+       WHERE payment_due_at IS NOT NULL;`
+    );
+
+    // Give bookings that were already accepted before this column existed a deadline.
+    // Deliberately measured from now rather than from their original acceptance: dating it
+    // backwards would have the first sweep after deploy cancel live bookings that never
+    // had a deadline to miss, without the client ever being told one existed. The same
+    // two rules as computePaymentDueAt - 24h, no later than 2h before the start, never
+    // less than 30 minutes - so a booking starting soon still can't slip through unpaid.
+    // Guarded by IS NULL, so it only ever touches a row once.
+    try {
+      const backfilled = await client.query(
+        `UPDATE bookings
+         SET payment_due_at = GREATEST(
+               NOW() + INTERVAL '30 minutes',
+               LEAST(NOW() + INTERVAL '24 hours', start_date - INTERVAL '2 hours')
+             )
+         WHERE payment_due_at IS NULL
+           AND status IN ('accepted', 'confirmed')
+           AND COALESCE(payment_status, 'unpaid') <> 'paid'`
+      );
+      if (backfilled.rowCount) {
+        console.log(`Set a payment deadline on ${backfilled.rowCount} already-accepted unpaid booking(s).`);
+      }
+    } catch (e) {
+      console.log('payment_due_at backfill skipped (non-fatal):', (e as Error).message);
+    }
+
     // Reschedule tracking columns
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rescheduled_at TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rescheduled_by UUID;`);

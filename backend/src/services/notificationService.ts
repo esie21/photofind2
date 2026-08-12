@@ -14,6 +14,9 @@ export type NotificationType =
   | 'confirmation_warning'
   | 'payment_received'
   | 'payment_failed'
+  // Sent while the client can still act on it - the booking's payment deadline is
+  // approaching and the slot will be released if it passes.
+  | 'payment_due'
   | 'payout_approved'
   | 'payout_completed'
   | 'payout_rejected'

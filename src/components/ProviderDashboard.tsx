@@ -654,7 +654,11 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                   booking.status === 'completed' ? 'Completed' : 'Confirmed'}
                             </span>
                             {renderPaymentPill(booking)}
+                            {/* Paid only - the server refuses to complete an unpaid
+                                booking, and offering the button anyway just produces a
+                                rejection after the evidence has been picked. */}
                             {['accepted', 'confirmed'].includes(booking.status) &&
+                              booking.payment_status === 'paid' &&
                               new Date(booking.start_date || booking.date) <= new Date() && (
                                 <button
                                   onClick={() => {
@@ -1799,10 +1803,62 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
         {/* Bookings Tab */}
         {activeTab === 'bookings' && (
           <div className="space-y-6">
+            {/* Bookings past their date and still unpaid. These used to be listed under
+                "Ready to Mark Complete" alongside the paid ones, which invited the
+                provider to shoot for free: POST /bookings/:id/complete moves a booking to
+                awaiting_confirmation, and payment can only be taken while it is accepted
+                or confirmed - so completing an unpaid booking permanently locked the
+                client out of paying it. The endpoint now refuses; this separates them
+                here so the prompt is "chase the payment", not "upload your photos". */}
+            {(() => {
+              const pastAndUnpaid = providerBookings.filter(b =>
+                ['accepted', 'confirmed'].includes(b.status) &&
+                b.payment_status !== 'paid' &&
+                new Date(b.start_date || b.date) <= new Date()
+              );
+              if (pastAndUnpaid.length === 0) return null;
+              return (
+                <div className="bg-amber-100 border-2 border-amber-200 rounded-2xl p-6 shadow-sm">
+                  <div className="flex items-center gap-2 mb-4">
+                    <AlertCircle className="w-5 h-5 text-amber-700" />
+                    <h3 className="text-amber-700 font-semibold">Waiting for Payment ({pastAndUnpaid.length})</h3>
+                  </div>
+                  <p className="text-sm text-amber-700 mb-4">
+                    These bookings have passed their date but the client never paid, so they can't be
+                    marked complete. Message the client, or cancel to free the date - unpaid bookings
+                    are released automatically once their payment deadline passes.
+                  </p>
+                  <div className="space-y-3">
+                    {pastAndUnpaid.slice(0, 5).map((booking) => (
+                      <div key={`unpaid-${booking.id}`} className="p-4 bg-white border border-amber-200 rounded-xl flex items-center gap-4">
+                        <ImageWithFallback
+                          src={booking.image}
+                          alt={booking.client}
+                          className="w-12 h-12 object-cover rounded-lg"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-gray-900 font-medium truncate">{booking.client}</p>
+                          <p className="text-xs text-gray-600 truncate">{booking.service || 'Service'}</p>
+                          <p className="text-xs text-gray-500">{booking.date} at {booking.time}</p>
+                        </div>
+                        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-700 whitespace-nowrap">
+                          Unpaid
+                        </span>
+                      </div>
+                    ))}
+                    {pastAndUnpaid.length > 5 && (
+                      <p className="text-sm text-amber-700 text-center">+{pastAndUnpaid.length - 5} more unpaid</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Ready to Complete - Bookings that can be marked as done */}
             {(() => {
               const readyToComplete = providerBookings.filter(b =>
                 ['accepted', 'confirmed'].includes(b.status) &&
+                b.payment_status === 'paid' &&
                 new Date(b.start_date || b.date) <= new Date()
               );
               if (readyToComplete.length === 0) return null;
@@ -1971,7 +2027,9 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                   </button>
                                 </>
                               )}
+                              {/* Paid only, same as the other two Mark Complete buttons. */}
                               {['accepted', 'confirmed'].includes(booking.status) &&
+                                booking.payment_status === 'paid' &&
                                 new Date(booking.start_date || booking.date) <= new Date() && (
                                   <button
                                     onClick={() => {

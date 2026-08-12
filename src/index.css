@@ -2576,3 +2576,92 @@ html {
     opacity: 1;
   }
 }
+
+/* ============================================================
+   Utilities the wallet and payout screens rely on.
+
+   src/index.css is a prebuilt snapshot and there is no Tailwind step in the build, so a
+   class that isn't written out here has no styles at all no matter how many components
+   reference it. Everything below was already being used by WalletDashboard /
+   PayoutRequestForm and silently doing nothing - most visibly `animate-spin`, which has
+   never had a keyframe to run, so every Loader2 in the app sat perfectly still.
+   ============================================================ */
+
+/* Spinners. */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.animate-spin { animation: spin 1s linear infinite; }
+
+/* Type scale and weight. */
+.font-medium { font-weight: var(--font-weight-medium); }
+.uppercase { text-transform: uppercase; }
+.text-lg { font-size: var(--text-lg); line-height: var(--tw-leading, 1.75rem); }
+.text-xl { font-size: var(--text-xl); line-height: var(--tw-leading, 1.75rem); }
+.text-3xl { font-size: 1.875rem; line-height: var(--tw-leading, 2.25rem); }
+
+/* Colours: balance-card captions, empty-state icons, inline field errors. */
+.text-gray-300 { color: var(--color-gray-300); }
+.text-purple-200 { color: var(--color-purple-200); }
+.text-red-400 { color: oklch(.704 .191 22.216); }
+.text-red-500 { color: var(--color-red-500); }
+.to-purple-700 {
+  --tw-gradient-to: var(--color-purple-700);
+  --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
+}
+
+/* Spacing used by the payout form's PHP prefix, review rows and empty states. */
+.left-4 { left: calc(var(--spacing) * 4); }
+.pl-14 { padding-left: calc(var(--spacing) * 14); }
+.pt-3 { padding-top: calc(var(--spacing) * 3); }
+.pb-3 { padding-bottom: calc(var(--spacing) * 3); }
+.p-8 { padding: calc(var(--spacing) * 8); }
+.py-12 { padding-block: calc(var(--spacing) * 12); }
+.ml-auto { margin-left: auto; }
+
+/* Sizing. min-h-full is what lets the payout modal centre itself inside a backdrop that
+   is allowed to scroll, instead of overflowing off both ends of the viewport. */
+.min-h-full { min-height: 100%; }
+.min-h-\[400px\] { min-height: 400px; }
+.min-w-\[600px\] { min-width: 600px; }
+.min-w-max { min-width: max-content; }
+
+/* Table rules and the active tab underline. */
+.border-b-2 { border-bottom-style: var(--tw-border-style, solid); border-bottom-width: 2px; }
+/* border-color defaults to currentColor, which on these tables would draw the divider in
+   the text colour. Every divide-* shade the app actually asks for is spelled out, and
+   divide-y itself carries a neutral default so a shade that isn't listed here still
+   renders as a hairline rather than a dark line. */
+.divide-y > * + * {
+  border-top-style: var(--tw-border-style, solid);
+  border-top-width: 1px;
+  border-color: var(--color-gray-200);
+}
+.divide-gray-200 > * + * { border-color: var(--color-gray-200); }
+.divide-gray-100 > * + * { border-color: var(--color-gray-100); }
+.divide-gray-50 > * + * { border-color: var(--color-gray-50); }
+.last\:border-0:last-child { border-style: none; border-width: 0; }
+
+/* Hover states. */
+.hover\:bg-purple-100:hover { background-color: var(--color-purple-100); }
+.hover\:border-gray-300:hover { border-color: var(--color-gray-300); }
+.hover\:text-gray-700:hover { color: var(--color-gray-700); }
+.hover\:text-red-700:hover { color: var(--color-red-700); }
+
+/* The payout header collapses to a single column on narrow screens. */
+@media (width >= 40rem) {
+  .sm\:items-center { align-items: center; }
+  .sm\:justify-between { justify-content: space-between; }
+  .sm\:gap-6 { gap: calc(var(--spacing) * 6); }
+}
+
+/* Also missing from the snapshot, and used by the payment modal / bookings list: the
+   Total row's size, and two hover states (payment Cancel, and the accept action on a
+   booking card). Same story as the block above - referenced in components, never emitted. */
+.text-base { font-size: var(--text-base); line-height: var(--tw-leading, 1.5rem); }
+.hover\:text-gray-800:hover { color: var(--color-gray-800); }
+.hover\:text-green-700:hover { color: var(--color-green-700); }
+
+/* The provider dashboard's "Waiting for Payment" panel. bg-amber-100 and text-amber-700
+   were already emitted; the border shade never was. */
+.border-amber-200 { border-color: oklch(.924 .12 95.746); }

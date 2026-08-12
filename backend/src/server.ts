@@ -9,7 +9,7 @@ import adminRoutes from './routes/admin';
 import debugRoutes from './routes/debug';
 import usersRoutes from './routes/users';
 import providersRoutes from './routes/providers';
-import bookingsRoutes, { autoConfirmPastCompletions, autoResolveStaleDisputes, sendConfirmationWarnings } from './routes/bookings';
+import bookingsRoutes, { autoConfirmPastCompletions, autoResolveStaleDisputes, sendConfirmationWarnings, expireUnpaidBookings, sendPaymentReminders } from './routes/bookings';
 import availabilityRoutes from './routes/availability';
 import servicesRoutes from './routes/services';
 import messagesRoutes from './routes/messages';
@@ -456,6 +456,12 @@ async function startServer() {
     await sendConfirmationWarnings();
     console.log('Initial confirmation warning check complete.');
 
+    // Reminders before the expiry sweep, so a booking that is about to lapse gets its
+    // warning rather than being cancelled in the same pass that would have warned it.
+    await sendPaymentReminders();
+    await expireUnpaidBookings();
+    console.log('Initial unpaid-booking check complete.');
+
     // Schedule auto-confirm check every 10 minutes (600000ms)
     setInterval(async () => {
       try {
@@ -475,6 +481,19 @@ async function startServer() {
       }
     }, 30 * 60 * 1000);
     console.log('Confirmation warning scheduler started (every 30 minutes).');
+
+    // Unpaid bookings: remind, then release the slot when the deadline passes. Every 10
+    // minutes, because what is being freed is a date somebody else may want to book -
+    // leaving it held for an hour after it lapsed defeats the point.
+    setInterval(async () => {
+      try {
+        await sendPaymentReminders();
+        await expireUnpaidBookings();
+      } catch (err) {
+        console.error('Unpaid booking sweep error:', err);
+      }
+    }, 10 * 60 * 1000);
+    console.log('Unpaid-booking scheduler started (every 10 minutes).');
 
     // Schedule dispute auto-resolve check every hour (3600000ms)
     setInterval(async () => {

@@ -10,6 +10,8 @@ export interface Wallet {
   pending_payouts_count: number;
   pending_payouts_total: number;
   minimum_payout_amount: number;
+  /** How many requests may be in flight at once before POST /payouts/request refuses. */
+  max_concurrent_payouts: number;
   created_at: string;
   updated_at: string;
 }

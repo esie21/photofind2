@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { CreditCard, Shield, CheckCircle, XCircle, Loader2, AlertCircle } from 'lucide-react';
 import paymentService, { PaymentIntentResponse } from '../api/services/paymentService';
+import { ApiError } from '../api/client';
 
 interface PaymentSummaryProps {
   bookingId: string;
@@ -10,9 +11,14 @@ interface PaymentSummaryProps {
   onPaymentSuccess: () => void;
   onPaymentFailed: (error: string) => void;
   onCancel: () => void;
+  /** Called when the server says this booking is already paid - see 'already_paid'. */
+  onAlreadyPaid?: () => void;
 }
 
-type PaymentStatus = 'idle' | 'creating' | 'ready' | 'processing' | 'succeeded' | 'failed';
+// 'verifying' is separate from 'failed' on purpose. Once a card has been attached the
+// money may already be captured, so a later hiccup while checking the status must never
+// be reported as "Payment Failed" - that is the state that had clients paying twice.
+type PaymentStatus = 'idle' | 'creating' | 'ready' | 'processing' | 'verifying' | 'succeeded' | 'failed' | 'already_paid';
 
 export function PaymentSummary({
   bookingId,
@@ -22,6 +28,7 @@ export function PaymentSummary({
   onPaymentSuccess,
   onPaymentFailed,
   onCancel,
+  onAlreadyPaid,
 }: PaymentSummaryProps) {
   const [status, setStatus] = useState<PaymentStatus>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -32,6 +39,16 @@ export function PaymentSummary({
     expYear: '',
     cvc: '',
   });
+  // Per-field messages. "Please fill in all card details" used to go into `error`, which
+  // is only rendered while status === 'failed' - so clicking Pay with an empty form
+  // looked like the button did nothing at all.
+  const [cardErrors, setCardErrors] = useState<Record<string, string>>({});
+
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const later = (fn: () => void, ms: number) => {
+    timers.current.push(setTimeout(fn, ms));
+  };
+  useEffect(() => () => { timers.current.forEach(clearTimeout); }, []);
 
   // Show the split the server actually applied. The rate is configurable via
   // PLATFORM_COMMISSION_RATE on the backend, so hardcoding it here meant the breakdown
@@ -57,9 +74,37 @@ export function PaymentSummary({
       setPaymentIntent(intent);
       setStatus('ready');
     } catch (err: any) {
+      // "Already paid" is not a payment failure - it means this booking was settled
+      // (usually by the click before this one) and the list that offered the Pay button
+      // was out of date. Showing it as a failure is what convinced clients their money
+      // had not gone through, so they paid again.
+      if (err instanceof ApiError && (err.status === 409 || err.body?.already_paid)) {
+        setStatus('already_paid');
+        setError(null);
+        later(() => (onAlreadyPaid || onCancel)(), 2500);
+        return;
+      }
       setError(err.message || 'Failed to create payment');
       setStatus('failed');
     }
+  };
+
+  const validateCard = () => {
+    const next: Record<string, string> = {};
+    const digits = cardDetails.number.replace(/\s/g, '');
+    if (!digits) next.number = 'Enter your card number';
+    else if (digits.length < 13) next.number = 'That card number looks too short';
+
+    const month = parseInt(cardDetails.expMonth, 10);
+    if (!cardDetails.expMonth) next.expMonth = 'Required';
+    else if (!(month >= 1 && month <= 12)) next.expMonth = '01-12';
+
+    if (!cardDetails.expYear) next.expYear = 'Required';
+    if (!cardDetails.cvc) next.cvc = 'Required';
+    else if (cardDetails.cvc.length < 3) next.cvc = '3-4 digits';
+
+    setCardErrors(next);
+    return Object.keys(next).length === 0;
   };
 
   const handlePayment = async () => {
@@ -68,14 +113,14 @@ export function PaymentSummary({
       return;
     }
 
-    // Validate card details
-    if (!cardDetails.number || !cardDetails.expMonth || !cardDetails.expYear || !cardDetails.cvc) {
-      setError('Please fill in all card details');
-      return;
-    }
+    if (!validateCard()) return;
 
     setStatus('processing');
     setError(null);
+
+    // Whether the card made it as far as the intent. Once it has, a later error means
+    // "we don't know the outcome", not "the payment failed".
+    let attached = false;
 
     try {
       // In production, you would use PayMongo.js SDK to create the payment method
@@ -111,11 +156,14 @@ export function PaymentSummary({
 
       const paymentMethodId = paymentMethodData.data.id;
 
-      // Step 2: Attach payment method to intent
+      // Step 2: Attach payment method to intent. Everything up to here is safe to report
+      // as a plain failure - no money can have moved yet. Past this line it can have, so
+      // the catch below stops calling it a failure.
       const attachResult = await paymentService.attachPaymentMethod(
         paymentIntent.payment_intent_id,
         paymentMethodId
       );
+      attached = true;
 
       // Step 3: Handle 3DS if required
       if (attachResult.next_action?.type === 'redirect') {
@@ -124,33 +172,47 @@ export function PaymentSummary({
         return;
       }
 
-      // Step 4: Confirm payment
-      const confirmResult = await paymentService.confirmPayment(paymentIntent.payment_intent_id);
-
-      if (confirmResult.status === 'succeeded') {
-        setStatus('succeeded');
-        setTimeout(() => onPaymentSuccess(), 2000);
-      } else if (confirmResult.status === 'failed') {
-        setStatus('failed');
-        setError('Payment failed. Please try again.');
-        onPaymentFailed('Payment failed');
-      } else {
-        // Payment still processing
-        setStatus('processing');
-        // Poll for status
-        pollPaymentStatus(paymentIntent.payment_intent_id);
+      // Step 4: A card that doesn't need 3D Secure resolves right here, and the server
+      // has already marked the payment succeeded and credited the provider before it
+      // answered. Believe that instead of requiring a second /confirm round-trip: when
+      // that extra call failed, a completed payment was shown as "Payment Failed", the
+      // client cancelled, and the next attempt hit "already paid".
+      if (attachResult.status === 'succeeded') {
+        markSucceeded();
+        return;
       }
+
+      // Otherwise the intent is still open - find out where it got to.
+      verifyPayment(paymentIntent.payment_intent_id);
     } catch (err: any) {
+      const message = err?.message || 'Payment failed';
+      if (attached) {
+        // The card was accepted; only the status check went wrong. Claiming failure here
+        // would be telling the client their money didn't move when it may well have.
+        setStatus('verifying');
+        setError(null);
+        verifyPayment(paymentIntent.payment_intent_id);
+        return;
+      }
       setStatus('failed');
-      setError(err.message || 'Payment failed');
-      onPaymentFailed(err.message || 'Payment failed');
+      setError(message);
+      onPaymentFailed(message);
     }
   };
 
-  const pollPaymentStatus = async (intentId: string, attempts = 0) => {
+  const markSucceeded = () => {
+    setStatus('succeeded');
+    later(() => onPaymentSuccess(), 2000);
+  };
+
+  // Polls until PayMongo settles one way or the other. Runs after the card is attached,
+  // so a network error is a reason to keep checking, never a reason to report failure -
+  // only the server actually saying 'failed' is that.
+  const verifyPayment = async (intentId: string, attempts = 0) => {
+    setStatus(s => (s === 'succeeded' ? s : 'verifying'));
+
     if (attempts >= 10) {
-      setError('Payment verification timed out. Please check your payment history.');
-      setStatus('failed');
+      setError("We couldn't confirm this payment yet. It may still complete - check your Bookings page in a minute before trying again.");
       return;
     }
 
@@ -158,19 +220,30 @@ export function PaymentSummary({
       const result = await paymentService.confirmPayment(intentId);
 
       if (result.status === 'succeeded') {
-        setStatus('succeeded');
-        setTimeout(() => onPaymentSuccess(), 2000);
+        markSucceeded();
       } else if (result.status === 'failed') {
         setStatus('failed');
-        setError('Payment failed');
+        setError('The payment did not go through. You can try again with another card.');
+        onPaymentFailed('Payment failed');
       } else {
-        // Continue polling
-        setTimeout(() => pollPaymentStatus(intentId, attempts + 1), 3000);
+        later(() => verifyPayment(intentId, attempts + 1), 3000);
       }
-    } catch (err) {
-      setTimeout(() => pollPaymentStatus(intentId, attempts + 1), 3000);
+    } catch {
+      later(() => verifyPayment(intentId, attempts + 1), 3000);
     }
   };
+
+  // Typing in a field clears that field's complaint, so the form stops shouting as soon
+  // as it is being fixed.
+  const setCardField = (field: keyof typeof cardDetails, value: string) => {
+    setCardDetails(d => ({ ...d, [field]: value }));
+    setCardErrors(e => (e[field] ? { ...e, [field]: '' } : e));
+  };
+
+  const cardFieldClass = (field: string) =>
+    `w-full px-4 py-3 border rounded-xl focus:ring-2 focus:border-transparent outline-none ${
+      cardErrors[field] ? 'border-red-400 focus:ring-red-500' : 'border-gray-200 focus:ring-purple-500'
+    }`;
 
   const formatCardNumber = (value: string) => {
     const v = value.replace(/\s+/g, '').replace(/[^0-9]/gi, '');
@@ -243,6 +316,43 @@ export function PaymentSummary({
         </div>
       )}
 
+      {/* Already settled - not a failure, and deliberately styled as good news. */}
+      {status === 'already_paid' && (
+        <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-6">
+          <div className="flex items-center gap-3">
+            <CheckCircle className="w-6 h-6 text-green-600" />
+            <div>
+              <p className="font-medium text-green-800">This booking is already paid</p>
+              <p className="text-sm text-green-600">
+                Your earlier payment went through, so there's nothing left to pay. Refreshing your bookings.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Outcome not known yet. The card has been accepted at this point, so this must
+          never read as a failure - the client would pay a second time. */}
+      {status === 'verifying' && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+          <div className="flex items-start gap-3">
+            {error ? (
+              <AlertCircle className="w-6 h-6 text-blue-600 flex-shrink-0" />
+            ) : (
+              <Loader2 className="w-6 h-6 text-blue-600 animate-spin flex-shrink-0" />
+            )}
+            <div>
+              <p className="font-medium text-blue-800">
+                {error ? 'Still confirming your payment' : 'Confirming your payment...'}
+              </p>
+              <p className="text-sm text-blue-700">
+                {error || "Your card has been submitted. Don't close this window or pay again while we check."}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {status === 'failed' && error && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
           <div className="flex items-center gap-3">
@@ -259,51 +369,68 @@ export function PaymentSummary({
       {(status === 'ready' || status === 'failed') && (
         <div className="space-y-4 mb-6">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Card Number</label>
+            <label htmlFor="card-number" className="block text-sm font-medium text-gray-700 mb-1">Card Number</label>
             <input
+              id="card-number"
               type="text"
+              inputMode="numeric"
+              autoComplete="cc-number"
               placeholder="4343 4343 4343 4345"
               value={cardDetails.number}
-              onChange={(e) => setCardDetails({ ...cardDetails, number: formatCardNumber(e.target.value) })}
+              onChange={(e) => setCardField('number', formatCardNumber(e.target.value))}
               maxLength={19}
-              className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+              className={cardFieldClass('number')}
             />
-            <p className="text-xs text-gray-400 mt-1">Use test card: 4343 4343 4343 4345</p>
+            {cardErrors.number
+              ? <p className="text-xs text-red-600 mt-1">{cardErrors.number}</p>
+              : <p className="text-xs text-gray-400 mt-1">Use test card: 4343 4343 4343 4345</p>}
           </div>
 
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Month</label>
+              <label htmlFor="card-month" className="block text-sm font-medium text-gray-700 mb-1">Month</label>
               <input
+                id="card-month"
                 type="text"
+                inputMode="numeric"
+                autoComplete="cc-exp-month"
                 placeholder="MM"
                 value={cardDetails.expMonth}
-                onChange={(e) => setCardDetails({ ...cardDetails, expMonth: e.target.value.replace(/\D/g, '').slice(0, 2) })}
+                onChange={(e) => setCardField('expMonth', e.target.value.replace(/\D/g, '').slice(0, 2))}
                 maxLength={2}
-                className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                className={cardFieldClass('expMonth')}
               />
+              {cardErrors.expMonth && <p className="text-xs text-red-600 mt-1">{cardErrors.expMonth}</p>}
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Year</label>
+              <label htmlFor="card-year" className="block text-sm font-medium text-gray-700 mb-1">Year</label>
               <input
+                id="card-year"
                 type="text"
+                inputMode="numeric"
+                autoComplete="cc-exp-year"
                 placeholder="YY"
                 value={cardDetails.expYear}
-                onChange={(e) => setCardDetails({ ...cardDetails, expYear: e.target.value.replace(/\D/g, '').slice(0, 2) })}
+                onChange={(e) => setCardField('expYear', e.target.value.replace(/\D/g, '').slice(0, 2))}
                 maxLength={2}
-                className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                className={cardFieldClass('expYear')}
               />
+              {cardErrors.expYear && <p className="text-xs text-red-600 mt-1">{cardErrors.expYear}</p>}
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">CVC</label>
+              <label htmlFor="card-cvc" className="block text-sm font-medium text-gray-700 mb-1">CVC</label>
               <input
+                id="card-cvc"
                 type="text"
+                inputMode="numeric"
+                autoComplete="cc-csc"
                 placeholder="123"
                 value={cardDetails.cvc}
-                onChange={(e) => setCardDetails({ ...cardDetails, cvc: e.target.value.replace(/\D/g, '').slice(0, 4) })}
+                onChange={(e) => setCardField('cvc', e.target.value.replace(/\D/g, '').slice(0, 4))}
                 maxLength={4}
-                className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                className={cardFieldClass('cvc')}
               />
+              {cardErrors.cvc && <p className="text-xs text-red-600 mt-1">{cardErrors.cvc}</p>}
             </div>
           </div>
         </div>
@@ -314,20 +441,20 @@ export function PaymentSummary({
         {(status === 'ready' || status === 'failed') && (
           <button
             onClick={handlePayment}
-            disabled={status === 'processing'}
-            className="w-full py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors font-medium flex items-center justify-center gap-2"
           >
-            {status === 'processing' ? (
-              <>
-                <Loader2 className="w-5 h-5 animate-spin" />
-                Processing...
-              </>
-            ) : (
-              <>
-                <CreditCard className="w-5 h-5" />
-                Pay PHP {totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-              </>
-            )}
+            <CreditCard className="w-5 h-5" />
+            Pay PHP {totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+          </button>
+        )}
+
+        {status === 'processing' && (
+          <button
+            disabled
+            className="w-full py-3 bg-purple-600 text-white rounded-xl font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Loader2 className="w-5 h-5 animate-spin" />
+            Processing...
           </button>
         )}
 
@@ -340,12 +467,25 @@ export function PaymentSummary({
           </button>
         )}
 
-        {status !== 'succeeded' && status !== 'processing' && (
+        {/* No Cancel while the outcome is unknown: closing here is what left the client
+            with a paid booking their list still showed as unpaid. */}
+        {status !== 'succeeded' && status !== 'processing' && status !== 'verifying' && status !== 'already_paid' && (
           <button
             onClick={onCancel}
             className="w-full py-3 text-gray-600 hover:text-gray-800 transition-colors"
           >
             Cancel
+          </button>
+        )}
+
+        {status === 'verifying' && error && (
+          // Only offered once polling has given up, and it closes through the
+          // already-paid path so the list is re-read rather than trusted.
+          <button
+            onClick={() => (onAlreadyPaid || onCancel)()}
+            className="w-full py-3 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-100 transition-colors font-medium"
+          >
+            Check my bookings
           </button>
         )}
       </div>

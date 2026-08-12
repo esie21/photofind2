@@ -76,6 +76,18 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
       });
     }
 
+    // The payment window closes even if the sweep that cancels expired bookings hasn't
+    // run yet, so the deadline is honoured to the minute. Without this a client could pay
+    // for a slot that finished days ago and expect the provider to honour it.
+    if (booking.payment_due_at && new Date(booking.payment_due_at) < new Date()) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'The payment window for this booking has closed and the slot has been released. Please book again.',
+        payment_window_closed: true,
+        payment_due_at: booking.payment_due_at,
+      });
+    }
+
     // Validate payment amount against service price (prevent underpayment)
     const bookingPrice = parseFloat(booking.total_price || 0);
     const servicePrice = parseFloat(booking.service_price || 0);
@@ -94,12 +106,21 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
     // first: reading rows[0] from an unordered query could hand back the failed
     // attempt, fall through both guards, and let the client be charged a second time.
     const settledPayment = await dbClient.query(
-      `SELECT id FROM payments WHERE booking_id::text = $1 AND status = 'succeeded' LIMIT 1`,
+      `SELECT id, paid_at FROM payments WHERE booking_id::text = $1 AND status = 'succeeded' LIMIT 1`,
       [booking_id]
     );
     if (settledPayment.rows[0]) {
       await dbClient.query('ROLLBACK');
-      return res.status(400).json({ error: 'Payment already completed for this booking' });
+      // 409, not 400: nothing about the request is malformed - the client is asking to pay
+      // for something that is already paid, which usually means its booking list is stale.
+      // The flag lets the UI say so and refresh, instead of rendering this as a payment
+      // failure and leaving the client convinced their money didn't arrive.
+      return res.status(409).json({
+        error: 'This booking has already been paid.',
+        already_paid: true,
+        payment_id: settledPayment.rows[0].id,
+        paid_at: settledPayment.rows[0].paid_at,
+      });
     }
 
     // Otherwise reuse the most recent still-open attempt, if there is one.
@@ -268,7 +289,7 @@ router.post('/attach-method', verifyToken, async (req: Request & { userId?: stri
     // client could capture money into escrow for a booking that has since been
     // cancelled or rejected.
     const attachBookingRes = await pool.query(
-      'SELECT status FROM bookings WHERE id::text = $1',
+      'SELECT status, payment_due_at FROM bookings WHERE id::text = $1',
       [String(paymentRecord.booking_id)]
     );
     const attachBookingStatus = String(attachBookingRes.rows[0]?.status || '');
@@ -277,6 +298,16 @@ router.post('/attach-method', verifyToken, async (req: Request & { userId?: stri
         error: attachBookingStatus === 'pending'
           ? 'This booking is still waiting for the provider to confirm it.'
           : `Cannot pay for a ${attachBookingStatus || 'missing'} booking`,
+      });
+    }
+
+    // Re-checked here as well as at create-intent: an intent obtained just before the
+    // deadline stays attachable afterwards otherwise.
+    const attachDueAt = attachBookingRes.rows[0]?.payment_due_at;
+    if (attachDueAt && new Date(attachDueAt) < new Date()) {
+      return res.status(400).json({
+        error: 'The payment window for this booking has closed and the slot has been released.',
+        payment_window_closed: true,
       });
     }
 
