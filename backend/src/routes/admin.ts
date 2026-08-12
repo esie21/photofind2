@@ -914,6 +914,18 @@ router.post('/disputes/:id/comments', async (req: Request & { userId?: string },
 
 // ==================== AUDIT LOGS ====================
 
+// Distinct values present in the log, for the admin filter dropdowns. Declared before
+// '/audit-logs' would also work, but keep it above so the more specific path is matched
+// first regardless of how Express orders them.
+router.get('/audit-logs/actions', async (_req: Request, res: Response) => {
+  try {
+    return res.json({ data: await auditService.getDistinctActions() });
+  } catch (error) {
+    console.error('Error fetching audit log actions:', error);
+    return res.status(500).json({ error: 'Failed to fetch audit log actions' });
+  }
+});
+
 router.get('/audit-logs', async (req: Request & { userId?: string }, res: Response) => {
   try {
     const { userId, action, entityType, entityId, startDate, endDate, limit = '50', offset = '0' } = req.query;

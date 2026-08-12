@@ -85,11 +85,16 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
     category: u?.category ?? '',
     // '' rather than 0 so an unset value stays unset instead of claiming zero years.
     years_experience: u?.years_experience ?? '',
-    profile_image: u?.profile_image
-      ? getUploadUrl(u.profile_image)
-      : 'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...',
-    portfolio_images: (u?.portfolio_images || []).map((img: string) => getUploadUrl(img)),
+    // Hold the RAW stored paths, not display URLs. Save posts these fields straight
+    // back, so seeding them with getUploadUrl() meant every save wrote the display URL
+    // into the database - each one prepending another "/uploads/" to the stored path
+    // until the image 404'd. Display URLs are built at render time instead.
+    profile_image: u?.profile_image ?? '',
+    portfolio_images: (u?.portfolio_images || []) as string[],
   });
+
+  const PROFILE_IMAGE_PLACEHOLDER =
+    'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...';
 
   const [formState, setFormState] = useState<any>(() => seedFormState(user));
 
@@ -1122,7 +1127,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                 <div className="flex items-start gap-6">
                   <div className="relative">
                     <ImageWithFallback
-                      src={formState.profile_image}
+                      src={getUploadUrl(formState.profile_image) || PROFILE_IMAGE_PLACEHOLDER}
                       alt="Profile"
                       className="w-24 h-24 object-cover rounded-2xl"
                     />
@@ -1391,7 +1396,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       // new images would otherwise not appear until the edit ended.
                       setFormState((s: any) => ({
                         ...s,
-                        portfolio_images: (resp.portfolio_images || []).map((img: string) => getUploadUrl(img)),
+                        portfolio_images: (resp.portfolio_images || []) as string[],
                       }));
                       await refreshUser();
                       toast.success('Images added', `${files.length} image${files.length > 1 ? 's' : ''} uploaded.`);
@@ -1418,7 +1423,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                 {(formState.portfolio_images || []).map((image: string, index: number) => (
                   <div key={index} className="relative group aspect-square">
                     <ImageWithFallback
-                      src={image}
+                      src={getUploadUrl(image)}
                       alt={`Portfolio ${index + 1}`}
                       className="w-full h-full object-cover rounded-xl"
                     />

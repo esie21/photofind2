@@ -5,6 +5,17 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { notificationService } from '../services/notificationService';
+import {
+  UPLOADS_ROOT,
+  MAX_FILE_SIZE,
+  safeSegment,
+  resolveInsideRoot,
+  generateFilename,
+  documentFileFilter,
+  discardUploads,
+  verifyUploadedContent,
+  handleUpload,
+} from '../services/uploadService';
 
 interface AuthedRequest extends Request {
   userId?: string;
@@ -36,20 +47,36 @@ function getUploadsRoot() {
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const bookingId = (req as any).body?.booking_id || (req as any).query?.booking_id;
-    const recipientId = (req as any).params?.recipientId;
-    const folder = bookingId ? `booking-${String(bookingId)}` : recipientId ? `direct-${String(recipientId)}` : 'misc';
-    const uploadPath = path.resolve(getUploadsRoot(), `chats/${folder}`);
-    fs.mkdirSync(uploadPath, { recursive: true });
-    cb(null, uploadPath);
+    try {
+      // booking_id and recipientId are caller-controlled and used to be interpolated
+      // straight into the path, so '../..' escaped the uploads directory.
+      const bookingId = (req as any).body?.booking_id || (req as any).query?.booking_id;
+      const recipientId = (req as any).params?.recipientId;
+      const folder = bookingId
+        ? `booking-${safeSegment(bookingId)}`
+        : recipientId
+          ? `direct-${safeSegment(recipientId)}`
+          : 'misc';
+      const uploadPath = resolveInsideRoot(getUploadsRoot(), 'chats', folder);
+      fs.mkdirSync(uploadPath, { recursive: true });
+      cb(null, uploadPath);
+    } catch (e) {
+      cb(e as Error, '');
+    }
   },
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+    // Extension from the allow-listed type, not from the uploaded filename.
+    cb(null, generateFilename(file.mimetype));
   },
 });
 
-const upload = multer({ storage });
+// Was `multer({ storage })` - no type filter and no size limit at all, so any file
+// of any size was accepted (a .exe went through and was stored happily).
+const upload = multer({
+  storage,
+  fileFilter: documentFileFilter,
+  limits: { fileSize: MAX_FILE_SIZE, files: 1 },
+});
 
 function getAttachmentMeta(file: any) {
   if (!file) {
@@ -250,8 +277,9 @@ router.get('/history', verifyToken, async (req: AuthedRequest, res: Response) =>
     if (!bookingId) return res.status(400).json({ error: 'Missing booking_id' });
 
     const booking = await getBookingForUser(bookingId, String(currentUserId));
-    if (booking === null) return res.status(404).json({ error: 'Booking not found' });
-    if (booking === 'forbidden') return res.status(403).json({ error: 'Access denied' });
+    // Discard the upload on refusal - it is already on disk by this point.
+    if (booking === null) { discardUploads(req); return res.status(404).json({ error: 'Booking not found' }); }
+    if (booking === 'forbidden') { discardUploads(req); return res.status(403).json({ error: 'Access denied' }); }
 
     const chat = await ensureBookingChatExists(booking);
 
@@ -301,7 +329,11 @@ router.get('/history', verifyToken, async (req: AuthedRequest, res: Response) =>
   }
 });
 
-router.post('/send', verifyToken, upload.single('file'), async (req: AuthedRequest, res: Response) => {
+router.post('/send',
+  verifyToken,
+  handleUpload(upload.single('file')),
+  verifyUploadedContent,
+  async (req: AuthedRequest, res: Response) => {
   try {
     const currentUserId = req.userId;
     const bookingId = String((req.body as any)?.booking_id || '');
@@ -543,7 +575,11 @@ router.get('/direct/:recipientId/history', verifyToken, async (req: AuthedReques
 });
 
 // Send message in direct chat
-router.post('/direct/:recipientId/send', verifyToken, upload.single('file'), async (req: AuthedRequest, res: Response) => {
+router.post('/direct/:recipientId/send',
+  verifyToken,
+  handleUpload(upload.single('file')),
+  verifyUploadedContent,
+  async (req: AuthedRequest, res: Response) => {
   try {
     const currentUserId = req.userId;
     const recipientId = String(req.params.recipientId || '');

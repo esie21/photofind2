@@ -59,6 +59,13 @@ export function AdminDashboard() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [auditLogsTotal, setAuditLogsTotal] = useState(0);
   const [auditPage, setAuditPage] = useState(0);
+  const [auditActionFilter, setAuditActionFilter] = useState('all');
+  const [auditEntityFilter, setAuditEntityFilter] = useState('all');
+  const [auditStartDate, setAuditStartDate] = useState('');
+  const [auditEndDate, setAuditEndDate] = useState('');
+  const [auditOptions, setAuditOptions] = useState<{ actions: string[]; entityTypes: string[] }>({ actions: [], entityTypes: [] });
+  const [expandedAuditId, setExpandedAuditId] = useState<string | null>(null);
+  const [exportingAudit, setExportingAudit] = useState(false);
 
   // Support tickets state
   const [supportTickets, setSupportTickets] = useState<AdminSupportTicket[]>([]);
@@ -84,6 +91,7 @@ export function AdminDashboard() {
     }
   }, [activeTab, chartPeriod, userSearch, userRoleFilter, userStatusFilter, userPage, verificationPage,
     reviewStatusFilter, reviewPage, disputeStatusFilter, disputePriorityFilter, disputePage, auditPage,
+    auditActionFilter, auditEntityFilter, auditStartDate, auditEndDate,
     supportStatusFilter, supportPage, user]);
 
   const loadTabData = async () => {
@@ -163,13 +171,64 @@ export function AdminDashboard() {
     setDisputesTotal(resp.meta.total);
   };
 
+  // The backend has supported these filters all along - the tab just never sent them.
+  // `endDate` is pushed to the end of the chosen day so an inclusive range behaves the
+  // way a reader expects.
+  const auditFilters = () => ({
+    action: auditActionFilter !== 'all' ? auditActionFilter : undefined,
+    entityType: auditEntityFilter !== 'all' ? auditEntityFilter : undefined,
+    startDate: auditStartDate || undefined,
+    endDate: auditEndDate ? `${auditEndDate}T23:59:59` : undefined,
+  });
+
   const loadAuditData = async () => {
     const resp = await adminService.getAuditLogs({
+      ...auditFilters(),
       limit: ITEMS_PER_PAGE,
       offset: auditPage * ITEMS_PER_PAGE,
     });
     setAuditLogs(resp.data);
     setAuditLogsTotal(resp.meta.total);
+
+    // Populate the dropdowns from what is actually in the table, once.
+    if (auditOptions.actions.length === 0) {
+      try {
+        setAuditOptions(await adminService.getAuditLogActions());
+      } catch (err) {
+        console.error('Failed to load audit filter options', err);
+      }
+    }
+  };
+
+  const exportAuditCsv = async () => {
+    setExportingAudit(true);
+    try {
+      // Pull the current filter at the server's maximum page size rather than only the
+      // rows on screen.
+      const resp = await adminService.getAuditLogs({ ...auditFilters(), limit: 200, offset: 0 });
+      const escape = (v: any) => {
+        const str = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+        return `"${str.replace(/"/g, '""')}"`;
+      };
+      const header = ['Timestamp', 'User', 'Email', 'Action', 'Entity Type', 'Entity ID', 'IP Address', 'Old Values', 'New Values', 'Metadata'];
+      const rows = resp.data.map(l => [
+        l.created_at, l.user_name || 'System', l.user_email || '', l.action,
+        l.entity_type, l.entity_id || '', l.ip_address || '',
+        l.old_values, l.new_values, l.metadata || (l as any).details,
+      ].map(escape).join(','));
+      const csv = [header.map(escape).join(','), ...rows].join('\r\n');
+
+      const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `audit-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to export audit logs');
+    } finally {
+      setExportingAudit(false);
+    }
   };
 
   const loadSupportTicketsData = async () => {
@@ -988,6 +1047,70 @@ export function AdminDashboard() {
 
   const renderAuditLogs = () => (
     <div className="space-y-4">
+      {/* Filters. getLogs has supported all of these since it was written; the tab just
+          never sent them, so an admin could only page blindly through everything. */}
+      <div className="bg-white rounded-2xl shadow-sm p-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[160px]">
+            <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Action</label>
+            <select
+              value={auditActionFilter}
+              onChange={(e) => { setAuditActionFilter(e.target.value); setAuditPage(0); }}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            >
+              <option value="all">All actions</option>
+              {auditOptions.actions.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </div>
+          <div className="flex-1 min-w-[160px]">
+            <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Entity</label>
+            <select
+              value={auditEntityFilter}
+              onChange={(e) => { setAuditEntityFilter(e.target.value); setAuditPage(0); }}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            >
+              <option value="all">All entities</option>
+              {auditOptions.entityTypes.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div className="min-w-[150px]">
+            <label className="block text-xs font-medium text-gray-500 uppercase mb-1">From</label>
+            <input
+              type="date"
+              value={auditStartDate}
+              onChange={(e) => { setAuditStartDate(e.target.value); setAuditPage(0); }}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+            />
+          </div>
+          <div className="min-w-[150px]">
+            <label className="block text-xs font-medium text-gray-500 uppercase mb-1">To</label>
+            <input
+              type="date"
+              value={auditEndDate}
+              onChange={(e) => { setAuditEndDate(e.target.value); setAuditPage(0); }}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+            />
+          </div>
+          <button
+            onClick={() => {
+              setAuditActionFilter('all'); setAuditEntityFilter('all');
+              setAuditStartDate(''); setAuditEndDate(''); setAuditPage(0);
+            }}
+            className="px-4 py-2 border border-gray-200 rounded-lg text-sm hover:bg-gray-50"
+          >
+            Reset
+          </button>
+          <button
+            onClick={exportAuditCsv}
+            disabled={exportingAudit || auditLogsTotal === 0}
+            className="px-4 py-2 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Download className="w-4 h-4" />
+            {exportingAudit ? 'Exporting...' : 'Export CSV'}
+          </button>
+        </div>
+      </div>
+
       <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[700px]">
@@ -1001,8 +1124,19 @@ export function AdminDashboard() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
+              {auditLogs.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-10 px-6 text-center text-sm text-gray-500">
+                    No audit entries match these filters.
+                  </td>
+                </tr>
+              )}
               {auditLogs.map((log) => (
-                <tr key={log.id} className="hover:bg-gray-50">
+                <React.Fragment key={log.id}>
+                <tr
+                  className="hover:bg-gray-50 cursor-pointer"
+                  onClick={() => setExpandedAuditId(expandedAuditId === log.id ? null : log.id)}
+                >
                   <td className="py-4 px-6 text-sm text-gray-500">{formatDateTime(log.created_at)}</td>
                   <td className="py-4 px-6">
                     <div className="text-sm font-medium text-gray-900">{log.user_name || 'System'}</div>
@@ -1023,6 +1157,43 @@ export function AdminDashboard() {
                   </td>
                   <td className="py-4 px-6 text-sm text-gray-500">{log.ip_address || '-'}</td>
                 </tr>
+                {expandedAuditId === log.id && (
+                  <tr className="bg-gray-50">
+                    <td colSpan={5} className="px-6 py-4">
+                      {/* The point of an audit log. These columns are populated on
+                          almost every row but were never rendered anywhere. */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-xs font-medium text-gray-500 uppercase mb-1">Before</p>
+                          <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-white border border-gray-200 rounded-lg p-3 max-h-64 overflow-auto">
+                            {log.old_values ? JSON.stringify(log.old_values, null, 2) : '—'}
+                          </pre>
+                        </div>
+                        <div>
+                          <p className="text-xs font-medium text-gray-500 uppercase mb-1">After</p>
+                          <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-white border border-gray-200 rounded-lg p-3 max-h-64 overflow-auto">
+                            {log.new_values ? JSON.stringify(log.new_values, null, 2) : '—'}
+                          </pre>
+                        </div>
+                      </div>
+                      {/* Older rows put their payload in a legacy `details` column before
+                          `metadata` replaced it; fall back so those still render. */}
+                      {(log.metadata || (log as any).details) && (
+                        <div className="mt-4">
+                          <p className="text-xs font-medium text-gray-500 uppercase mb-1">Details</p>
+                          <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-white border border-gray-200 rounded-lg p-3 max-h-64 overflow-auto">
+                            {JSON.stringify(log.metadata || (log as any).details, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+                      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-2 text-xs text-gray-500">
+                        <p><span className="font-medium">Entity ID:</span> {log.entity_id || '—'}</p>
+                        <p className="break-all"><span className="font-medium">User agent:</span> {log.user_agent || '—'}</p>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>

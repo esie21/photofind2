@@ -5,6 +5,18 @@ import { notificationService } from '../services/notificationService';
 import { paymongoRequest, createRefund } from '../services/paymongoService';
 import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
 import { releaseEscrow } from '../services/walletService';
+import { auditService } from '../services/auditService';
+import {
+  UPLOADS_ROOT,
+  MAX_FILE_SIZE,
+  safeSegment,
+  resolveInsideRoot,
+  generateFilename,
+  imageFileFilter,
+  discardUploads,
+  verifyUploadedContent,
+  handleUpload,
+} from '../services/uploadService';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -12,34 +24,55 @@ import fs from 'fs';
 const router = express.Router();
 
 // ==================== MULTER SETUP FOR BOOKING EVIDENCE ====================
-const UPLOADS_ROOT = path.resolve(__dirname, '../../../uploads');
-
+// Path safety, type checking and cleanup come from uploadService - see the comments there.
 const evidenceStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const bookingId = req.params.id;
-    const uploadPath = path.join(UPLOADS_ROOT, 'bookings', bookingId);
-    fs.mkdirSync(uploadPath, { recursive: true });
-    cb(null, uploadPath);
+    try {
+      // Without safeSegment, '..%2F..' in :id escaped the uploads directory entirely.
+      const bookingId = safeSegment(req.params.id);
+      const uploadPath = resolveInsideRoot(UPLOADS_ROOT, 'bookings', bookingId);
+      fs.mkdirSync(uploadPath, { recursive: true });
+      cb(null, uploadPath);
+    } catch (e) {
+      cb(e as Error, '');
+    }
   },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    cb(null, filename);
+  filename: (_req, file, cb) => {
+    // Extension from the allow-listed type, never from the uploaded filename.
+    cb(null, generateFilename(file.mimetype));
   }
 });
 
 const evidenceUpload = multer({
   storage: evidenceStorage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
-  fileFilter: (req, file, cb) => {
-    const allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-    if (allowedMimes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files (JPEG, PNG, GIF, WEBP) are allowed'));
-    }
-  }
+  limits: { fileSize: MAX_FILE_SIZE, files: 10 },
+  fileFilter: imageFileFilter,
 });
+
+// Only the booking's provider may attach evidence. This runs BEFORE multer so a refused
+// request never writes anything to disk.
+const requireBookingProvider = async (req: any, res: Response, next: any) => {
+  try {
+    const bookingId = safeSegment(req.params.id);
+    const bookingRes = await pool.query('SELECT provider_id FROM bookings WHERE id::text = $1', [bookingId]);
+    if (!bookingRes.rows[0]) return res.status(404).json({ error: 'Booking not found' });
+
+    let providerUserId = String(bookingRes.rows[0].provider_id);
+    try {
+      const p = await pool.query('SELECT user_id FROM providers WHERE id::text = $1', [providerUserId]);
+      if (p.rows[0]?.user_id) providerUserId = String(p.rows[0].user_id);
+    } catch {
+      // providers table absent, or provider_id already references users - fine either way
+    }
+
+    if (providerUserId !== String(req.userId)) {
+      return res.status(403).json({ error: 'Only the provider can complete this booking' });
+    }
+    return next();
+  } catch {
+    return res.status(400).json({ error: 'Invalid booking id' });
+  }
+};
 
 function parseId(v: any): string | null {
   if (!v) return null;
@@ -2034,25 +2067,24 @@ export async function autoResolveStaleDisputes() {
           releasedAmount = released;
         }
 
-        // Log audit entry for the auto-resolution
+        // Log audit entry for the auto-resolution. Goes through auditService like every
+        // other audit write - this used to be a raw INSERT with a snake_case action
+        // ('dispute_auto_resolved'), which filtering by 'dispute.' never matched.
+        // No req here: this runs from a scheduled job, not a request.
         try {
-          await txClient.query(
-            `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, metadata, ip_address)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [
-              null,
-              'dispute_auto_resolved',
-              'booking',
-              String(booking.id),
-              JSON.stringify({
-                resolved_in_favor_of: 'provider',
-                resolution: autoResolution,
-                released_amount: releasedAmount,
-                timeout_days: DISPUTE_TIMEOUT_DAYS,
-              }),
-              'system',
-            ]
-          );
+          await auditService.log({
+            action: 'dispute.auto_resolve',
+            entityType: 'booking',
+            entityId: String(booking.id),
+            oldValues: { status: 'disputed', dispute_resolution: null },
+            newValues: { status: 'completed', resolved_in_favor_of: 'provider' },
+            metadata: {
+              resolution: autoResolution,
+              released_amount: releasedAmount,
+              timeout_days: DISPUTE_TIMEOUT_DAYS,
+              actor: 'system',
+            },
+          });
         } catch (auditError) {
           console.error('Failed to create audit log for dispute auto-resolution:', auditError);
         }
@@ -2128,7 +2160,12 @@ export async function autoResolveStaleDisputes() {
 
 // ==================== PROVIDER COMPLETE WITH EVIDENCE ====================
 
-router.post('/:id/complete', verifyToken, evidenceUpload.array('evidence', 10), async (req: Request & { userId?: string }, res: Response) => {
+router.post('/:id/complete',
+  verifyToken,
+  requireBookingProvider,
+  handleUpload(evidenceUpload.array('evidence', 10)),
+  verifyUploadedContent,
+  async (req: Request & { userId?: string }, res: Response) => {
   const currentUserId = req.userId;
   const bookingId = String(req.params.id || '');
   const { notes, evidence_types } = req.body;
@@ -2982,30 +3019,29 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
       console.log(`Dispute resolved for booking ${bookingId}: Released ₱${releasedAmount.toFixed(2)} to provider, Refunded ₱${refundedAmount.toFixed(2)} to client${paymongoRefundResult ? ` (PayMongo refund ${paymongoRefundResult.id}, status: ${paymongoRefundResult.status})` : ''}`);
     }
 
-    // Log audit entry for dispute resolution
+    // Log audit entry for dispute resolution. Was a raw INSERT with a snake_case action
+    // ('dispute_resolved') that no 'dispute.' filter matched, and which recorded neither
+    // user_agent nor the old/new value pair every other audit row carries. Passing `req`
+    // gets the user agent; before/after status move out of metadata into oldValues and
+    // newValues so this row has the same shape as the rest.
     try {
-      await dbClient.query(
-        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, metadata, ip_address)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          currentUserId,
-          'dispute_resolved',
-          'booking',
-          bookingId,
-          JSON.stringify({
-            resolved_in_favor_of,
-            resolution: resolution.trim(),
-            refund_percentage: refundPct,
-            released_amount: releasedAmount,
-            refunded_amount: refundedAmount,
-            paymongo_refund_id: paymongoRefundResult?.id || null,
-            refund_status: paymongoRefundResult?.status || null,
-            previous_status: booking.status,
-            new_status: finalStatus
-          }),
-          req.ip || 'unknown'
-        ]
-      );
+      await auditService.log({
+        userId: currentUserId,
+        action: 'dispute.resolve',
+        entityType: 'booking',
+        entityId: bookingId,
+        oldValues: { status: booking.status, dispute_resolution: booking.dispute_resolution ?? null },
+        newValues: { status: finalStatus, resolved_in_favor_of },
+        metadata: {
+          resolution: resolution.trim(),
+          refund_percentage: refundPct,
+          released_amount: releasedAmount,
+          refunded_amount: refundedAmount,
+          paymongo_refund_id: paymongoRefundResult?.id || null,
+          refund_status: paymongoRefundResult?.status || null,
+        },
+        req,
+      });
     } catch (auditError) {
       console.error('Failed to create audit log for dispute resolution:', auditError);
       // Don't fail the transaction for audit log errors

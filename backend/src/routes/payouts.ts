@@ -3,6 +3,7 @@ import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
 import { MINIMUM_PAYOUT_AMOUNT } from '../config/payoutConfig';
+import { auditService, AuditAction } from '../services/auditService';
 
 const router = express.Router();
 
@@ -504,6 +505,37 @@ router.patch('/:id/status', verifyToken, async (req: Request & { userId?: string
     );
 
     await dbClient.query('COMMIT');
+
+    // Record the admin action. Payout status changes move real money out of the platform
+    // and had no audit trail at all - AuditAction declared payout.approve/reject/complete
+    // but nothing ever wrote them. Logged after COMMIT and never allowed to throw, so a
+    // failure here can't undo a payout that already happened.
+    try {
+      const AUDIT_ACTION_BY_STATUS: Record<string, AuditAction> = {
+        approved: 'payout.approve',
+        rejected: 'payout.reject',
+        completed: 'payout.complete',
+        processing: 'payout.update',
+        failed: 'payout.update',
+      };
+      await auditService.log({
+        userId: adminId,
+        action: AUDIT_ACTION_BY_STATUS[status] || 'payout.update',
+        entityType: 'payout',
+        entityId: payoutId,
+        oldValues: { status: currentStatus },
+        newValues: { status },
+        metadata: {
+          amount: parseFloat(payout.amount),
+          provider_id: String(payout.provider_id),
+          admin_notes: admin_notes || null,
+          rejection_reason: rejection_reason || null,
+        },
+        req,
+      });
+    } catch (auditError) {
+      console.error('Failed to create audit log for payout status change:', auditError);
+    }
 
     // Fetch updated payout
     const updatedPayout = await pool.query(

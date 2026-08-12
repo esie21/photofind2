@@ -144,7 +144,24 @@ if (process.env.NODE_ENV !== 'production') {
 
 // Serve uploaded media from project root 'uploads' directory
 // Use two-levels-up relative path so backend/src -> ../.. -> project root
-app.use('/uploads', express.static(path.resolve(__dirname, '../../uploads')));
+//
+// Uploads are user-supplied bytes, so they are served inert: nosniff stops the browser
+// second-guessing the declared type, the CSP neuters any markup that does get rendered,
+// and anything that isn't a plain image is sent as a download rather than displayed.
+// Upload validation should already prevent such a file existing - this is the backstop.
+const INLINE_SAFE_TYPES = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
+app.use(
+  '/uploads',
+  express.static(path.resolve(__dirname, '../../uploads'), {
+    setHeaders: (res, filePath) => {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+      if (!INLINE_SAFE_TYPES.has(path.extname(filePath).toLowerCase())) {
+        res.setHeader('Content-Disposition', 'attachment');
+      }
+    },
+  })
+);
 
 // Health check
 app.get('/api/health', (req: Request, res: Response) => {

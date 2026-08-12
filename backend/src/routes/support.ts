@@ -5,6 +5,17 @@ import { notificationService } from '../services/notificationService';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import {
+  UPLOADS_ROOT,
+  MAX_FILE_SIZE,
+  safeSegment,
+  resolveInsideRoot,
+  generateFilename,
+  documentFileFilter,
+  discardUploads,
+  verifyUploadedContent,
+  handleUpload,
+} from '../services/uploadService';
 
 interface AuthedRequest extends Request {
   userId?: string;
@@ -18,18 +29,28 @@ function getUploadsRoot() {
 
 const storage = multer.diskStorage({
   destination: (req, _file, cb) => {
-    const ticketId = (req as any).params?.id || 'misc';
-    const uploadPath = path.resolve(getUploadsRoot(), `support/ticket-${String(ticketId)}`);
-    fs.mkdirSync(uploadPath, { recursive: true });
-    cb(null, uploadPath);
+    try {
+      // The ticket id used to go straight into the path, so '../..' escaped uploads.
+      const ticketId = safeSegment((req as any).params?.id);
+      const uploadPath = resolveInsideRoot(getUploadsRoot(), 'support', `ticket-${ticketId}`);
+      fs.mkdirSync(uploadPath, { recursive: true });
+      cb(null, uploadPath);
+    } catch (e) {
+      cb(e as Error, '');
+    }
   },
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+    cb(null, generateFilename(file.mimetype));
   },
 });
 
-const upload = multer({ storage });
+// Was `multer({ storage })` - no type filter and no size limit at all, so any file
+// of any size was accepted (a .exe went through and was stored happily).
+const upload = multer({
+  storage,
+  fileFilter: documentFileFilter,
+  limits: { fileSize: MAX_FILE_SIZE, files: 1 },
+});
 
 function getAttachmentMeta(file: any) {
   if (!file) {
@@ -204,8 +225,8 @@ router.get('/tickets/:id/messages', verifyToken, async (req: AuthedRequest, res:
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     const ticket = await getTicketForAccess(ticketId, userId);
-    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    if (ticket === 'forbidden') return res.status(403).json({ error: 'Access denied' });
+    if (!ticket) { discardUploads(req); return res.status(404).json({ error: 'Ticket not found' }); }
+    if (ticket === 'forbidden') { discardUploads(req); return res.status(403).json({ error: 'Access denied' }); }
 
     const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
     const msgs = await pool.query(
@@ -239,7 +260,11 @@ router.get('/tickets/:id/messages', verifyToken, async (req: AuthedRequest, res:
 });
 
 // Send a message in a ticket's thread
-router.post('/tickets/:id/messages', verifyToken, upload.single('file'), async (req: AuthedRequest, res: Response) => {
+router.post('/tickets/:id/messages',
+  verifyToken,
+  handleUpload(upload.single('file')),
+  verifyUploadedContent,
+  async (req: AuthedRequest, res: Response) => {
   try {
     const userId = req.userId;
     const ticketId = req.params.id;

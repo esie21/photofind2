@@ -226,6 +226,8 @@ export interface AuditLog {
   ip_address: string | null;
   user_agent: string | null;
   metadata: any;
+  /** Legacy payload column, superseded by `metadata` but still present on old rows. */
+  details?: any;
   created_at: string;
   user_name: string | null;
   user_email: string | null;
@@ -420,6 +422,13 @@ const adminService = {
   },
 
   // Audit Logs
+  async getAuditLogActions(): Promise<{ actions: string[]; entityTypes: string[] }> {
+    const resp = await apiClient.get<{ data: { actions: string[]; entityTypes: string[] } }>(
+      '/admin/audit-logs/actions'
+    );
+    return resp.data;
+  },
+
   async getAuditLogs(params: {
     userId?: string;
     action?: string;

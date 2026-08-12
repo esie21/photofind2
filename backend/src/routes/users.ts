@@ -5,112 +5,94 @@ import multer from 'multer';
 import { Request as ExpressRequest } from 'express';
 import path from 'path';
 import fs from 'fs';
+import {
+  UPLOADS_ROOT,
+  MAX_FILE_SIZE,
+  safeSegment,
+  resolveInsideRoot,
+  generateFilename,
+  imageFileFilter,
+  documentFileFilter,
+  deleteUploadSafe,
+  discardUploads,
+  verifyUploadedContent,
+  handleUpload,
+} from '../services/uploadService';
 const router = Router();
 
 // ==============================================
 // UPLOAD CONFIGURATION
 // ==============================================
+// Path building, type checking and cleanup all live in uploadService so the four upload
+// routes in this codebase can't drift apart again - see the comments there.
 
-// Allowed image types
-const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_PORTFOLIO_FILES = 24;
-
-// Upload directory - relative to project root (where static files are served from)
-const UPLOADS_ROOT = path.resolve(__dirname, '../../../uploads');
-
-// Generate unique filename with timestamp for cache-busting
-const generateFilename = (originalName: string, prefix: string = ''): string => {
-  const ext = path.extname(originalName).toLowerCase() || '.jpg';
-  const timestamp = Date.now();
-  const random = Math.round(Math.random() * 1e6);
-  return `${prefix}${timestamp}-${random}${ext}`;
-};
-
-// Delete file safely (ignore errors if file doesn't exist)
-const deleteFileSafe = (filePath: string): void => {
-  try {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-      console.log('Deleted old file:', filePath);
-    }
-  } catch (err) {
-    console.warn('Failed to delete file:', filePath, err);
-  }
-};
-
-// Configure multer storage with improved handling
-const storage = multer.diskStorage({
-  destination: (req: ExpressRequest, file: any, cb: (e: any, p: string) => void) => {
-    const userId = (req as any).params.id;
-    const folderType = file.fieldname === 'profile' ? 'avatar' : 'portfolio';
-    const uploadPath = path.join(UPLOADS_ROOT, 'users', userId, folderType);
-
-    // Create directory if it doesn't exist
-    fs.mkdirSync(uploadPath, { recursive: true });
-    cb(null, uploadPath);
-  },
-  filename: (req: ExpressRequest, file: any, cb: (e: any, p: string) => void) => {
-    if (file.fieldname === 'profile') {
-      // Unique filename for profile (enables cache-busting)
-      cb(null, generateFilename(file.originalname, 'avatar-'));
-    } else {
-      // Portfolio images
-      cb(null, generateFilename(file.originalname, 'img-'));
-    }
-  },
-});
-
-// File filter for validation
-const fileFilter = (req: ExpressRequest, file: any, cb: multer.FileFilterCallback) => {
-  if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error(`Invalid file type. Allowed: ${ALLOWED_MIME_TYPES.join(', ')}`));
-  }
-};
-
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: {
-    fileSize: MAX_FILE_SIZE,
-    files: MAX_PORTFOLIO_FILES,
-  },
-});
-
-// Verification documents (ID, business permit, etc.) - separate multer instance from
-// profile/portfolio images since these also accept PDFs and live in their own folder.
-const VERIFICATION_MIME_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf'];
 const MAX_VERIFICATION_FILES = 5;
 
-const verificationStorage = multer.diskStorage({
-  destination: (req: ExpressRequest, file: any, cb: (e: any, p: string) => void) => {
-    const userId = (req as any).params.id;
-    const uploadPath = path.join(UPLOADS_ROOT, 'users', userId, 'verification');
-    fs.mkdirSync(uploadPath, { recursive: true });
-    cb(null, uploadPath);
-  },
-  filename: (req: ExpressRequest, file: any, cb: (e: any, p: string) => void) => {
-    cb(null, generateFilename(file.originalname, 'doc-'));
-  },
-});
-
-const verificationFileFilter = (req: ExpressRequest, file: any, cb: multer.FileFilterCallback) => {
-  if (VERIFICATION_MIME_TYPES.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error(`Invalid file type. Allowed: ${VERIFICATION_MIME_TYPES.join(', ')}`));
+// Stored image paths are relative to the uploads root ("users/<id>/avatar/x.png").
+// Clients that post back a *display* URL instead ("/uploads/users/...") used to have it
+// stored verbatim, and since the profile form re-sent whatever it was given, each save
+// prepended another "/uploads/" until the image 404'd. Normalise on the way in so a
+// stale client can't corrupt the column.
+const normaliseStoredPath = (value: unknown): string => {
+  let v = String(value ?? '').trim();
+  if (!v) return v;
+  if (/^https?:\/\//i.test(v)) {
+    const at = v.indexOf('/uploads/');
+    if (at === -1) return v; // genuinely external (Google avatar, Unsplash, ...)
+    v = v.slice(at);
   }
+  // strip any number of leading "/uploads/" segments
+  v = v.replace(/^\/+/, '');
+  while (/^uploads\//i.test(v)) v = v.replace(/^uploads\//i, '');
+  return v;
 };
 
+// Authorization runs BEFORE multer in every chain below. Previously the file was written
+// to disk by the multer middleware and only then did the handler check ownership, so a
+// refused upload still left the attacker's file sitting in the victim's folder.
+const requireSelfOrAdmin = (req: any, res: Response, next: any) => {
+  let userId: string;
+  try {
+    userId = safeSegment(req.params.id);
+  } catch {
+    return res.status(400).json({ error: 'Invalid user id' });
+  }
+  if (String(req.userId) !== String(userId) && req.role !== 'admin') {
+    return res.status(403).json({ error: 'Not authorized to update this profile' });
+  }
+  return next();
+};
+
+const makeUserStorage = (folderOf: (file: Express.Multer.File) => string, prefix: string) =>
+  multer.diskStorage({
+    destination: (req: ExpressRequest, file: any, cb: (e: any, p: string) => void) => {
+      try {
+        // safeSegment rejects anything that isn't a UUID, and resolveInsideRoot refuses a
+        // result outside the uploads tree. Without these, '..%2F..' in the URL escaped it.
+        const userId = safeSegment((req as any).params.id);
+        const uploadPath = resolveInsideRoot(UPLOADS_ROOT, 'users', userId, folderOf(file));
+        fs.mkdirSync(uploadPath, { recursive: true });
+        cb(null, uploadPath);
+      } catch (e) {
+        cb(e as Error, '');
+      }
+    },
+    filename: (_req: ExpressRequest, file: any, cb: (e: any, p: string) => void) => {
+      cb(null, generateFilename(file.mimetype, prefix));
+    },
+  });
+
+const upload = multer({
+  storage: makeUserStorage(file => (file.fieldname === 'profile' ? 'avatar' : 'portfolio'), ''),
+  fileFilter: imageFileFilter,
+  limits: { fileSize: MAX_FILE_SIZE, files: MAX_PORTFOLIO_FILES },
+});
+
 const uploadVerification = multer({
-  storage: verificationStorage,
-  fileFilter: verificationFileFilter,
-  limits: {
-    fileSize: MAX_FILE_SIZE,
-    files: MAX_VERIFICATION_FILES,
-  },
+  storage: makeUserStorage(() => 'verification', 'doc-'),
+  fileFilter: documentFileFilter,
+  limits: { fileSize: MAX_FILE_SIZE, files: MAX_VERIFICATION_FILES },
 });
 
 // Get all users - admin only
@@ -218,11 +200,13 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
     }
     if (profile_image !== undefined) {
       updates.push(`profile_image = $${idx++}`);
-      values.push(profile_image);
+      values.push(profile_image === null ? null : normaliseStoredPath(profile_image));
     }
     if (portfolio_images !== undefined) {
       updates.push(`portfolio_images = $${idx++}`);
-      values.push(portfolio_images);
+      values.push(
+        Array.isArray(portfolio_images) ? portfolio_images.map(normaliseStoredPath) : portfolio_images
+      );
     }
     if (category !== undefined) {
       updates.push(`category = $${idx++}`);
@@ -240,9 +224,29 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
     const sql = `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${idx} RETURNING id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents`;
     values.push(userId);
 
+    // Note which portfolio images are about to disappear from the array, so their files
+    // can be removed too. Removing an image used to only rewrite this column, leaving the
+    // file on disk forever - uploads grew but never shrank.
+    let droppedImages: string[] = [];
+    if (Array.isArray(portfolio_images)) {
+      const before = await pool.query('SELECT portfolio_images FROM users WHERE id = $1', [userId]);
+      const previous: string[] = before.rows[0]?.portfolio_images || [];
+      const keeping = new Set(portfolio_images.map((v: any) => String(v)));
+      droppedImages = previous.filter(img => !keeping.has(String(img)));
+    }
+
     console.log('Executing SQL', { sql, values });
     const result = await pool.query(sql, values);
     console.log('SQL result for update', result.rows[0]);
+
+    for (const img of droppedImages) {
+      try {
+        deleteUploadSafe(resolveInsideRoot(UPLOADS_ROOT, img));
+      } catch {
+        console.warn('Refusing to delete a stored path outside uploads:', img);
+      }
+    }
+
       // return result including new fields
     res.json(result.rows[0]);
   } catch (error) {
@@ -266,20 +270,12 @@ router.delete('/:id', verifyToken, checkRole('admin'), async (req: any, res: Res
 // export default must be after all routes are declared
 
 // Profile image upload endpoint
-router.post('/:id/upload/profile', verifyToken, (req: any, res: Response, next: any) => {
-  // Handle multer errors
-  upload.single('profile')(req, res, (err: any) => {
-    if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: `File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB` });
-      }
-      return res.status(400).json({ error: err.message });
-    } else if (err) {
-      return res.status(400).json({ error: err.message });
-    }
-    next();
-  });
-}, async (req: any, res: Response) => {
+router.post('/:id/upload/profile',
+  verifyToken,
+  requireSelfOrAdmin,
+  handleUpload(upload.single('profile')),
+  verifyUploadedContent,
+  async (req: any, res: Response) => {
   try {
     const userId = req.params.id;
 
@@ -298,8 +294,11 @@ router.post('/:id/upload/profile', verifyToken, (req: any, res: Response, next: 
 
     // Delete old profile image if it exists
     if (oldImagePath) {
-      const oldFullPath = path.join(UPLOADS_ROOT, oldImagePath);
-      deleteFileSafe(oldFullPath);
+      try {
+        deleteUploadSafe(resolveInsideRoot(UPLOADS_ROOT, oldImagePath));
+      } catch {
+        console.warn('Refusing to delete a stored path outside uploads:', oldImagePath);
+      }
     }
 
     // Save new profile image path (relative)
@@ -325,23 +324,12 @@ router.post('/:id/upload/profile', verifyToken, (req: any, res: Response, next: 
 
 
 // Portfolio upload endpoint
-router.post('/:id/upload/portfolio', verifyToken, (req: any, res: Response, next: any) => {
-  // Handle multer errors
-  upload.array('images', MAX_PORTFOLIO_FILES)(req, res, (err: any) => {
-    if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: `File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB` });
-      }
-      if (err.code === 'LIMIT_FILE_COUNT') {
-        return res.status(400).json({ error: `Too many files. Maximum is ${MAX_PORTFOLIO_FILES}` });
-      }
-      return res.status(400).json({ error: err.message });
-    } else if (err) {
-      return res.status(400).json({ error: err.message });
-    }
-    next();
-  });
-}, async (req: any, res: Response) => {
+router.post('/:id/upload/portfolio',
+  verifyToken,
+  requireSelfOrAdmin,
+  handleUpload(upload.array('images', MAX_PORTFOLIO_FILES)),
+  verifyUploadedContent,
+  async (req: any, res: Response) => {
   try {
     const userId = req.params.id;
 
@@ -366,7 +354,7 @@ router.post('/:id/upload/portfolio', verifyToken, (req: any, res: Response, next
     // Check total count doesn't exceed limit
     if (newArr.length > MAX_PORTFOLIO_FILES) {
       // Delete the just-uploaded files since we're rejecting
-      files.forEach(f => deleteFileSafe(f.path));
+      files.forEach(f => deleteUploadSafe(f.path));
       return res.status(400).json({
         error: `Portfolio limit exceeded. Maximum ${MAX_PORTFOLIO_FILES} images allowed. You have ${existing.length}.`
       });
@@ -385,22 +373,12 @@ router.post('/:id/upload/portfolio', verifyToken, (req: any, res: Response, next
 });
 
 // Verification documents upload endpoint (ID, business permit, etc.)
-router.post('/:id/upload/verification', verifyToken, (req: any, res: Response, next: any) => {
-  uploadVerification.array('documents', MAX_VERIFICATION_FILES)(req, res, (err: any) => {
-    if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: `File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB` });
-      }
-      if (err.code === 'LIMIT_FILE_COUNT') {
-        return res.status(400).json({ error: `Too many files. Maximum is ${MAX_VERIFICATION_FILES}` });
-      }
-      return res.status(400).json({ error: err.message });
-    } else if (err) {
-      return res.status(400).json({ error: err.message });
-    }
-    next();
-  });
-}, async (req: any, res: Response) => {
+router.post('/:id/upload/verification',
+  verifyToken,
+  requireSelfOrAdmin,
+  handleUpload(uploadVerification.array('documents', MAX_VERIFICATION_FILES)),
+  verifyUploadedContent,
+  async (req: any, res: Response) => {
   try {
     const userId = req.params.id;
 
@@ -427,7 +405,7 @@ router.post('/:id/upload/verification', verifyToken, (req: any, res: Response, n
     const combined = [...existing, ...newDocs];
 
     if (combined.length > MAX_VERIFICATION_FILES) {
-      files.forEach(f => deleteFileSafe(f.path));
+      files.forEach(f => deleteUploadSafe(f.path));
       return res.status(400).json({
         error: `Document limit exceeded. Maximum ${MAX_VERIFICATION_FILES} files allowed. You have ${existing.length}.`
       });
@@ -477,7 +455,11 @@ router.delete('/:id/portfolio/:imagePath(*)', verifyToken, async (req: any, res:
     }
 
     // Delete from filesystem
-    deleteFileSafe(path.join(UPLOADS_ROOT, fullPath));
+    try {
+      deleteUploadSafe(resolveInsideRoot(UPLOADS_ROOT, fullPath));
+    } catch {
+      console.warn('Refusing to delete a stored path outside uploads:', fullPath);
+    }
 
     // Update database
     await pool.query('UPDATE users SET portfolio_images = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newArr, userId]);

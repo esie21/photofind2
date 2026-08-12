@@ -2419,6 +2419,14 @@ html {
   }
 }
 
+/* Needed by the admin audit log's before/after detail panels, which render JSON. Absent
+   from this snapshot, so without them the payloads wrapped mid-token in the body font
+   and long values pushed the table sideways. */
+.font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+.break-all { word-break: break-all; }
+.max-h-64 { max-height: 16rem; }
+.overflow-auto { overflow: auto; }
+
 /* Disabled-state utilities. These are used on buttons all over the app (Save,
    Add Images, Upload Documents, the payment submit) but had no rule here, so a
    disabled button looked exactly like an enabled one - the only clue was that

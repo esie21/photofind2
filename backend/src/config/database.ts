@@ -744,6 +744,23 @@ export async function initializeTables() {
       await client.query(`ALTER TABLE transactions ADD CONSTRAINT fk_transactions_payout FOREIGN KEY (payout_id) REFERENCES payouts(id) ON DELETE SET NULL;`);
     }
 
+    // Audit actions are dotted ('dispute.resolve', 'user.delete'). Two writes in
+    // bookings.ts used to bypass auditService and insert snake_case names instead, so
+    // history contains both styles and filtering by 'dispute.' missed the real dispute
+    // resolutions. Rename the legacy rows so past and future agree. Idempotent.
+    try {
+      const renames: Array<[string, string]> = [
+        ['dispute_resolved', 'dispute.resolve'],
+        ['dispute_auto_resolved', 'dispute.auto_resolve'],
+      ];
+      for (const [from, to] of renames) {
+        const r = await client.query('UPDATE audit_logs SET action = $1 WHERE action = $2', [to, from]);
+        if (r.rowCount) console.log(`Renamed ${r.rowCount} audit_logs row(s) from '${from}' to '${to}'.`);
+      }
+    } catch (e) {
+      console.log('audit action rename skipped (non-fatal):', (e as Error).message);
+    }
+
     // One providers row per user.
     //
     // providers.user_id had no unique constraint, and the "create the row on first use"

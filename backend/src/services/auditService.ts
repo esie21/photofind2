@@ -37,6 +37,7 @@ export type AuditAction =
   | 'dispute.create'
   | 'dispute.update'
   | 'dispute.resolve'
+  | 'dispute.auto_resolve'
   | 'dispute.escalate'
   | 'dispute.assign'
   | 'dispute.comment'
@@ -45,6 +46,7 @@ export type AuditAction =
   | 'payout.approve'
   | 'payout.reject'
   | 'payout.complete'
+  | 'payout.update'
   | 'service.create'
   | 'service.update'
   | 'service.delete'
@@ -53,6 +55,9 @@ export type AuditAction =
   | 'system.config_change'
   | 'support.reply'
   | 'support.status_update';
+
+export const MAX_PAGE_SIZE = 200;
+export const DEFAULT_PAGE_SIZE = 50;
 
 class AuditService {
   async log(params: AuditLogParams): Promise<void> {
@@ -226,8 +231,11 @@ class AuditService {
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limit = filters.limit || 50;
-    const offset = filters.offset || 0;
+    // Cap the page size. Without a ceiling `?limit=1000000` returned the entire table in
+    // one response.
+    const requested = Number(filters.limit) || DEFAULT_PAGE_SIZE;
+    const limit = Math.min(Math.max(1, requested), MAX_PAGE_SIZE);
+    const offset = Math.max(0, Number(filters.offset) || 0);
 
     const countQuery = `SELECT COUNT(*) as total FROM audit_logs al ${whereClause}`;
     const countResult = await pool.query(countQuery, params);
@@ -248,6 +256,21 @@ class AuditService {
     return {
       data: dataResult.rows,
       total,
+    };
+  }
+
+  /**
+   * The action values actually present in the table, so the admin filter lists what can
+   * really be selected rather than a hardcoded list that drifts from reality.
+   */
+  async getDistinctActions(): Promise<{ actions: string[]; entityTypes: string[] }> {
+    const [actions, entityTypes] = await Promise.all([
+      pool.query('SELECT DISTINCT action FROM audit_logs ORDER BY action'),
+      pool.query('SELECT DISTINCT entity_type FROM audit_logs ORDER BY entity_type'),
+    ]);
+    return {
+      actions: actions.rows.map(r => r.action).filter(Boolean),
+      entityTypes: entityTypes.rows.map(r => r.entity_type).filter(Boolean),
     };
   }
 }
