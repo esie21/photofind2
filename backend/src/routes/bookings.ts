@@ -704,7 +704,8 @@ router.get('/provider/my', verifyToken, async (req: Request & { userId?: string 
       if (clientRefTable === 'clients' && hasClientsTable) {
         // Both reference separate tables
         q = `
-          SELECT b.*, s.title as service_title,
+          SELECT b.*, s.title as service_title, s.description as service_description,
+                 s.category as service_category, s.duration_minutes as service_duration_minutes,
                  cu.id as client_user_id, cu.name as client_name, cu.email as client_email, cu.profile_image as client_image
           FROM bookings b
           LEFT JOIN services s ON s.id::text = b.service_id::text
@@ -717,7 +718,8 @@ router.get('/provider/my', verifyToken, async (req: Request & { userId?: string 
       } else {
         // provider_id references providers, but client_id references users directly
         q = `
-          SELECT b.*, s.title as service_title,
+          SELECT b.*, s.title as service_title, s.description as service_description,
+                 s.category as service_category, s.duration_minutes as service_duration_minutes,
                  u.id as client_user_id, u.name as client_name, u.email as client_email, u.profile_image as client_image
           FROM bookings b
           LEFT JOIN services s ON s.id::text = b.service_id::text
@@ -730,7 +732,8 @@ router.get('/provider/my', verifyToken, async (req: Request & { userId?: string 
     } else {
       // provider_id references users table directly
       q = `
-        SELECT b.*, s.title as service_title,
+        SELECT b.*, s.title as service_title, s.description as service_description,
+               s.category as service_category, s.duration_minutes as service_duration_minutes,
                u.id as client_user_id, u.name as client_name, u.email as client_email, u.profile_image as client_image
         FROM bookings b
         LEFT JOIN services s ON s.id::text = b.service_id::text
@@ -794,7 +797,8 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
       if (providerRefTable === 'providers' && hasProvidersTable) {
         // Both reference separate tables
         q = `
-          SELECT b.*, s.title as service_title,
+          SELECT b.*, s.title as service_title, s.description as service_description,
+                 s.category as service_category, s.duration_minutes as service_duration_minutes,
                  pu.id as provider_user_id, pu.name as provider_name, pu.email as provider_email, pu.profile_image as provider_image
           FROM bookings b
           LEFT JOIN services s ON s.id::text = b.service_id::text
@@ -807,7 +811,8 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
       } else {
         // client_id references clients, but provider_id references users directly
         q = `
-          SELECT b.*, s.title as service_title,
+          SELECT b.*, s.title as service_title, s.description as service_description,
+                 s.category as service_category, s.duration_minutes as service_duration_minutes,
                  u.id as provider_user_id, u.name as provider_name, u.email as provider_email, u.profile_image as provider_image
           FROM bookings b
           LEFT JOIN services s ON s.id::text = b.service_id::text
@@ -821,7 +826,8 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
       // client_id references users table directly
       if (providerRefTable === 'providers' && hasProvidersTable) {
         q = `
-          SELECT b.*, s.title as service_title,
+          SELECT b.*, s.title as service_title, s.description as service_description,
+                 s.category as service_category, s.duration_minutes as service_duration_minutes,
                  pu.id as provider_user_id, pu.name as provider_name, pu.email as provider_email, pu.profile_image as provider_image
           FROM bookings b
           LEFT JOIN services s ON s.id::text = b.service_id::text
@@ -832,7 +838,8 @@ router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: R
         `;
       } else {
         q = `
-          SELECT b.*, s.title as service_title,
+          SELECT b.*, s.title as service_title, s.description as service_description,
+                 s.category as service_category, s.duration_minutes as service_duration_minutes,
                  u.id as provider_user_id, u.name as provider_name, u.email as provider_email, u.profile_image as provider_image
           FROM bookings b
           LEFT JOIN services s ON s.id::text = b.service_id::text

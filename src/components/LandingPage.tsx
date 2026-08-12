@@ -125,15 +125,21 @@ export function LandingPage({ onViewChange, onSearch, onCategorySelect }: Landin
     })();
   }, []);
 
+  // Number of cards visible at once, and the last valid slide index so the
+  // track never scrolls past its content (which used to leave blank space
+  // once there were more than 3 providers).
+  const visibleCount = Math.min(3, providers.length);
+  const maxSlide = Math.max(0, providers.length - visibleCount);
+
   const nextSlide = () => {
-    if (providers.length > 0) {
-      setCurrentSlide((prev) => (prev + 1) % providers.length);
+    if (maxSlide > 0) {
+      setCurrentSlide((prev) => (prev + 1) % (maxSlide + 1));
     }
   };
 
   const prevSlide = () => {
-    if (providers.length > 0) {
-      setCurrentSlide((prev) => (prev - 1 + providers.length) % providers.length);
+    if (maxSlide > 0) {
+      setCurrentSlide((prev) => (prev - 1 + maxSlide + 1) % (maxSlide + 1));
     }
   };
 
@@ -195,7 +201,10 @@ export function LandingPage({ onViewChange, onSearch, onCategorySelect }: Landin
             <h2 className="text-gray-900 mb-2">Featured Service Providers</h2>
             <p className="text-gray-600">Top-rated professionals ready to bring your vision to life</p>
           </div>
-          <button className="text-purple-600 hover:text-purple-700 flex items-center gap-1">
+          <button
+            onClick={() => onViewChange('client')}
+            className="text-purple-600 hover:text-purple-700 flex items-center gap-1"
+          >
             View all
             <ChevronRight className="w-4 h-4" />
           </button>
@@ -228,32 +237,36 @@ export function LandingPage({ onViewChange, onSearch, onCategorySelect }: Landin
             </div>
           ) : (
             <>
-              {/* Navigation Buttons */}
-              <button
-                onClick={prevSlide}
-                className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-4 z-10 w-12 h-12 bg-white rounded-full shadow-lg flex items-center justify-center hover:bg-gray-50 transition-colors"
-              >
-                <ChevronLeft className="w-6 h-6 text-gray-700" />
-              </button>
-              <button
-                onClick={nextSlide}
-                className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-4 z-10 w-12 h-12 bg-white rounded-full shadow-lg flex items-center justify-center hover:bg-gray-50 transition-colors"
-              >
-                <ChevronRight className="w-6 h-6 text-gray-700" />
-              </button>
+              {/* Navigation Buttons - only needed when there's more than one page to scroll to */}
+              {maxSlide > 0 && (
+                <>
+                  <button
+                    onClick={prevSlide}
+                    className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-4 z-10 w-12 h-12 bg-white rounded-full shadow-lg flex items-center justify-center hover:bg-gray-50 transition-colors"
+                  >
+                    <ChevronLeft className="w-6 h-6 text-gray-700" />
+                  </button>
+                  <button
+                    onClick={nextSlide}
+                    className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-4 z-10 w-12 h-12 bg-white rounded-full shadow-lg flex items-center justify-center hover:bg-gray-50 transition-colors"
+                  >
+                    <ChevronRight className="w-6 h-6 text-gray-700" />
+                  </button>
+                </>
+              )}
 
               {/* Carousel */}
               <div className="overflow-hidden">
                 <div
                   className="flex transition-transform duration-500 ease-out"
-                  style={{ transform: `translateX(-${currentSlide * (100 / Math.min(3, providers.length))}%)` }}
+                  style={{ transform: `translateX(-${currentSlide * (100 / visibleCount)}%)` }}
                 >
                   {providers.map((provider, index) => (
                   <button
                     key={index}
                     onClick={() => onViewChange('client')}
                     className="flex-shrink-0 px-3 text-left"
-                    style={{ width: `${100 / Math.min(3, providers.length || 3)}%` }}
+                    style={{ width: `${100 / visibleCount}%` }}
                   >
                     <div className="bg-white rounded-2xl overflow-hidden shadow-md hover:shadow-xl transition-shadow">
                     <div className="relative h-64">
@@ -264,7 +277,7 @@ export function LandingPage({ onViewChange, onSearch, onCategorySelect }: Landin
                       />
                       <div className="absolute top-4 right-4 px-3 py-1 bg-white rounded-full flex items-center gap-1 shadow-lg">
                         <Star className="w-4 h-4 fill-yellow-400 text-yellow-400" />
-                        <span className="text-sm text-gray-900">{provider.rating || provider.reviews || ''}</span>
+                        <span className="text-sm text-gray-900">{provider.rating || 'New'}</span>
                       </div>
                     </div>
                     <div className="p-6">
@@ -278,7 +291,7 @@ export function LandingPage({ onViewChange, onSearch, onCategorySelect }: Landin
                         <span className="text-purple-600">{provider.featured_service?.price ? `₱${provider.featured_service.price}/hr` : provider.price || ''}</span>
                       </div>
                       <div className="mt-3 text-sm text-gray-500">
-                        {provider.reviews || (provider.featured_service ? '' : '')} {provider.reviews ? 'reviews' : ''}
+                        {typeof provider.reviews === 'number' ? `${provider.reviews} review${provider.reviews !== 1 ? 's' : ''}` : ''}
                       </div>
                     </div>
                   </div>
@@ -287,9 +300,10 @@ export function LandingPage({ onViewChange, onSearch, onCategorySelect }: Landin
                 </div>
               </div>
 
-              {/* Dots Navigation */}
+              {/* Dots Navigation - one dot per scrollable page, not per provider */}
+              {maxSlide > 0 && (
               <div className="flex justify-center gap-2 mt-6">
-                {providers.map((_, index) => (
+                {Array.from({ length: maxSlide + 1 }).map((_, index) => (
                   <button
                     key={index}
                     onClick={() => setCurrentSlide(index)}
@@ -299,6 +313,7 @@ export function LandingPage({ onViewChange, onSearch, onCategorySelect }: Landin
                   />
                 ))}
               </div>
+              )}
             </>
           )}
         </div>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Calendar, Clock, PhilippinePeso, MessageSquare, RefreshCw, AlertCircle, Star } from 'lucide-react';
+import { Calendar, Clock, PhilippinePeso, MessageSquare, RefreshCw, AlertCircle, Star, Info } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { ImageWithFallback } from './figma/ImageWithFallback';
@@ -9,12 +9,13 @@ import { RescheduleModal } from './RescheduleModal';
 import { ConfirmCompletionModal } from './ConfirmCompletionModal';
 import { ReviewForm } from './ReviewForm';
 import { PaymentSummary } from './PaymentSummary';
+import { BookingDetailsModal } from './BookingDetailsModal';
 import bookingService from '../api/services/bookingService';
 import reviewService from '../api/services/reviewService';
 
 const ITEMS_PER_PAGE = 8;
 
-const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+export const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
   pending: { bg: 'bg-amber-100', text: 'text-amber-700', label: 'Pending' },
   accepted: { bg: 'bg-green-100', text: 'text-green-700', label: 'Confirmed' },
   confirmed: { bg: 'bg-green-100', text: 'text-green-700', label: 'Confirmed' },
@@ -101,6 +102,7 @@ export function BookingsPage() {
   const [reschedulingId, setReschedulingId] = useState<string | null>(null);
   const [payingBooking, setPayingBooking] = useState<any>(null);
   const [checkingPaymentFor, setCheckingPaymentFor] = useState<string | null>(null);
+  const [detailsBooking, setDetailsBooking] = useState<any>(null);
 
   // `silent` skips the full-page spinner, for refreshes that happen behind an open modal
   // or behind a button's own pending state. `resetPage` is off for those too - a refresh
@@ -130,13 +132,16 @@ export function BookingsPage() {
         // client, the client for a provider — so the card and chat button work
         // the same way regardless of which side is looking at it.
         const otherParty = isProvider
-          ? { id: b.client_user_id || b.client_id, name: b.client_name || b.client_email || 'Client', image: b.client_image }
-          : { id: b.provider_user_id || b.provider_id, name: b.provider_name || 'Provider', image: b.provider_image };
+          ? { id: b.client_user_id || b.client_id, name: b.client_name || b.client_email || 'Client', image: b.client_image, email: b.client_email }
+          : { id: b.provider_user_id || b.provider_id, name: b.provider_name || 'Provider', image: b.provider_image, email: b.provider_email };
 
         return {
           id: b.id,
           otherParty,
           service: b.service_title || b.service_name || 'Service',
+          service_description: b.service_description,
+          service_category: b.service_category,
+          service_duration_minutes: b.service_duration_minutes,
           date,
           time,
           start_date: b.start_date,
@@ -145,12 +150,25 @@ export function BookingsPage() {
           status: b.status,
           payment_status: b.payment_status,
           payment_due_at: b.payment_due_at,
+          created_at: b.created_at,
+          accepted_at: b.accepted_at,
+          rejected_at: b.rejected_at,
+          cancelled_at: b.cancelled_at,
+          completed_at: b.completed_at,
           cancellation_reason: b.cancellation_reason,
           dispute_reason: b.dispute_reason,
+          dispute_resolution: b.dispute_resolution,
+          dispute_resolved_at: b.dispute_resolved_at,
           provider_completed_at: b.provider_completed_at,
+          client_confirmed_at: b.client_confirmed_at,
           completion_notes: b.completion_notes,
           reschedule_pending_approval: b.reschedule_pending_approval,
           rescheduled_by: b.rescheduled_by,
+          rescheduled_at: b.rescheduled_at,
+          reschedule_reason: b.reschedule_reason,
+          reschedule_count: b.reschedule_count,
+          original_start_date: b.original_start_date,
+          original_end_date: b.original_end_date,
         };
       });
 
@@ -401,6 +419,13 @@ export function BookingsPage() {
                             </span>
                           )}
                           <div className="flex items-center gap-4">
+                            <button
+                              onClick={() => setDetailsBooking(booking)}
+                              className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 transition-colors"
+                            >
+                              <Info className="w-4 h-4" />
+                              View Details
+                            </button>
                             {!isProvider && isPayable(booking) && (
                               <button
                                 onClick={() => openPayment(booking)}
@@ -571,6 +596,14 @@ export function BookingsPage() {
         )}
       </div>
 
+      {detailsBooking && (
+        <BookingDetailsModal
+          booking={detailsBooking}
+          isProvider={isProvider}
+          onClose={() => setDetailsBooking(null)}
+        />
+      )}
+
       {showChat && chatParty && (
         <ChatInterface
           provider={chatParty}
@@ -629,7 +662,7 @@ export function BookingsPage() {
           the provider has accepted, so this is the only place PaymentSummary is
           reachable from. The overlay matches the one BookingFlow used to render. */}
       {payingBooking && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="modal-overlay">
           <PaymentSummary
             bookingId={String(payingBooking.id)}
             serviceName={payingBooking.service}
