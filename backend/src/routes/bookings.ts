@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import { PoolClient } from 'pg';
 import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
@@ -108,6 +109,112 @@ function parseId(v: any): string | null {
   const str = String(v).trim();
   if (!str || str === 'undefined' || str === 'null') return null;
   return str;
+}
+
+/** Thrown by moveBookingSlots when the new window isn't free in the slot picker. */
+class SlotConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SlotConflictError';
+  }
+}
+
+/**
+ * Moves a booking's time slots to a new window, when it has any.
+ *
+ * Rescheduling changed bookings.start_date and left time_slots untouched, so a
+ * slot-picker booking kept its old slots marked 'booked' forever while the new time stayed
+ * on sale - the old date could never be sold again, and the new one could be sold twice
+ * (POST /availability/slots/book validates slot status only, and never looks at the
+ * bookings table).
+ *
+ * Runs inside the caller's transaction, deliberately: if the slots can't be moved, the
+ * date change has to roll back with them, or the two systems end up disagreeing about
+ * when the booking is.
+ *
+ * A booking that owns no slots was made through the direct flow rather than the picker, so
+ * there is nothing to keep in sync and this does nothing. If the new window has no slots
+ * defined at all - the provider generates availability a few weeks out, and the reschedule
+ * reaches past that - the booking becomes unbacked by slots at the new time, which is the
+ * same position every direct-flow booking is in; that is logged rather than refused, so
+ * partial slot coverage doesn't start rejecting legitimate reschedules.
+ */
+async function moveBookingSlots(
+  dbClient: PoolClient,
+  bookingIdInput: string | number,
+  newStart: Date,
+  newEnd: Date
+): Promise<{ released: number; reserved: number }> {
+  const bookingId = String(bookingIdInput);
+
+  const owned = await dbClient.query(
+    `SELECT id, provider_id FROM time_slots WHERE booking_id::text = $1 FOR UPDATE`,
+    [bookingId]
+  );
+  if (owned.rows.length === 0) {
+    return { released: 0, reserved: 0 };
+  }
+
+  // Taken from the slots themselves, not from bookings.provider_id: time_slots.provider_id
+  // references users, while bookings.provider_id may hold a providers-table id (every
+  // handler in this file resolves providers.user_id from it). They happen to agree for
+  // picker-made bookings, which are the only ones that own slots - but reading it from the
+  // row we already have makes that a fact rather than an assumption.
+  const slotProviderId = String(owned.rows[0].provider_id);
+
+  // Candidate slots are the ones falling wholly inside the new window - the same shape
+  // the original booking reserved (one or more contiguous slots spanning start..end).
+  const candidates = await dbClient.query(
+    `SELECT id, status, held_by, booking_id
+     FROM time_slots
+     WHERE provider_id::text = $1
+       AND start_datetime >= $2
+       AND end_datetime <= $3
+     FOR UPDATE`,
+    [slotProviderId, newStart.toISOString(), newEnd.toISOString()]
+  );
+
+  for (const slot of candidates.rows) {
+    const ownedByThisBooking = slot.booking_id && String(slot.booking_id) === bookingId;
+    if (ownedByThisBooking) continue;
+
+    if (slot.status === 'booked') {
+      // Nearly always caught by the caller's bookings-overlap check first, since a booked
+      // slot has a booking behind it. Kept as the backstop for a slot booked without one.
+      throw new SlotConflictError('That time is already booked in the provider\'s calendar');
+    }
+    if (slot.status === 'held') {
+      // The gap the bookings-overlap check cannot see: somebody is mid-checkout on this
+      // slot and has no booking row yet.
+      throw new SlotConflictError('Someone is currently booking that time - please pick another');
+    }
+  }
+
+  const releasedRes = await dbClient.query(
+    `UPDATE time_slots
+     SET status = 'available', booking_id = NULL, held_by = NULL, hold_expires_at = NULL
+     WHERE booking_id::text = $1`,
+    [bookingId]
+  );
+
+  let reserved = 0;
+  if (candidates.rows.length > 0) {
+    const reservedRes = await dbClient.query(
+      `UPDATE time_slots
+       SET status = 'booked', booking_id = $1, held_by = NULL, hold_expires_at = NULL
+       WHERE id::text = ANY($2)`,
+      [bookingId, candidates.rows.map((s: any) => String(s.id))]
+    );
+    reserved = reservedRes.rowCount || 0;
+  } else {
+    console.warn(
+      `[moveBookingSlots] Booking ${bookingId} moved to ${newStart.toISOString()} but the ` +
+      `provider has no time slots defined there, so it is no longer slot-backed. Its old ` +
+      `slots have been released.`
+    );
+  }
+
+  return { released: releasedRes.rowCount || 0, reserved };
 }
 
 /**
@@ -1366,9 +1473,21 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
       );
 
       updatedBooking = updateResult.rows[0];
+
+      // Slots follow the date that is actually in force. A booking still awaiting the
+      // other party's approval hasn't moved yet as far as everyone else is concerned, so
+      // its slots stay where they are until PUT /:id/reschedule/approve moves them - and
+      // if the new time is declined, they were never moved and need no reverting.
+      if (!requiresApproval) {
+        await moveBookingSlots(dbClient, bookingId, newStartDate, newEndDate);
+      }
+
       await dbClient.query('COMMIT');
     } catch (txError) {
       await dbClient.query('ROLLBACK');
+      if (txError instanceof SlotConflictError) {
+        return res.status(409).json({ error: txError.message });
+      }
       throw txError;
     } finally {
       dbClient.release();
@@ -1543,6 +1662,28 @@ router.put('/:id/reschedule/approve', verifyToken, async (req: Request & { userI
     const newDueAt = stillUnpaid
       ? computePaymentDueAt(new Date(), booking.start_date ? new Date(booking.start_date) : null)
       : null;
+
+    // The new time takes effect here, so this is where the slots follow it: they are still
+    // sitting on the time the booking is moving away from (start_date already holds the
+    // proposed one - the proposal wrote it and stashed the old in
+    // reschedule_previous_start_date).
+    try {
+      await moveBookingSlots(
+        dbClient,
+        bookingId,
+        new Date(booking.start_date),
+        new Date(booking.end_date)
+      );
+    } catch (slotError) {
+      if (slotError instanceof SlotConflictError) {
+        await dbClient.query('ROLLBACK');
+        // The proposal stands, so the pair can decline it and agree something else.
+        return res.status(409).json({
+          error: `${slotError.message}. The proposed time is no longer free - decline it and pick another.`,
+        });
+      }
+      throw slotError;
+    }
 
     const updateResult = await dbClient.query(
       `UPDATE bookings
