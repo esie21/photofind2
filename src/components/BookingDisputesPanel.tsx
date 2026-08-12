@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useModal } from '../hooks/useModal';
 import { AlertTriangle, CheckCircle, X, Loader2, Image, Eye, User, Clock, FileText } from 'lucide-react';
 import bookingService, { DisputedBooking, BookingEvidence } from '../api/services/bookingService';
 import { getUploadUrl } from '../api/config';
@@ -19,6 +20,14 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
   const [refundPercentage, setRefundPercentage] = useState(100);
   const [resolving, setResolving] = useState(false);
   const [resolutionResult, setResolutionResult] = useState<{ message: string; details?: any } | null>(null);
+
+  // Four modals live in this component's JSX, so each declares itself here and only
+  // engages while it is the one showing. The lightbox opts out of the scroll lock
+  // because whichever modal opened it already holds one.
+  useModal(() => setSelectedDispute(null), { enabled: !!selectedDispute && !showResolveModal });
+  useModal(() => setShowResolveModal(false), { enabled: showResolveModal, closeOnEscape: !resolving });
+  useModal(() => setResolutionResult(null), { enabled: !!resolutionResult });
+  useModal(() => setSelectedImage(null), { enabled: !!selectedImage, lockScroll: false });
 
   useEffect(() => {
     loadDisputes();
@@ -293,10 +302,10 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
 
       {/* Detail Modal */}
       {selectedDispute && !showResolveModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setSelectedDispute(null); }}>
+          <div role="dialog" aria-modal="true" aria-label="Dispute details" className="modal-card modal-card--2xl">
             {/* Modal Header */}
-            <div className="flex items-center justify-between p-4 border-b border-gray-200">
+            <div className="modal-header flex items-center justify-between p-4 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">Dispute Details</h3>
               <button
                 onClick={() => setSelectedDispute(null)}
@@ -307,7 +316,7 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
             </div>
 
             {/* Modal Content */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div className="modal-body p-4 space-y-4">
               {/* Booking Info */}
               <div className="bg-gray-50 rounded-xl p-4">
                 <h4 className="font-medium text-gray-900 mb-2">
@@ -415,8 +424,8 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
 
       {/* Resolve Modal */}
       {showResolveModal && selectedDispute && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md p-6">
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget && !resolving) setShowResolveModal(false); }}>
+          <div role="dialog" aria-modal="true" aria-label="Resolve dispute" className="modal-card modal-card--md modal-card--plain p-6">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-gray-900">
                 Resolve Dispute
@@ -529,8 +538,8 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
 
       {/* Resolution Success Modal */}
       {resolutionResult && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-sm p-6 text-center">
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setResolutionResult(null); }}>
+          <div role="dialog" aria-modal="true" aria-label="Dispute resolved" className="modal-card modal-card--sm modal-card--plain p-6 text-center">
             <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
               <CheckCircle className="w-8 h-8 text-green-600" />
             </div>
@@ -563,11 +572,11 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
       {/* Image Lightbox */}
       {selectedImage && (
         <div
-          className="fixed inset-0 bg-black/90 flex items-center justify-center z-[60] p-4"
+          className="modal-lightbox"
           onClick={() => setSelectedImage(null)}
         >
           <button
-            className="absolute top-4 right-4 p-2 text-white hover:bg-white/20 rounded-full"
+            className="modal-lightbox-close p-2 text-white hover:bg-white/20 rounded-full"
             onClick={() => setSelectedImage(null)}
           >
             <X className="w-6 h-6" />

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useModal } from '../hooks/useModal';
 import { X, AlertCircle, Loader2, CheckCircle, AlertTriangle, Image, Clock } from 'lucide-react';
 import bookingService, { BookingEvidence } from '../api/services/bookingService';
 import { getUploadUrl } from '../api/config';
@@ -31,6 +32,15 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
   const [showDispute, setShowDispute] = useState(false);
   const [disputeReason, setDisputeReason] = useState('');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+
+  // Escape reaches the lightbox first when one is open - useModal only delivers it to
+  // the topmost modal - so a photo closes without also closing the modal behind it.
+  const { overlayProps, cardProps } = useModal(onClose, {
+    closeOnEscape: !isLoading,
+    closeOnBackdrop: !isLoading,
+    label: 'Confirm booking completion',
+  });
+  useModal(() => setSelectedImage(null), { enabled: !!selectedImage, lockScroll: false });
 
   useEffect(() => {
     loadEvidence();
@@ -150,10 +160,10 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-        <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-xl max-h-[90vh] flex flex-col">
+      <div className="modal-overlay" {...overlayProps}>
+        <div className="modal-card modal-card--lg" {...cardProps}>
           {/* Header */}
-          <div className="flex items-center justify-between p-4 border-b border-gray-200">
+          <div className="modal-header flex items-center justify-between p-4 border-b border-gray-200">
             <div className="flex items-center gap-2">
               <CheckCircle className="w-5 h-5 text-blue-600" />
               <h2 className="text-lg font-semibold text-gray-900">Confirm Service Completion</h2>
@@ -167,7 +177,7 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
           </div>
 
           {/* Content */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div className="modal-body p-4 space-y-4">
             {/* Booking Info */}
             <div className="bg-gray-50 rounded-xl p-3">
               <p className="font-medium text-gray-900">{booking.service_title || 'Service'}</p>
@@ -270,7 +280,7 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
           </div>
 
           {/* Actions */}
-          <div className="p-4 border-t border-gray-200 space-y-3">
+          <div className="modal-footer p-4 border-t border-gray-200 space-y-3">
             {!showDispute ? (
               <>
                 <button
@@ -335,11 +345,11 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
       {/* Image Lightbox */}
       {selectedImage && (
         <div
-          className="fixed inset-0 bg-black/90 flex items-center justify-center z-[60] p-4"
+          className="modal-lightbox"
           onClick={() => setSelectedImage(null)}
         >
           <button
-            className="absolute top-4 right-4 p-2 text-white hover:bg-white/20 rounded-full"
+            className="modal-lightbox-close p-2 text-white hover:bg-white/20 rounded-full"
             onClick={() => setSelectedImage(null)}
           >
             <X className="w-6 h-6" />

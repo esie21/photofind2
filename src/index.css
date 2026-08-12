@@ -2665,3 +2665,170 @@ html {
 /* The provider dashboard's "Waiting for Payment" panel. bg-amber-100 and text-amber-700
    were already emitted; the border shade never was. */
 .border-amber-200 { border-color: oklch(.924 .12 95.746); }
+
+/* ============================================================
+   Modals
+
+   Every modal in the app used to hand-write the same overlay string -
+   `fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4` - and then
+   size its own card, which meant the same problems in fourteen places: a card
+   taller than the viewport was centred and clipped off both ends with no way to
+   scroll to it, `vh` units overflowed on mobile Safari (its toolbars count toward
+   vh), nothing respected a phone's home-bar inset, and a full-width card on a
+   360px screen spent half its width on padding and rounded corners.
+
+   Defined here rather than as responsive utilities because there is no Tailwind
+   step in this build: index.css is a pruned prebuilt snapshot, and of the
+   responsive variants only 25 were ever emitted - none of them the ones modal
+   layout needs. `sm:max-w-md` would compile and do nothing.
+
+   Structure, which every modal follows:
+
+     .modal-overlay > .modal-card[.modal-card--md] > .modal-header
+                                                     .modal-body    <- scrolls
+                                                     .modal-footer
+
+   Below 40rem the card is a bottom sheet: full width, flush to the edges, top
+   corners only, so its controls are in thumb reach. From 40rem up it is the
+   centred card it always was.
+   ============================================================ */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.5);
+  /* Scrolling the page behind a modal is most of what makes one feel broken on a
+     phone. The lock is applied to <body> by useModal; this stops a scroll gesture
+     inside the overlay from chaining out to whatever is behind it. */
+  overscroll-behavior: contain;
+}
+
+/* For a modal opened from inside another one - AuthModal's terms, the image
+   lightboxes. `z-[60]` was being used for this and was never emitted, so those
+   had no z-index at all. */
+.modal-overlay--nested {
+  z-index: 60;
+}
+
+.modal-card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  /* The card never exceeds the viewport, so .modal-body is the only thing that
+     ever needs to scroll and the overlay never has to. dvh excludes mobile
+     browser chrome and shrinks when the keyboard opens; the vh line above it is
+     the fallback for browsers without dvh. */
+  max-height: 92vh;
+  max-height: 92dvh;
+  overflow: hidden;
+  background-color: #fff;
+  border-radius: 1rem 1rem 0 0;
+  box-shadow: 0 -8px 32px -8px rgba(17, 12, 34, 0.24);
+}
+
+.modal-header,
+.modal-footer {
+  flex-shrink: 0;
+}
+
+/* min-height: 0 is the part that actually makes this scroll: a flex child's
+   default min-height is auto, so it refuses to shrink below its content and the
+   overflow moves to the card instead of staying here. */
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Keeps the last control clear of the home bar on a phone. Zero everywhere else. */
+.modal-footer {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (width >= 40rem) {
+  .modal-overlay {
+    align-items: center;
+    padding: 1rem;
+  }
+
+  .modal-card {
+    max-height: 90vh;
+    max-height: 90dvh;
+    border-radius: 1rem;
+    box-shadow: 0 20px 48px -12px rgba(17, 12, 34, 0.28);
+  }
+
+  .modal-footer {
+    padding-bottom: 0;
+  }
+
+  /* Widths apply from here up only - below this the sheet is always full width.
+     Same scale as the max-w-* classes these replace. */
+  .modal-card--sm { max-width: 24rem; }
+  .modal-card--md { max-width: 28rem; }
+  .modal-card--lg { max-width: 32rem; }
+  .modal-card--xl { max-width: 36rem; }
+  .modal-card--2xl { max-width: 42rem; }
+}
+
+/* A modal whose whole card is one scrolling region, with no header/body split. */
+.modal-card--plain {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Chat is the one modal that wants to be tall rather than content-sized: its
+   message list should fill the space so the composer sits at the bottom. It was
+   `h-[600px]`, a hard height, so on any viewport under ~630px the composer was
+   permanently off-screen. */
+.modal-card--tall {
+  height: 92dvh;
+}
+
+@media (width >= 40rem) {
+  .modal-card--tall {
+    height: 600px;
+    max-height: 90dvh;
+  }
+}
+
+/* Full-bleed image viewer. `bg-black/90` was never emitted, so these had no
+   backdrop at all - a full-screen photo with the page showing through. */
+.modal-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background-color: rgba(0, 0, 0, 0.9);
+  overscroll-behavior: contain;
+}
+
+.modal-lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/* Clear of a notch or status bar. */
+.modal-lightbox-close {
+  position: absolute;
+  top: max(1rem, env(safe-area-inset-top, 0px));
+  right: 1rem;
+}
+
+/* Side drawer (MobileNav). Scrolls, so a long nav on a short screen can still
+   reach its last item. */
+.modal-drawer {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}

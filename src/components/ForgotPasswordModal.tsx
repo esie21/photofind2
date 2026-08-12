@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useModal } from '../hooks/useModal';
 import { X, Mail, Loader, AlertCircle, CheckCircle, ArrowLeft } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 
@@ -26,6 +27,13 @@ export function ForgotPasswordModal({ onClose, onBackToLogin }: ForgotPasswordMo
   const [touched, setTouched] = useState(false);
   const [success, setSuccess] = useState(false);
   const [devResetUrl, setDevResetUrl] = useState<string | null>(null);
+
+  // Escape and the backdrop stay inert while the request is in flight.
+  const { overlayProps, cardProps } = useModal(onClose, {
+    closeOnEscape: !loading,
+    closeOnBackdrop: !loading,
+    labelledBy: 'forgot-password-title',
+  });
 
   const handleBlur = () => {
     setTouched(true);
@@ -76,9 +84,9 @@ export function ForgotPasswordModal({ onClose, onBackToLogin }: ForgotPasswordMo
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl max-w-md w-full">
-        <div className="border-b border-gray-200 p-6 flex items-center justify-between">
+    <div className="modal-overlay" {...overlayProps}>
+      <div className="modal-card modal-card--md" {...cardProps}>
+        <div className="modal-header border-b border-gray-200 p-6 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
               onClick={onBackToLogin}
@@ -87,14 +95,14 @@ export function ForgotPasswordModal({ onClose, onBackToLogin }: ForgotPasswordMo
             >
               <ArrowLeft className="w-5 h-5 text-gray-500" />
             </button>
-            <h2 className="text-gray-900">Reset Password</h2>
+            <h2 id="forgot-password-title" className="text-gray-900">Reset Password</h2>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 
-        <div className="p-6">
+        <div className="modal-body p-6">
           {success ? (
             <div className="text-center">
               <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">

@@ -32,7 +32,7 @@ export function MobileNav({ isOpen, onClose, onViewChange, currentView }: Mobile
       />
 
       {/* Drawer */}
-      <div className="fixed inset-y-0 right-0 w-72 bg-white shadow-xl z-50 md:hidden transform transition-transform duration-300 ease-in-out">
+      <div className="modal-drawer fixed inset-y-0 right-0 w-72 bg-white shadow-xl z-50 md:hidden transform transition-transform duration-300 ease-in-out">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <div className="flex items-center gap-3">

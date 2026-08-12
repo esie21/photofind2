@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useModal } from '../hooks/useModal';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
@@ -80,6 +81,19 @@ export function AdminDashboard() {
   const [showResolveModal, setShowResolveModal] = useState<AdminDispute | null>(null);
   const [resolution, setResolution] = useState({ text: '', type: 'no_action', refundAmount: 0 });
   const [showReviewActionModal, setShowReviewActionModal] = useState<{ id: string; action: 'reject' | 'flag' | 'delete' } | null>(null);
+
+  // Escape and scroll-locking for the three modals written inline below. `enabled`
+  // is what lets these be declared unconditionally up here while only taking effect
+  // when their modal is actually showing. closeOnBackdrop is off for all three: each
+  // holds a typed reason/resolution an admin can lose to a stray click outside the
+  // card, so the JSX below spreads these props instead of hand-rolling its own
+  // backdrop handler that would ignore that.
+  const closeRejectModal = () => { setShowRejectModal(null); setRejectReason(''); };
+  const closeReviewActionModal = () => { setShowReviewActionModal(null); setReviewActionReason(''); };
+  const closeResolveModal = () => { setShowResolveModal(null); setResolution({ text: '', type: 'no_action', refundAmount: 0 }); };
+  const rejectModal = useModal(closeRejectModal, { enabled: !!showRejectModal, closeOnBackdrop: false, label: 'Reject verification' });
+  const reviewActionModal = useModal(closeReviewActionModal, { enabled: !!showReviewActionModal, closeOnBackdrop: false, label: 'Review action' });
+  const resolveModal = useModal(closeResolveModal, { enabled: !!showResolveModal, closeOnBackdrop: false, label: 'Resolve dispute' });
   const [reviewActionReason, setReviewActionReason] = useState('');
 
   const ITEMS_PER_PAGE = 20;
@@ -1370,8 +1384,8 @@ export function AdminDashboard() {
 
       {/* Reject Provider Modal */}
       {showRejectModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full">
+        <div className="modal-overlay" {...rejectModal.overlayProps}>
+          <div className="modal-card modal-card--md modal-card--plain p-6" {...rejectModal.cardProps}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-medium text-gray-900">Reject Verification</h3>
               <button onClick={() => { setShowRejectModal(null); setRejectReason(''); }} className="text-gray-400 hover:text-gray-600">
@@ -1394,8 +1408,8 @@ export function AdminDashboard() {
 
       {/* Review Action Modal (Reject / Flag / Delete) */}
       {showReviewActionModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full">
+        <div className="modal-overlay" {...reviewActionModal.overlayProps}>
+          <div className="modal-card modal-card--md modal-card--plain p-6" {...reviewActionModal.cardProps}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-medium text-gray-900">
                 {showReviewActionModal.action === 'reject' ? 'Reject Review' :
@@ -1426,8 +1440,8 @@ export function AdminDashboard() {
 
       {/* Resolve Dispute Modal */}
       {showResolveModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-lg w-full">
+        <div className="modal-overlay" {...resolveModal.overlayProps}>
+          <div className="modal-card modal-card--lg modal-card--plain p-6" {...resolveModal.cardProps}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-medium text-gray-900">Resolve Dispute</h3>
               <button onClick={() => { setShowResolveModal(null); setResolution({ text: '', type: 'no_action', refundAmount: 0 }); }} className="text-gray-400 hover:text-gray-600">

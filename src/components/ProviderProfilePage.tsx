@@ -542,12 +542,12 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
       {/* Lightbox for Portfolio Images */}
       {selectedImage && (
         <div
-          className="fixed inset-0 bg-black/90 flex items-center justify-center z-50 p-4"
+          className="modal-lightbox"
           onClick={() => setSelectedImage(null)}
         >
           <button
             onClick={() => setSelectedImage(null)}
-            className="absolute top-4 right-4 w-10 h-10 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center transition-colors"
+            className="modal-lightbox-close w-10 h-10 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center transition-colors"
           >
             <X className="w-6 h-6 text-white" />
           </button>

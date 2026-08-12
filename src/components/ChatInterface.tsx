@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useModal } from '../hooks/useModal';
 import { X, Send, Paperclip, MoreVertical, Check, CheckCheck, Loader2 } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { useAuth } from '../context/AuthContext';
@@ -14,6 +15,7 @@ interface ChatInterfaceProps {
 }
 
 export function ChatInterface({ provider, bookingId: bookingIdProp, onClose }: ChatInterfaceProps) {
+  const { overlayProps, cardProps } = useModal(onClose, { label: 'Conversation' });
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState<Array<ChatMessage | BookingChatMessage>>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
@@ -346,10 +348,10 @@ const participantId = useMemo(() => {
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-2xl h-[600px] flex flex-col shadow-2xl">
+    <div className="modal-overlay" {...overlayProps}>
+      <div className="modal-card modal-card--2xl modal-card--tall" {...cardProps}>
         {/* Header */}
-        <div className="flex items-center gap-4 p-4 border-b border-gray-200">
+        <div className="modal-header flex items-center gap-4 p-4 border-b border-gray-200">
           <ImageWithFallback
             src={provider.image || provider.profile_image || conversation?.other_user?.profile_image}
             alt={headerName}
@@ -374,7 +376,7 @@ const participantId = useMemo(() => {
         </div>
 
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div ref={scrollRef} className="modal-body p-4 space-y-4">
           {loading && (
             <div className="flex items-center gap-2 text-gray-500 text-sm">
               <Loader2 className="w-4 h-4 animate-spin" />

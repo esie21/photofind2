@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react';
+import { useModal } from '../hooks/useModal';
 import { X, Upload, Image, Trash2, AlertCircle, Loader2, CheckCircle } from 'lucide-react';
 import bookingService from '../api/services/bookingService';
 
@@ -25,6 +26,14 @@ export function CompleteBookingModal({ booking, onClose, onSuccess }: CompleteBo
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
   const [evidenceFiles, setEvidenceFiles] = useState<EvidenceFile[]>([]);
+
+  // Left inert while the upload is in flight - closing mid-submit would abandon
+  // evidence the server may already be storing.
+  const { overlayProps, cardProps } = useModal(onClose, {
+    closeOnEscape: !isLoading,
+    closeOnBackdrop: !isLoading,
+    label: 'Mark booking complete',
+  });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -121,10 +130,10 @@ export function CompleteBookingModal({ booking, onClose, onSuccess }: CompleteBo
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-xl max-h-[90vh] flex flex-col">
+    <div className="modal-overlay" {...overlayProps}>
+      <div className="modal-card modal-card--lg" {...cardProps}>
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+        <div className="modal-header flex items-center justify-between p-4 border-b border-gray-200">
           <div className="flex items-center gap-2">
             <CheckCircle className="w-5 h-5 text-green-600" />
             <h2 className="text-lg font-semibold text-gray-900">Complete Service</h2>
@@ -138,7 +147,7 @@ export function CompleteBookingModal({ booking, onClose, onSuccess }: CompleteBo
         </div>
 
         {/* Content */}
-        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-4 space-y-4">
+        <form onSubmit={handleSubmit} className="modal-body p-4 space-y-4">
           {/* Booking Info */}
           <div className="bg-gray-50 rounded-xl p-3">
             <p className="font-medium text-gray-900">{booking.service_title || 'Service'}</p>
@@ -240,7 +249,7 @@ export function CompleteBookingModal({ booking, onClose, onSuccess }: CompleteBo
         </form>
 
         {/* Actions */}
-        <div className="flex gap-3 p-4 border-t border-gray-200">
+        <div className="modal-footer flex gap-3 p-4 border-t border-gray-200">
           <button
             type="button"
             onClick={onClose}

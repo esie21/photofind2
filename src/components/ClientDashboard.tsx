@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useModal } from '../hooks/useModal';
 import { Search, SlidersHorizontal, Star, MapPin, MessageSquare, Clock, ChevronRight, Filter, ShieldCheck } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { ChatInterface } from './ChatInterface';
@@ -22,6 +23,10 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
   const [showFilters, setShowFilters] = useState(!!initialCategory);
   const [showChat, setShowChat] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<any>(null);
+
+  // Written inline in this component's JSX, so it declares itself unconditionally and
+  // only takes effect while the profile is open.
+  useModal(() => setSelectedProvider(null), { enabled: !!selectedProvider });
   const [providersList, setProvidersList] = useState<any[]>([]);
   const [loadingProviders, setLoadingProviders] = useState(false);
   const [providersError, setProvidersError] = useState<string | null>(null);
@@ -450,8 +455,8 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
 
       {/* Provider Profile Modal */}
       {selectedProvider && !showChat && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setSelectedProvider(null); }}>
+          <div role="dialog" aria-modal="true" aria-label="Provider profile" className="modal-card modal-card--2xl modal-card--plain">
             <div className="relative h-64">
               <ImageWithFallback
                 src={selectedProvider.image}

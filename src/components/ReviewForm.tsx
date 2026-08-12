@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useModal } from '../hooks/useModal';
 import { Star, X, Loader } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 import reviewService from '../api/services/reviewService';
@@ -17,6 +18,12 @@ export function ReviewForm({ bookingId, providerName, serviceName, onClose, onSu
   const [hoverRating, setHoverRating] = useState(0);
   const [comment, setComment] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const { overlayProps, cardProps } = useModal(onClose, {
+    closeOnEscape: !isSubmitting,
+    closeOnBackdrop: !isSubmitting,
+    labelledBy: 'review-form-title',
+  });
 
   const handleSubmit = async () => {
     if (rating === 0) {
@@ -53,16 +60,16 @@ export function ReviewForm({ bookingId, providerName, serviceName, onClose, onSu
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
-        <div className="sticky top-0 bg-white border-b border-gray-200 p-6 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">Leave a Review</h2>
+    <div className="modal-overlay" {...overlayProps}>
+      <div className="modal-card modal-card--md" {...cardProps}>
+        <div className="modal-header bg-white border-b border-gray-200 p-6 flex items-center justify-between">
+          <h2 id="review-form-title" className="text-lg font-semibold text-gray-900">Leave a Review</h2>
           <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 
-        <div className="p-6">
+        <div className="modal-body p-6">
           {/* Provider Info */}
           <div className="text-center mb-6">
             <h3 className="text-gray-900 font-medium">{providerName}</h3>

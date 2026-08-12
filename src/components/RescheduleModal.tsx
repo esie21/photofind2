@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useModal } from '../hooks/useModal';
 import { X, Clock, AlertCircle, Loader2 } from 'lucide-react';
 import bookingService from '../api/services/bookingService';
 import availabilityService from '../api/services/availabilityService';
@@ -64,6 +65,12 @@ export function RescheduleModal({ providerId, booking, onClose, onSuccess }: Res
   const [validSlots, setValidSlots] = useState<RawSlot[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [slotsError, setSlotsError] = useState<string | null>(null);
+
+  const { overlayProps, cardProps } = useModal(onClose, {
+    closeOnEscape: !isLoading,
+    closeOnBackdrop: !isLoading,
+    labelledBy: 'reschedule-title',
+  });
 
   // Calculate duration from existing booking or default to 60 minutes
   const getDuration = () => {
@@ -148,11 +155,11 @@ export function RescheduleModal({ providerId, booking, onClose, onSuccess }: Res
     : 'Not set';
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-xl max-h-[90vh] flex flex-col">
+    <div className="modal-overlay" {...overlayProps}>
+      <div className="modal-card modal-card--lg" {...cardProps}>
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-200 flex-shrink-0">
-          <h2 className="text-lg font-semibold text-gray-900">Reschedule Booking</h2>
+        <div className="modal-header flex items-center justify-between p-4 border-b border-gray-200">
+          <h2 id="reschedule-title" className="text-lg font-semibold text-gray-900">Reschedule Booking</h2>
           <button
             onClick={onClose}
             className="p-2 hover:bg-gray-100 rounded-full transition-colors"
@@ -162,7 +169,7 @@ export function RescheduleModal({ providerId, booking, onClose, onSuccess }: Res
         </div>
 
         {/* Content */}
-        <form onSubmit={handleSubmit} className="p-4 space-y-4 overflow-y-auto">
+        <form onSubmit={handleSubmit} className="modal-body p-4 space-y-4">
           {/* Current Booking Info */}
           <div className="bg-gray-50 rounded-xl p-3">
             <p className="text-sm text-gray-500 mb-1">Current Booking</p>

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useModal } from '../hooks/useModal';
 import { X, Mail, Loader, AlertCircle, Eye, EyeOff, ArrowLeft, Check, Camera, User } from 'lucide-react';
 import { GoogleLogin, CredentialResponse } from '@react-oauth/google';
 import { useAuth } from '../context/AuthContext';
@@ -93,6 +94,15 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
   const [googleProfile, setGoogleProfile] = useState<{ email: string; name: string } | null>(null);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [showTermsPreview, setShowTermsPreview] = useState(false);
+
+  // The terms preview registers separately so Escape closes it without also closing
+  // the sign-up form underneath, and so the page stays locked while either is open.
+  const { overlayProps, cardProps } = useModal(onClose, {
+    closeOnEscape: !loading,
+    closeOnBackdrop: !loading,
+    label: 'Sign in or create an account',
+  });
+  useModal(() => setShowTermsPreview(false), { enabled: showTermsPreview });
 
   // Reset form when modal opens or mode changes
   useEffect(() => {
@@ -301,9 +311,9 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
-        <div className="sticky top-0 bg-white border-b border-gray-200 p-6 flex items-center justify-between">
+    <div className="modal-overlay" {...overlayProps}>
+      <div className="modal-card modal-card--md" {...cardProps}>
+        <div className="modal-header bg-white border-b border-gray-200 p-6 flex items-center justify-between">
           <div className="flex items-center gap-3">
             {authStep === 'role' && (
               <button
@@ -702,18 +712,18 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
       </div>
 
       {showTermsPreview && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[80vh] flex flex-col">
-            <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center justify-between rounded-t-2xl">
+        <div className="modal-overlay modal-overlay--nested" onClick={(e) => { if (e.target === e.currentTarget) setShowTermsPreview(false); }}>
+          <div role="dialog" aria-modal="true" aria-label="Terms and conditions" className="modal-card modal-card--lg">
+            <div className="modal-header bg-white border-b border-gray-200 p-4 flex items-center justify-between">
               <h3 className="text-gray-900 font-medium">Terms & Conditions</h3>
               <button onClick={() => setShowTermsPreview(false)} className="p-1 hover:bg-gray-100 rounded-lg">
                 <X className="w-5 h-5 text-gray-600" />
               </button>
             </div>
-            <div className="p-6 overflow-y-auto">
+            <div className="modal-body p-6">
               <TermsContent />
             </div>
-            <div className="border-t border-gray-200 p-4 flex justify-end">
+            <div className="modal-footer border-t border-gray-200 p-4 flex justify-end">
               <button
                 onClick={() => setShowTermsPreview(false)}
                 className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium"

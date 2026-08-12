@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpRight, X, Loader2, AlertCircle, CheckCircle, Building2, Smartphone, Wallet, ArrowLeft } from 'lucide-react';
 import { payoutService } from '../api/services/walletService';
+import { useModal } from '../hooks/useModal';
 
 interface PayoutRequestFormProps {
   availableBalance: number;
@@ -66,20 +67,13 @@ export function PayoutRequestForm({ availableBalance, minimumPayout, onSuccess, 
   const amountRef = useRef<HTMLInputElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Escape closes, and the page behind the modal stops scrolling while it is open.
-  // Neither worked before: the only way out was the X in the corner.
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !loading && !success) onCancel();
-    };
-    document.addEventListener('keydown', onKeyDown);
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [loading, success, onCancel]);
+  // Escape, the backdrop and the scroll lock all come from useModal, which every modal
+  // in the app now shares. Inert while submitting or on the success screen.
+  const { overlayProps, cardProps } = useModal(onCancel, {
+    closeOnEscape: !loading && !success,
+    closeOnBackdrop: !loading && !success,
+    labelledBy: 'payout-form-title',
+  });
 
   useEffect(() => {
     amountRef.current?.focus();
@@ -521,23 +515,10 @@ export function PayoutRequestForm({ availableBalance, minimumPayout, onSuccess, 
   );
 
   return (
-    // The backdrop scrolls. It didn't before: with Bank transfer selected the card is
-    // taller than a laptop viewport, and the submit button simply sat off-screen with no
-    // way to reach it.
-    <div
-      className="fixed inset-0 bg-black/50 z-50 p-4 overflow-y-auto"
-      onClick={() => { if (!loading && !success) onCancel(); }}
-    >
-      <div className="flex items-center justify-center min-h-full">
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="payout-form-title"
-          onClick={(e) => e.stopPropagation()}
-          className="bg-white rounded-2xl shadow-lg max-w-md w-full"
-        >
-          {!success && (
-            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+    <div className="modal-overlay" {...overlayProps}>
+      <div className="modal-card modal-card--md modal-card--plain" {...cardProps}>
+        {!success && (
+          <div className="modal-header flex items-center justify-between p-6 border-b border-gray-200">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-purple-100 rounded-lg">
                   <ArrowUpRight className="w-5 h-5 text-purple-600" />
@@ -559,9 +540,8 @@ export function PayoutRequestForm({ availableBalance, minimumPayout, onSuccess, 
                 <X className="w-5 h-5 text-gray-500" />
               </button>
             </div>
-          )}
-          {body}
-        </div>
+        )}
+        {body}
       </div>
     </div>
   );

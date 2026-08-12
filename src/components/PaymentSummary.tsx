@@ -257,7 +257,7 @@ export function PaymentSummary({
   };
 
   return (
-    <div className="bg-white rounded-2xl shadow-lg p-6 max-w-md mx-auto">
+    <div className="modal-card modal-card--md modal-card--plain p-6">
       {/* Header */}
       <div className="text-center mb-6">
         <div className="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
