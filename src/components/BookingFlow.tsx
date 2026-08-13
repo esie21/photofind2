@@ -1036,7 +1036,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       }`}
                     >
                       {bookingType === 'hourly' && (
-                        <div className="absolute top-3 right-3 w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center">
+                        <div className="absolute top-3 right-3 w-6 h-6 bg-blue-600 rounded-full flex items-center justify-center">
                           <Check className="w-4 h-4 text-white" />
                         </div>
                       )}
@@ -1291,8 +1291,8 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                           <div>
                             {/* Day Headers */}
                             <div className="grid grid-cols-7 text-center text-xs font-medium text-gray-500 mb-2">
-                              {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => (
-                                <div key={d} className="py-1">{d}</div>
+                              {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
+                                <div key={i} className="py-1">{d}</div>
                               ))}
                             </div>
 
@@ -1582,7 +1582,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                           : isSelected
                                             ? isHeldByMe
                                               ? 'bg-green-500 text-white shadow-md'
-                                              : 'bg-blue-500 text-white shadow-md'
+                                              : 'bg-blue-600 text-white shadow-md'
                                             : 'bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-300'
                                       }
                                       ${isDisabled && !isHeldByOther && !isBooked ? 'opacity-40 cursor-not-allowed' : ''}

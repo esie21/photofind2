@@ -35,7 +35,6 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState(12);
   const [totalProviders, setTotalProviders] = useState<number | null>(null);
-  const [priceRange, setPriceRange] = useState([0, 1000]);
   const [selectedCategory, setSelectedCategory] = useState(initialCategory || 'all');
   const [sortBy, setSortBy] = useState('recommended');
   const [myBookings, setMyBookings] = useState<any[]>([]);
@@ -50,7 +49,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
     setLoadingProviders(true);
     setProvidersError(null);
     try {
-      const res = await userService.getAllProviders({ q: searchQuery, category: selectedCategory, page, limit });
+      const res = await userService.getAllProviders({ q: searchQuery, category: selectedCategory, sort: sortBy, page, limit });
       const list = res.data;
       const total = res.meta?.total ?? null;
       setProvidersList(list);
@@ -81,7 +80,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
 
   useEffect(() => {
     fetchProviders();
-  }, [searchQuery, selectedCategory, page, limit]);
+  }, [searchQuery, selectedCategory, sortBy, page, limit]);
 
   const fetchMyBookings = async () => {
     setLoadingBookings(true);
@@ -168,7 +167,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
 
               {/* Advanced Filters */}
               {showFilters && (
-                <div className="pt-4 border-t border-gray-200 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="pt-4 border-t border-gray-200 grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm text-gray-700 mb-2">Category</label>
                     <select
@@ -186,21 +185,13 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
                     <label className="block text-sm text-gray-700 mb-2">Sort By</label>
                     <select
                       value={sortBy}
-                      onChange={(e) => setSortBy(e.target.value)}
+                      onChange={(e) => { setSortBy(e.target.value); setPage(1); }}
                       className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
                     >
                       <option value="recommended">Recommended</option>
                       <option value="rating">Highest Rated</option>
                       <option value="price-low">Price: Low to High</option>
                       <option value="price-high">Price: High to Low</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-700 mb-2">Availability</label>
-                    <select className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500">
-                      <option>Any time</option>
-                      <option>This week</option>
-                      <option>This month</option>
                     </select>
                   </div>
                 </div>

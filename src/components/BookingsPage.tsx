@@ -10,6 +10,7 @@ import { ConfirmCompletionModal } from './ConfirmCompletionModal';
 import { ReviewForm } from './ReviewForm';
 import { PaymentSummary } from './PaymentSummary';
 import { BookingDetailsModal } from './BookingDetailsModal';
+import { useModal } from '../hooks/useModal';
 import bookingService from '../api/services/bookingService';
 import reviewService from '../api/services/reviewService';
 
@@ -103,6 +104,11 @@ export function BookingsPage() {
   const [payingBooking, setPayingBooking] = useState<any>(null);
   const [checkingPaymentFor, setCheckingPaymentFor] = useState<string | null>(null);
   const [detailsBooking, setDetailsBooking] = useState<any>(null);
+  // Whether PaymentSummary currently allows dismissing it - false while a payment's
+  // outcome is still unknown, so a client can't Escape/backdrop-click their way out of
+  // a charge that already went through but hasn't been reflected in their booking list
+  // yet. Mirrors the same check PaymentSummary uses for its own Cancel button.
+  const [paymentCloseable, setPaymentCloseable] = useState(true);
 
   // `silent` skips the full-page spinner, for refreshes that happen behind an open modal
   // or behind a button's own pending state. `resetPage` is off for those too - a refresh
@@ -214,10 +220,23 @@ export function BookingsPage() {
         return;
       }
       setPayingBooking(current);
+      setPaymentCloseable(true);
     } finally {
       setCheckingPaymentFor(null);
     }
   };
+
+  const cancelPayment = () => {
+    setPayingBooking(null);
+    fetchBookings({ resetPage: false });
+  };
+
+  const { overlayProps: paymentOverlayProps } = useModal(cancelPayment, {
+    enabled: !!payingBooking,
+    closeOnEscape: paymentCloseable,
+    closeOnBackdrop: paymentCloseable,
+    label: 'Payment',
+  });
 
   useEffect(() => {
     fetchBookings();
@@ -662,7 +681,7 @@ export function BookingsPage() {
           the provider has accepted, so this is the only place PaymentSummary is
           reachable from. The overlay matches the one BookingFlow used to render. */}
       {payingBooking && (
-        <div className="modal-overlay">
+        <div className="modal-overlay" {...paymentOverlayProps}>
           <PaymentSummary
             bookingId={String(payingBooking.id)}
             serviceName={payingBooking.service}
@@ -687,10 +706,9 @@ export function BookingsPage() {
             }}
             // Every exit refreshes. Closing without one is what let the list keep
             // offering Pay for a booking that had already been paid.
-            onCancel={() => {
-              setPayingBooking(null);
-              fetchBookings({ resetPage: false });
-            }}
+            onCancel={cancelPayment}
+            // Gates Escape/backdrop-close above - see paymentCloseable.
+            onCloseabilityChange={setPaymentCloseable}
           />
         </div>
       )}

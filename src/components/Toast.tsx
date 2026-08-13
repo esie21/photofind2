@@ -31,11 +31,11 @@ const toastConfig = {
   },
   warning: {
     icon: AlertTriangle,
-    bgColor: 'bg-yellow-50',
-    borderColor: 'border-yellow-200',
-    iconColor: 'text-yellow-500',
-    titleColor: 'text-yellow-800',
-    messageColor: 'text-yellow-700',
+    bgColor: 'bg-amber-100',
+    borderColor: 'border-amber-200',
+    iconColor: 'text-amber-700',
+    titleColor: 'text-amber-700',
+    messageColor: 'text-amber-700',
   },
   info: {
     icon: Info,
@@ -114,7 +114,7 @@ export function Toast({ id, type, title, message, duration = 5000, onClose }: To
             className={`h-full transition-all duration-100 ease-linear ${
               type === 'success' ? 'bg-green-500' :
               type === 'error' ? 'bg-red-500' :
-              type === 'warning' ? 'bg-yellow-500' : 'bg-blue-500'
+              type === 'warning' ? 'bg-orange-600' : 'bg-blue-600'
             }`}
             style={{ width: `${progress}%` }}
           />

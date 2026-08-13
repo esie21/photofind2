@@ -13,6 +13,15 @@ interface PaymentSummaryProps {
   onCancel: () => void;
   /** Called when the server says this booking is already paid - see 'already_paid'. */
   onAlreadyPaid?: () => void;
+  /**
+   * Reports whether it is currently safe to dismiss this modal from outside (Escape,
+   * clicking the backdrop) - the same question the in-form Cancel button below already
+   * answers for itself. A parent that wires Escape/backdrop-close to onCancel without
+   * checking this can let a client dismiss the modal mid-payment, which is exactly the
+   * "paid but the list still says unpaid" bug the missing Cancel button was guarding
+   * against.
+   */
+  onCloseabilityChange?: (canClose: boolean) => void;
 }
 
 // 'verifying' is separate from 'failed' on purpose. Once a card has been attached the
@@ -29,8 +38,17 @@ export function PaymentSummary({
   onPaymentFailed,
   onCancel,
   onAlreadyPaid,
+  onCloseabilityChange,
 }: PaymentSummaryProps) {
   const [status, setStatus] = useState<PaymentStatus>('idle');
+  // Single source of truth for "is the outcome of this payment still unknown" - used
+  // both to show/hide the Cancel button below and to tell the parent whether Escape /
+  // backdrop-click may dismiss the whole modal.
+  const canClose = status !== 'succeeded' && status !== 'processing' && status !== 'verifying' && status !== 'already_paid';
+  useEffect(() => {
+    onCloseabilityChange?.(canClose);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canClose]);
   const [error, setError] = useState<string | null>(null);
   const [paymentIntent, setPaymentIntent] = useState<PaymentIntentResponse | null>(null);
   const [cardDetails, setCardDetails] = useState({
@@ -469,7 +487,7 @@ export function PaymentSummary({
 
         {/* No Cancel while the outcome is unknown: closing here is what left the client
             with a paid booking their list still showed as unpaid. */}
-        {status !== 'succeeded' && status !== 'processing' && status !== 'verifying' && status !== 'already_paid' && (
+        {canClose && (
           <button
             onClick={onCancel}
             className="w-full py-3 text-gray-600 hover:text-gray-800 transition-colors"

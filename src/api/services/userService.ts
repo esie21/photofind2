@@ -7,10 +7,11 @@ const userService = {
     return apiClient.get<User[]>(API_CONFIG.ENDPOINTS.USERS.GET_ALL);
   },
 
-  async getAllProviders(params?: { q?: string; category?: string; page?: number; limit?: number }): Promise<{ data: User[]; meta?: any }> {
+  async getAllProviders(params?: { q?: string; category?: string; sort?: string; page?: number; limit?: number }): Promise<{ data: User[]; meta?: any }> {
     const searchParams = new URLSearchParams();
     if (params?.q) searchParams.set('q', params.q);
     if (params?.category && params.category !== 'all') searchParams.set('category', params.category);
+    if (params?.sort && params.sort !== 'recommended') searchParams.set('sort', params.sort);
     if (params?.page) searchParams.set('page', params.page.toString());
     if (params?.limit) searchParams.set('limit', params.limit.toString());
     const queryString = searchParams.toString();

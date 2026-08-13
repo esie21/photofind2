@@ -7,6 +7,8 @@ interface AvailabilityCalendarProps {
   onDateSelect: (date: string) => void;
   selectedDate?: string;
   className?: string;
+  /** Month to open on (e.g. an existing booking's date when rescheduling). Defaults to today. */
+  initialDate?: Date;
 }
 
 export function AvailabilityCalendar({
@@ -14,8 +16,18 @@ export function AvailabilityCalendar({
   onDateSelect,
   selectedDate,
   className = '',
+  initialDate,
 }: AvailabilityCalendarProps) {
-  const [currentDate, setCurrentDate] = useState(new Date());
+  const [currentDate, setCurrentDate] = useState(() => {
+    const now = new Date();
+    if (!initialDate || isNaN(initialDate.getTime())) return now;
+    // Nothing bookable lives before the current month, so don't open there.
+    if (initialDate.getFullYear() < now.getFullYear() ||
+        (initialDate.getFullYear() === now.getFullYear() && initialDate.getMonth() < now.getMonth())) {
+      return now;
+    }
+    return initialDate;
+  });
   const [calendarData, setCalendarData] = useState<CalendarData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

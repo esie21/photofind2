@@ -18,6 +18,46 @@ function parseId(raw: any): string | null {
   return str;
 }
 
+// Business timezone: Asia/Manila is a fixed UTC+8 offset with no DST. Slot
+// generation anchors to it explicitly instead of the Node process's local
+// timezone, which may be UTC in production and would otherwise shift every
+// generated slot and day boundary by hours from what providers/clients see
+// (the UI always displays times in Asia/Manila - see availabilityService.ts).
+const PROVIDER_TIMEZONE_OFFSET = '+08:00';
+
+// Normalize a date value (a JS Date from a pg DATE column, or a 'YYYY-MM-DD'
+// string) to a canonical 'YYYY-MM-DD' string in the business timezone.
+function toDateStr(value: string | Date): string {
+  if (value instanceof Date) {
+    return value.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+  }
+  const str = String(value);
+  return str.length > 10 ? str.slice(0, 10) : str;
+}
+
+function manilaTodayStr(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+}
+
+function addDaysToDateStr(dateStr: string, days: number): string {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().split('T')[0];
+}
+
+// A calendar date's day-of-week doesn't depend on timezone, only the date itself.
+function dayOfWeekForDateStr(dateStr: string): number {
+  return new Date(`${dateStr}T00:00:00Z`).getUTCDay();
+}
+
+// The absolute instant for a wall-clock HH:MM on a given calendar date, anchored
+// to the business timezone rather than the server's local timezone.
+function manilaDateTime(dateStr: string, hours: number, minutes: number): Date {
+  const hh = String(hours).padStart(2, '0');
+  const mm = String(minutes).padStart(2, '0');
+  return new Date(`${dateStr}T${hh}:${mm}:00${PROVIDER_TIMEZONE_OFFSET}`);
+}
+
 // Get provider's user_id from providers table if needed
 async function getProviderUserId(providerId: string): Promise<string> {
   try {
@@ -86,7 +126,7 @@ router.post('/rules', verifyToken, async (req: Request & { userId?: string }, re
           `INSERT INTO availability_rules
            (provider_id, day_of_week, start_time, end_time, slot_duration, buffer_minutes, is_active)
            VALUES ($1, $2, $3, $4, $5, $6, TRUE)
-           ON CONFLICT ON CONSTRAINT unique_provider_slot DO UPDATE
+           ON CONFLICT ON CONSTRAINT unique_provider_rule_slot DO UPDATE
            SET start_time = EXCLUDED.start_time,
                end_time = EXCLUDED.end_time,
                slot_duration = EXCLUDED.slot_duration,
@@ -585,6 +625,12 @@ router.post('/slots/book', verifyToken, async (req: Request & { userId?: string 
         return res.status(404).json({ error: 'One or more slots not found' });
       }
 
+      const distinctProviderIds = new Set(slotsRes.rows.map(s => String(s.provider_id)));
+      if (distinctProviderIds.size > 1) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'All slots in a booking must belong to the same provider' });
+      }
+
       // Validate all slots
       for (const slot of slotsRes.rows) {
         // Slot must be held by this user OR available
@@ -688,33 +734,26 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
       [providerId]
     );
 
-    // Check if existing rules are outdated (not 24/7) or missing
-    const hasOldRules = rulesRes.rows.length === 0 || rulesRes.rows.some(r =>
-      r.start_time !== '00:00:00' || r.end_time !== '23:30:00' || r.slot_duration !== 30
-    );
+    // Only providers with no rules at all get a default schedule. Providers who have
+    // configured custom hours via POST /rules must keep them - this used to get
+    // detected as "outdated" and silently overwritten with 24/7 rules on every
+    // slot-generation call (including right after saving custom rules).
+    const hasNoRules = rulesRes.rows.length === 0;
 
-    if (hasOldRules) {
-      console.log(`[Availability] Updating/creating 24/7 rules for provider ${providerId}`);
+    if (hasNoRules) {
+      console.log(`[Availability] Creating default 24/7 rules for provider ${providerId}`);
 
-      // Delete old rules and old slots for this provider
-      await client.query(
-        `DELETE FROM availability_rules WHERE provider_id::text = $1`,
-        [providerId]
-      );
-
-      // Delete old available slots (keep booked ones)
-      await client.query(
-        `DELETE FROM time_slots WHERE provider_id::text = $1 AND status = 'available'`,
-        [providerId]
-      );
-
-      // Create new 24/7 rules for all days
+      // Create new 24/7 rules for all days. ON CONFLICT DO NOTHING guards against two
+      // concurrent first-time requests for the same brand-new provider (e.g. the
+      // timeslots and calendar endpoints both firing on page load) racing to insert
+      // the same (provider_id, day_of_week, start_time) row.
       const defaultDays = [0, 1, 2, 3, 4, 5, 6]; // Sunday to Saturday
       for (const day of defaultDays) {
         await client.query(
           `INSERT INTO availability_rules
            (provider_id, day_of_week, start_time, end_time, slot_duration, buffer_minutes, is_active)
-           VALUES ($1, $2, '00:00', '23:30', 30, 0, TRUE)`,
+           VALUES ($1, $2, '00:00', '23:30', 30, 0, TRUE)
+           ON CONFLICT ON CONSTRAINT unique_provider_rule_slot DO NOTHING`,
           [providerId, day]
         );
       }
@@ -730,23 +769,20 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
     }
 
     // Get overrides
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const endDate = new Date(today);
-    endDate.setDate(endDate.getDate() + daysAhead);
+    const todayStr = manilaTodayStr();
+    const endDateStr = addDaysToDateStr(todayStr, daysAhead);
 
     const overridesRes = await client.query(
       `SELECT * FROM availability_overrides
        WHERE provider_id::text = $1
          AND override_date >= $2::date
          AND override_date <= $3::date`,
-      [providerId, today.toISOString().split('T')[0], endDate.toISOString().split('T')[0]]
+      [providerId, todayStr, endDateStr]
     );
 
     const overridesMap = new Map();
     for (const override of overridesRes.rows) {
-      const dateKey = new Date(override.override_date).toISOString().split('T')[0];
-      overridesMap.set(dateKey, override);
+      overridesMap.set(toDateStr(override.override_date), override);
     }
 
     // Group rules by day_of_week
@@ -759,10 +795,8 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
     }
 
     // Generate slots for each day
-    const currentDate = new Date(today);
-    while (currentDate <= endDate) {
-      const dateStr = currentDate.toISOString().split('T')[0];
-      const dayOfWeek = currentDate.getDay();
+    for (let dateStr = todayStr; dateStr <= endDateStr; dateStr = addDaysToDateStr(dateStr, 1)) {
+      const dayOfWeek = dayOfWeekForDateStr(dateStr);
       const override = overridesMap.get(dateStr);
 
       // Check if this day is blocked
@@ -775,7 +809,6 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
              AND status = 'available'`,
           [providerId, dateStr]
         );
-        currentDate.setDate(currentDate.getDate() + 1);
         continue;
       }
 
@@ -795,14 +828,11 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
       // Generate slots for this day's rules
       let slotsCreatedForDay = 0;
       for (const rule of dayRules) {
-        const startTimeParts = rule.start_time.split(':');
-        const endTimeParts = rule.end_time.split(':');
+        const startTimeParts = String(rule.start_time).split(':');
+        const endTimeParts = String(rule.end_time).split(':');
 
-        const slotStart = new Date(currentDate);
-        slotStart.setHours(parseInt(startTimeParts[0]), parseInt(startTimeParts[1]), 0, 0);
-
-        const dayEnd = new Date(currentDate);
-        dayEnd.setHours(parseInt(endTimeParts[0]), parseInt(endTimeParts[1]), 0, 0);
+        const slotStart = manilaDateTime(dateStr, parseInt(startTimeParts[0]), parseInt(startTimeParts[1]));
+        const dayEnd = manilaDateTime(dateStr, parseInt(endTimeParts[0]), parseInt(endTimeParts[1]));
 
         const slotDuration = rule.slot_duration || DEFAULT_SLOT_DURATION;
         const bufferMinutes = rule.buffer_minutes || DEFAULT_BUFFER_MINUTES;
@@ -830,23 +860,23 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
             }
           }
 
-          slotStart.setMinutes(slotStart.getMinutes() + stepMinutes);
+          slotStart.setTime(slotStart.getTime() + stepMinutes * 60 * 1000);
         }
       }
       if (slotsCreatedForDay > 0) {
         console.log(`[Availability] Created ${slotsCreatedForDay} slots for ${dateStr}`);
       }
-
-      currentDate.setDate(currentDate.getDate() + 1);
     }
   } finally {
     client.release();
   }
 }
 
-async function regenerateSlotsForDate(providerId: string, dateStr: string) {
+async function regenerateSlotsForDate(providerId: string, dateInput: string | Date) {
   const client = await pool.connect();
   try {
+    const dateStr = toDateStr(dateInput);
+
     // Delete existing available slots for the date
     await client.query(
       `DELETE FROM time_slots
@@ -856,10 +886,7 @@ async function regenerateSlotsForDate(providerId: string, dateStr: string) {
       [providerId, dateStr]
     );
 
-    // Parse the target date
-    const targetDate = new Date(dateStr);
-    targetDate.setHours(0, 0, 0, 0);
-    const dayOfWeek = targetDate.getDay();
+    const dayOfWeek = dayOfWeekForDateStr(dateStr);
 
     // Get provider's rules for this day of week
     const rulesRes = await client.query(
@@ -896,14 +923,11 @@ async function regenerateSlotsForDate(providerId: string, dateStr: string) {
 
     // Generate slots for this specific date
     for (const rule of rulesToUse) {
-      const startTimeParts = rule.start_time.split(':');
-      const endTimeParts = rule.end_time.split(':');
+      const startTimeParts = String(rule.start_time).split(':');
+      const endTimeParts = String(rule.end_time).split(':');
 
-      const slotStart = new Date(targetDate);
-      slotStart.setHours(parseInt(startTimeParts[0]), parseInt(startTimeParts[1]), 0, 0);
-
-      const dayEnd = new Date(targetDate);
-      dayEnd.setHours(parseInt(endTimeParts[0]), parseInt(endTimeParts[1]), 0, 0);
+      const slotStart = manilaDateTime(dateStr, parseInt(startTimeParts[0]), parseInt(startTimeParts[1]));
+      const dayEnd = manilaDateTime(dateStr, parseInt(endTimeParts[0]), parseInt(endTimeParts[1]));
 
       const slotDuration = rule.slot_duration || DEFAULT_SLOT_DURATION;
       const bufferMinutes = rule.buffer_minutes || DEFAULT_BUFFER_MINUTES;
@@ -922,7 +946,7 @@ async function regenerateSlotsForDate(providerId: string, dateStr: string) {
           );
         }
 
-        slotStart.setMinutes(slotStart.getMinutes() + stepMinutes);
+        slotStart.setTime(slotStart.getTime() + stepMinutes * 60 * 1000);
       }
     }
   } finally {
@@ -1020,14 +1044,35 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     const start = new Date(start_time);
     const end = new Date(end_time);
 
+    if (is_bookable === false) {
+      // "Not bookable" has no real booking behind it - marking the slot 'booked' would
+      // corrupt the invariant (elsewhere) that a booked slot always has a booking_id.
+      // Instead just remove any available slot at this time, so it's simply absent.
+      const deleted = await pool.query(
+        `DELETE FROM time_slots
+         WHERE provider_id::text = $1 AND start_datetime = $2 AND status = 'available'
+         RETURNING id`,
+        [userId, start.toISOString()]
+      );
+      return res.status(200).json({
+        data: {
+          provider_id: userId,
+          start_time: start.toISOString(),
+          end_time: end.toISOString(),
+          is_bookable: false,
+          removed: (deleted.rowCount ?? 0) > 0
+        }
+      });
+    }
+
     // Create a slot directly in time_slots for backward compatibility
     const result = await pool.query(
       `INSERT INTO time_slots (provider_id, start_datetime, end_datetime, status)
-       VALUES ($1, $2, $3, $4)
+       VALUES ($1, $2, $3, 'available')
        ON CONFLICT ON CONSTRAINT unique_provider_slot
        DO UPDATE SET status = EXCLUDED.status
        RETURNING *`,
-      [userId, start.toISOString(), end.toISOString(), is_bookable !== false ? 'available' : 'booked']
+      [userId, start.toISOString(), end.toISOString()]
     );
 
     return res.status(201).json({ data: result.rows[0] });

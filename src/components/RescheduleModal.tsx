@@ -31,9 +31,23 @@ interface RawSlot {
 
 // A candidate start time is only valid if there's an unbroken run of available
 // slots, back-to-back from that start, covering the full booking duration.
-function computeValidStartTimes(slots: RawSlot[], durationMinutes: number): RawSlot[] {
+function computeValidStartTimes(
+  slots: RawSlot[],
+  durationMinutes: number,
+  ownWindow?: { startMs: number; endMs: number }
+): RawSlot[] {
   const available = slots
-    .filter((s) => s.status === 'available')
+    .filter((s) => {
+      if (s.status === 'available') return true;
+      // The slots this booking currently occupies show as 'booked' (by itself), but
+      // moveBookingSlots on the backend already allows a booking to reclaim its own
+      // slots - so they're fair game to reselect too. Without this, nudging the time
+      // slightly within/around the current window looks like there's nowhere to go.
+      if (!ownWindow) return false;
+      const startMs = new Date(s.start).getTime();
+      const endMs = new Date(s.end).getTime();
+      return startMs >= ownWindow.startMs && endMs <= ownWindow.endMs;
+    })
     .map((s) => ({ ...s, startMs: new Date(s.start).getTime(), endMs: new Date(s.end).getTime() }))
     .sort((a, b) => a.startMs - b.startMs);
 
@@ -92,7 +106,10 @@ export function RescheduleModal({ providerId, booking, onClose, onSuccess }: Res
     try {
       const data = await availabilityService.getAvailableSlots(providerId, dateStr);
       const oneHourFromNow = Date.now() + 60 * 60 * 1000;
-      const candidates = computeValidStartTimes(data.slots || [], duration).filter(
+      const ownWindow = booking.start_date && booking.end_date
+        ? { startMs: new Date(booking.start_date).getTime(), endMs: new Date(booking.end_date).getTime() }
+        : undefined;
+      const candidates = computeValidStartTimes(data.slots || [], duration, ownWindow).filter(
         (s) => new Date(s.start).getTime() >= oneHourFromNow
       );
       setValidSlots(candidates);
@@ -102,7 +119,7 @@ export function RescheduleModal({ providerId, booking, onClose, onSuccess }: Res
     } finally {
       setLoadingSlots(false);
     }
-  }, [providerId, duration]);
+  }, [providerId, duration, booking.start_date, booking.end_date]);
 
   useEffect(() => {
     if (selectedDate) fetchSlotsForDate(selectedDate);
@@ -195,6 +212,7 @@ export function RescheduleModal({ providerId, booking, onClose, onSuccess }: Res
               providerId={providerId}
               onDateSelect={setSelectedDate}
               selectedDate={selectedDate}
+              initialDate={existingDate ? new Date(existingDate) : undefined}
             />
           </div>
 

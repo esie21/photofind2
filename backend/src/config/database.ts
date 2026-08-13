@@ -18,6 +18,18 @@ const poolConfig = process.env.DATABASE_URL
 
 export const pool = new Pool(poolConfig);
 
+// The app's business timezone is Asia/Manila (see loadEnv.ts and the availability
+// slot-generation logic), but the DB server's own default session timezone is
+// whatever the host defaults to (commonly UTC on managed providers). Without this,
+// DATE(...)/EXTRACT(... FROM ...) on timestamptz columns truncate/extract using
+// the wrong day, silently misfiling early-morning Manila slots under the previous
+// UTC calendar day. Set it per physical connection so every session agrees.
+pool.on('connect', (client) => {
+  client.query("SET TIME ZONE 'Asia/Manila'").catch((err) => {
+    console.error('Failed to set session timezone to Asia/Manila:', err);
+  });
+});
+
 // Test the connection
 pool.on('error', (err: Error) => {
   console.error('Unexpected error on idle client', err);
@@ -926,7 +938,8 @@ export async function initializeTables() {
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            CONSTRAINT valid_time_range CHECK (end_time > start_time)
+            CONSTRAINT valid_time_range CHECK (end_time > start_time),
+            CONSTRAINT unique_provider_rule_slot UNIQUE (provider_id, day_of_week, start_time)
           );
         `);
       } else {
@@ -942,10 +955,30 @@ export async function initializeTables() {
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            CONSTRAINT valid_time_range CHECK (end_time > start_time)
+            CONSTRAINT valid_time_range CHECK (end_time > start_time),
+            CONSTRAINT unique_provider_rule_slot UNIQUE (provider_id, day_of_week, start_time)
           );
         `);
       }
+    }
+
+    // Backfill the unique constraint for pre-existing availability_rules tables
+    // that were created before ON CONFLICT support was added (see routes/availability.ts POST /rules)
+    try {
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE constraint_name = 'unique_provider_rule_slot' AND table_name = 'availability_rules'
+          ) THEN
+            ALTER TABLE availability_rules ADD CONSTRAINT unique_provider_rule_slot
+              UNIQUE (provider_id, day_of_week, start_time);
+          END IF;
+        END $$;
+      `);
+    } catch (ruleConstraintError) {
+      console.log('availability_rules unique constraint backfill (non-fatal):', ruleConstraintError);
     }
 
     // Availability Overrides - exceptions for specific dates

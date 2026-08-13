@@ -1,5 +1,6 @@
 import { X, Home, Search, LogOut, Shield, LayoutDashboard, MessageSquare } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useModal } from '../hooks/useModal';
 
 interface MobileNavProps {
   isOpen: boolean;
@@ -21,6 +22,11 @@ export function MobileNav({ isOpen, onClose, onViewChange, currentView }: Mobile
     onClose();
   };
 
+  // Every other overlay in the app now closes on Escape and locks the page behind
+  // it - this drawer was the one left over from before that, so a phone could still
+  // scroll the page underneath it.
+  useModal(onClose, { enabled: isOpen, label: 'Navigation menu' });
+
   if (!isOpen) return null;
 
   return (
@@ -32,7 +38,7 @@ export function MobileNav({ isOpen, onClose, onViewChange, currentView }: Mobile
       />
 
       {/* Drawer */}
-      <div className="modal-drawer fixed inset-y-0 right-0 w-72 bg-white shadow-xl z-50 md:hidden transform transition-transform duration-300 ease-in-out">
+      <div role="dialog" aria-modal="true" aria-label="Navigation menu" className="modal-drawer fixed inset-y-0 right-0 w-72 bg-white shadow-xl z-50 md:hidden transform transition-transform duration-300 ease-in-out">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <div className="flex items-center gap-3">

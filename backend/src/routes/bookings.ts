@@ -307,6 +307,29 @@ async function getClientIdFromUserId(userId: string): Promise<string> {
   return getIdForForeignKey(userId, 'client_id', 'clients');
 }
 
+// The reverse of the two functions above: given a bookings.provider_id /
+// bookings.client_id value - which may already be a users.id, or may be a row id in
+// the separate providers/clients tables - resolve the actual users.id. Every access
+// check on a single booking needs this: comparing bookings.provider_id straight
+// against req.userId only works when there's no separate providers table, and
+// silently locks every real provider out of their own booking otherwise (confirmed
+// live: a provider fetching their own booking's evidence got a 403).
+async function resolveProviderUserId(providerId: string): Promise<string> {
+  try {
+    const res = await pool.query('SELECT user_id FROM providers WHERE id::text = $1', [providerId]);
+    if (res.rows[0]?.user_id) return String(res.rows[0].user_id);
+  } catch (_e) { /* providers table doesn't exist */ }
+  return String(providerId);
+}
+
+async function resolveClientUserId(clientId: string): Promise<string> {
+  try {
+    const res = await pool.query('SELECT user_id FROM clients WHERE id::text = $1', [clientId]);
+    if (res.rows[0]?.user_id) return String(res.rows[0].user_id);
+  } catch (_e) { /* clients table doesn't exist */ }
+  return String(clientId);
+}
+
 async function getServiceDurationMinutes(serviceId: string): Promise<number> {
   try {
     const res = await pool.query('SELECT duration_minutes FROM services WHERE id::text = $1', [serviceId]);
@@ -321,22 +344,29 @@ async function getServiceDurationMinutes(serviceId: string): Promise<number> {
   }
 }
 
+// providerId, when given, is a users.id (req.userId) - it has to go through
+// getProviderIdFromUserId before it can be compared to bookings.provider_id, or the
+// WHERE clause silently matches nothing for every provider on a split providers table
+// (which this deployment has). The unscoped call from the global sweep doesn't need
+// this - it also used to bail out via `if (!providerId) return`, which made every
+// admin-triggered sweep a no-op too.
 async function autoCompletePastBookings(providerId?: string) {
-  if (!providerId) return;
-
   try {
-    await pool.query(
-      `
-        UPDATE bookings
-        SET status = 'completed',
-            completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
-            updated_at = CURRENT_TIMESTAMP
-        WHERE status IN ('accepted', 'confirmed')
-          AND end_date < CURRENT_TIMESTAMP
-          AND provider_id::text = $1
-      `,
-      [providerId]
-    );
+    const baseQuery = `
+      UPDATE bookings
+      SET status = 'completed',
+          completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE status IN ('accepted', 'confirmed')
+        AND end_date < CURRENT_TIMESTAMP
+    `;
+
+    if (providerId) {
+      const resolvedProviderId = await getProviderIdFromUserId(providerId);
+      await pool.query(`${baseQuery} AND provider_id::text = $1`, [resolvedProviderId]);
+    } else {
+      await pool.query(baseQuery);
+    }
   } catch (e) {
     console.log('autoCompletePastBookings error (non-fatal):', e);
   }
@@ -355,7 +385,8 @@ async function autoCancelOverduePendingBookings(providerId?: string) {
     `;
 
     if (providerId) {
-      await pool.query(`${baseQuery} AND provider_id::text = $1`, [providerId]);
+      const resolvedProviderId = await getProviderIdFromUserId(providerId);
+      await pool.query(`${baseQuery} AND provider_id::text = $1`, [resolvedProviderId]);
     } else {
       await pool.query(baseQuery);
     }
@@ -952,9 +983,13 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
     const existing = existingRes.rows[0];
     if (!existing) return res.status(404).json({ error: 'Booking not found' });
 
+    const [existingClientUserId, existingProviderUserId] = await Promise.all([
+      resolveClientUserId(String(existing.client_id)),
+      resolveProviderUserId(String(existing.provider_id)),
+    ]);
     const isParticipant =
-      String(existing.client_id) === String(currentUserId) ||
-      String(existing.provider_id) === String(currentUserId);
+      existingClientUserId === String(currentUserId) ||
+      existingProviderUserId === String(currentUserId);
 
     if (role !== 'admin' && !isParticipant) {
       return res.status(403).json({ error: 'Access denied' });
@@ -998,8 +1033,8 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
 
       // Send cancellation notification to the other party
       try {
-        const isClient = String(existing.client_id) === String(currentUserId);
-        const otherPartyId = isClient ? String(existing.provider_id) : String(existing.client_id);
+        const isClient = existingClientUserId === String(currentUserId);
+        const otherPartyId = isClient ? existingProviderUserId : existingClientUserId;
         const cancellerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [currentUserId]);
         const serviceInfo = await pool.query('SELECT title FROM services WHERE id::text = $1', [String(updatedRes.rows[0].service_id)]);
         const cancellerName = cancellerInfo.rows[0]?.name || (isClient ? 'Client' : 'Provider');
@@ -1038,13 +1073,15 @@ router.get('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
   if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
 
   try {
+    // Was two INNER JOINs straight to users on client_id/provider_id, which only
+    // matches when neither references the separate providers/clients tables - on this
+    // deployment's schema it eliminated the row before the query even got here, so
+    // this 404'd unconditionally for every booking, owner or not (confirmed live).
     const bookingRes = await pool.query(
       `
-        SELECT b.*, s.title as service_title, u1.name as client_name, u2.name as provider_name
+        SELECT b.*, s.title as service_title
         FROM bookings b
-        JOIN services s ON s.id = b.service_id
-        JOIN users u1 ON u1.id = b.client_id
-        JOIN users u2 ON u2.id = b.provider_id
+        LEFT JOIN services s ON s.id = b.service_id
         WHERE b.id::text = $1
       `,
       [bookingId]
@@ -1052,11 +1089,27 @@ router.get('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const booking = bookingRes.rows[0];
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
-    if (String(booking.client_id) !== String(currentUserId) && String(booking.provider_id) !== String(currentUserId)) {
+    const [clientUserId, providerUserId] = await Promise.all([
+      resolveClientUserId(String(booking.client_id)),
+      resolveProviderUserId(String(booking.provider_id)),
+    ]);
+
+    if (clientUserId !== String(currentUserId) && providerUserId !== String(currentUserId)) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    return res.json({ data: booking });
+    const [clientInfo, providerInfo] = await Promise.all([
+      pool.query('SELECT name FROM users WHERE id::text = $1', [clientUserId]),
+      pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]),
+    ]);
+
+    return res.json({
+      data: {
+        ...booking,
+        client_name: clientInfo.rows[0]?.name,
+        provider_name: providerInfo.rows[0]?.name,
+      },
+    });
   } catch (error) {
     console.error('Error fetching booking:', error);
     return res.status(500).json({ error: 'Failed to fetch booking' });
@@ -1355,6 +1408,21 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
     }
 
     const booking = bookingResult.rows[0];
+
+    // Reschedule moves a booking, it doesn't resize it: total_price was computed for the
+    // original duration and is never recalculated here, so a new window with a different
+    // length would let either party get extra time for free (or short the other party) by
+    // simply padding end_date. POST /bookings already guards the equivalent case at
+    // creation time (see the price-vs-duration check above); this is that same guard for
+    // reschedule, checked directly on duration since price isn't being resubmitted here.
+    const originalDurationMs = new Date(booking.end_date).getTime() - new Date(booking.start_date).getTime();
+    const newDurationMs = newEndDate.getTime() - newStartDate.getTime();
+    if (Math.abs(newDurationMs - originalDurationMs) > 60 * 1000) {
+      return res.status(400).json({
+        error: 'The new time must keep the same duration as the original booking',
+        detail: `Expected ${Math.round(originalDurationMs / 60000)} minutes, got ${Math.round(newDurationMs / 60000)} minutes`
+      });
+    }
 
     // Resolve provider/client user IDs from providers/clients tables if present,
     // matching the same defensive pattern used by PUT /:id and /resolve-dispute
@@ -3158,10 +3226,18 @@ router.get('/:id/evidence', verifyToken, async (req: Request & { userId?: string
     const booking = bookingRes.rows[0];
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
-    // Check access (client, provider, or admin)
+    // Check access (client, provider, or admin). Resolved through
+    // resolveClientUserId/resolveProviderUserId rather than compared raw - confirmed
+    // live that a provider fetching evidence off their own completed booking got a
+    // 403 here, because bookings.provider_id is a providers.id on this deployment,
+    // not a users.id.
+    const [evidenceClientUserId, evidenceProviderUserId] = await Promise.all([
+      resolveClientUserId(String(booking.client_id)),
+      resolveProviderUserId(String(booking.provider_id)),
+    ]);
     const isParticipant =
-      String(booking.client_id) === String(currentUserId) ||
-      String(booking.provider_id) === String(currentUserId);
+      evidenceClientUserId === String(currentUserId) ||
+      evidenceProviderUserId === String(currentUserId);
 
     if (role !== 'admin' && !isParticipant) {
       return res.status(403).json({ error: 'Access denied' });

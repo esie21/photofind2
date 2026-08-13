@@ -9,6 +9,7 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const q = (req.query.q as string) || '';
     const category = (req.query.category as string) || '';
+    const sort = (req.query.sort as string) || 'recommended';
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 12));
     const offset = (page - 1) * limit;
@@ -29,11 +30,43 @@ router.get('/', async (req: Request, res: Response) => {
     const hasDescription = existingCols.includes('description');
     const hasCreatedAt = existingCols.includes('created_at');
 
+    // services.provider_id references the providers table's own id on this
+    // deployment, not users.id directly - every `services.provider_id = u.id`
+    // comparison below used to silently match nothing, which is why every card's
+    // featured service, price, and service-text search were all quietly broken (no
+    // provider ever had a "featured_service", regardless of query or sort).
+    const servicesFkRes = await pool.query(`
+      SELECT ccu.table_name AS foreign_table_name
+      FROM information_schema.table_constraints AS tc
+      JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+      JOIN information_schema.constraint_column_usage AS ccu
+        ON ccu.constraint_name = tc.constraint_name
+      WHERE tc.table_name = 'services'
+        AND tc.constraint_type = 'FOREIGN KEY'
+        AND kcu.column_name = 'provider_id'
+      LIMIT 1
+    `);
+    const servicesRefTable = servicesFkRes.rows[0]?.foreign_table_name;
+    const servicesReferenceProvidersTable = !!servicesRefTable && servicesRefTable !== 'users';
+    // The id to compare services.provider_id against for "this user's own services" -
+    // either the user's own id, or their row in the separate providers table.
+    const providerIdExpr = servicesReferenceProvidersTable ? 'prv.id' : 'u.id';
+    const providersJoin = servicesReferenceProvidersTable ? 'LEFT JOIN providers prv ON prv.user_id = u.id' : '';
+
     const values: any[] = [];
     const whereClauses: string[] = [];
     if (q) {
       values.push(`%${q}%`);
-      whereClauses.push(`(u.name ILIKE $${values.length} OR EXISTS (SELECT 1 FROM services sq WHERE sq.provider_id = u.id AND sq.title ILIKE $${values.length}))`);
+      const qParam = values.length;
+      // Was name + service title only, so a query like "wedding" missed a provider
+      // whose bio or service description mentioned it but whose titles didn't.
+      const serviceTextMatch = [
+        'sq.title ILIKE $' + qParam,
+        hasDescription ? 'sq.description ILIKE $' + qParam : null,
+        hasCategory ? 'sq.category ILIKE $' + qParam : null,
+      ].filter(Boolean).join(' OR ');
+      whereClauses.push(`(u.name ILIKE $${qParam} OR u.bio ILIKE $${qParam} OR EXISTS (SELECT 1 FROM services sq WHERE sq.provider_id = ${providerIdExpr} AND (${serviceTextMatch})))`);
     }
     if (category) {
       // A provider matches either by their primary category or by offering a
@@ -41,7 +74,7 @@ router.get('/', async (req: Request, res: Response) => {
       // and their individual services' categories can differ.
       values.push(category);
       const serviceCategoryMatch = hasCategory
-        ? ` OR EXISTS (SELECT 1 FROM services sc WHERE sc.provider_id = u.id AND sc.category = $${values.length})`
+        ? ` OR EXISTS (SELECT 1 FROM services sc WHERE sc.provider_id = ${providerIdExpr} AND sc.category = $${values.length})`
         : '';
       whereClauses.push(`(u.category = $${values.length}${serviceCategoryMatch})`);
     }
@@ -60,24 +93,51 @@ router.get('/', async (req: Request, res: Response) => {
     const featuredOrderBy = q ? `(title ILIKE $1) DESC, ${orderByService}` : orderByService;
     console.debug('serviceSelectParts:', serviceSelectParts, 'orderByService:', orderByService);
 
+    // Sort was previously hardcoded to `u.name ASC` regardless of what the client
+    // asked for - the "Sort By" dropdown sent nothing, and nothing here read it, so
+    // every option in it behaved identically. `service_price` is a SELECT-list alias
+    // (see serviceSelect above), not a raw column, but Postgres resolves ORDER BY
+    // against output aliases so this is safe - `sort` itself is never interpolated,
+    // only used to pick one of these fixed literals, so there's no injection surface.
+    let orderBy: string;
+    switch (sort) {
+      case 'rating':
+        orderBy = 'u.rating DESC NULLS LAST, u.review_count DESC NULLS LAST, u.name ASC';
+        break;
+      case 'price-low':
+        orderBy = 'service_price ASC NULLS LAST, u.name ASC';
+        break;
+      case 'price-high':
+        orderBy = 'service_price DESC NULLS LAST, u.name ASC';
+        break;
+      case 'recommended':
+      default:
+        // Verified and well-rated providers surface first; alphabetical is only the
+        // final tiebreaker, not the primary order it used to be.
+        orderBy = 'u.is_verified DESC, u.rating DESC NULLS LAST, u.review_count DESC NULLS LAST, u.name ASC';
+        break;
+    }
+
     // Use LATERAL join to fetch featured service
     const sql = `SELECT u.id, u.email, u.name, u.role, u.profile_image, u.portfolio_images, u.bio, u.years_experience, u.location, u.rating, u.review_count, u.is_verified,
       ${serviceSelect}
       FROM users u
+      ${providersJoin}
       LEFT JOIN LATERAL (
         SELECT ${serviceSelectParts.join(', ')}
         FROM services
-        WHERE services.provider_id = u.id
+        WHERE services.provider_id = ${providerIdExpr}
         ORDER BY ${featuredOrderBy}
         LIMIT 1
       ) s ON true
       WHERE u.role = 'provider' ${searchClause}
-      ORDER BY u.name ASC
+      ORDER BY ${orderBy}
       LIMIT ${limit} OFFSET ${offset}`;
     console.debug('Get providers SQL:', sql, 'values:', values);
     const result = await pool.query(sql, values);
     // Get total count for pagination meta
     const countSql = `SELECT COUNT(DISTINCT u.id) as total FROM users u
+      ${providersJoin}
       WHERE u.role = 'provider' ${searchClause}`;
     const countResult = await pool.query(countSql, values);
     const total = Number(countResult.rows[0]?.total || 0);

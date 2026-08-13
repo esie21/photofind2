@@ -1865,7 +1865,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
               return (
                 <div className="bg-blue-50 border-2 border-blue-200 rounded-2xl p-6 shadow-sm">
                   <div className="flex items-center gap-2 mb-4">
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                    <div className="w-2 h-2 bg-blue-600 rounded-full animate-pulse" />
                     <h3 className="text-blue-800 font-semibold">Ready to Mark Complete ({readyToComplete.length})</h3>
                   </div>
                   <p className="text-sm text-blue-700 mb-4">These bookings have passed their scheduled date. Upload evidence photos to mark them complete.</p>
