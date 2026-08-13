@@ -330,6 +330,82 @@ async function resolveClientUserId(clientId: string): Promise<string> {
   return String(clientId);
 }
 
+interface ClientTrustSummary {
+  completed_count: number;
+  cancelled_count: number;
+  total_count: number;
+  member_since: string | null;
+}
+
+/**
+ * Platform-wide (not just with this provider) booking history for each client, so a
+ * provider deciding on a request can see whether this client has a track record of
+ * completing bookings versus cancelling them, and how long they've been on the platform.
+ * Bulk-fetched for a whole list of clients in one query each, not per-row, to avoid N+1.
+ */
+async function getClientTrustSummaries(
+  clientUserIds: string[],
+  clientIdReferencesClientsTable: boolean
+): Promise<Map<string, ClientTrustSummary>> {
+  const summaries = new Map<string, ClientTrustSummary>();
+  const uniqueIds = Array.from(new Set(clientUserIds.filter(Boolean).map(String)));
+  if (uniqueIds.length === 0) return summaries;
+
+  try {
+    // bookings.client_id may reference users.id directly, or a row in a separate
+    // clients table (see the same branching in GET /provider/my above) - the stats
+    // query needs to join through whichever one actually applies here.
+    const statsQuery = clientIdReferencesClientsTable
+      ? `SELECT c.user_id::text AS client_user_id,
+                COUNT(*) FILTER (WHERE b.status = 'completed') AS completed_count,
+                COUNT(*) FILTER (WHERE b.status = 'cancelled') AS cancelled_count,
+                COUNT(*) AS total_count
+         FROM bookings b
+         JOIN clients c ON c.id = b.client_id
+         WHERE c.user_id::text = ANY($1) AND b.deleted_at IS NULL
+         GROUP BY c.user_id`
+      : `SELECT b.client_id::text AS client_user_id,
+                COUNT(*) FILTER (WHERE b.status = 'completed') AS completed_count,
+                COUNT(*) FILTER (WHERE b.status = 'cancelled') AS cancelled_count,
+                COUNT(*) AS total_count
+         FROM bookings b
+         WHERE b.client_id::text = ANY($1) AND b.deleted_at IS NULL
+         GROUP BY b.client_id`;
+
+    const [statsRes, usersRes] = await Promise.all([
+      pool.query(statsQuery, [uniqueIds]),
+      pool.query('SELECT id::text AS id, created_at FROM users WHERE id::text = ANY($1)', [uniqueIds]),
+    ]);
+
+    const memberSinceById = new Map<string, string>();
+    for (const row of usersRes.rows) {
+      memberSinceById.set(row.id, row.created_at);
+    }
+
+    for (const id of uniqueIds) {
+      summaries.set(id, {
+        completed_count: 0,
+        cancelled_count: 0,
+        total_count: 0,
+        member_since: memberSinceById.get(id) || null,
+      });
+    }
+
+    for (const row of statsRes.rows) {
+      const existing = summaries.get(row.client_user_id);
+      if (existing) {
+        existing.completed_count = parseInt(row.completed_count, 10) || 0;
+        existing.cancelled_count = parseInt(row.cancelled_count, 10) || 0;
+        existing.total_count = parseInt(row.total_count, 10) || 0;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to compute client trust summaries:', e);
+  }
+
+  return summaries;
+}
+
 async function getServiceDurationMinutes(serviceId: string): Promise<number> {
   try {
     const res = await pool.query('SELECT duration_minutes FROM services WHERE id::text = $1', [serviceId]);
@@ -775,7 +851,18 @@ router.get('/provider/my', verifyToken, async (req: Request & { userId?: string 
     }
 
     const { rows } = await pool.query(q, [providerId]);
-    return res.json({ data: rows });
+
+    const clientIdReferencesClientsTable = clientRefTable === 'clients' && hasClientsTable;
+    const trustSummaries = await getClientTrustSummaries(
+      rows.map((r: any) => r.client_user_id || r.client_id),
+      clientIdReferencesClientsTable
+    );
+    const enrichedRows = rows.map((r: any) => ({
+      ...r,
+      client_trust: trustSummaries.get(String(r.client_user_id || r.client_id)) || null,
+    }));
+
+    return res.json({ data: enrichedRows });
   } catch (error) {
     console.error('Error fetching bookings for provider:', error);
     return res.status(500).json({ error: 'Failed to fetch bookings' });

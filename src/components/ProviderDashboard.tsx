@@ -20,6 +20,41 @@ import { CompleteBookingModal } from './CompleteBookingModal';
 
 type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
 
+interface ClientTrust {
+  completed_count: number;
+  cancelled_count: number;
+  total_count: number;
+  member_since: string | null;
+}
+
+// Platform-wide history (not just with this provider), so a "new" client to this
+// provider who's actually booked and completed jobs elsewhere still reads as trustworthy.
+function getClientTrustBadge(trust: ClientTrust | null | undefined): { label: string; className: string } {
+  if (!trust || trust.total_count === 0) {
+    return { label: 'New client', className: 'bg-gray-100 text-gray-600' };
+  }
+
+  const resolved = trust.completed_count + trust.cancelled_count;
+  const completionRate = resolved > 0 ? trust.completed_count / resolved : 0;
+
+  if (trust.completed_count >= 3 && completionRate >= 0.8) {
+    return {
+      label: `Reliable · ${trust.completed_count} completed`,
+      className: 'bg-green-100 text-green-700',
+    };
+  }
+  if (resolved >= 2 && completionRate < 0.5) {
+    return {
+      label: `${trust.cancelled_count} cancelled booking${trust.cancelled_count === 1 ? '' : 's'}`,
+      className: 'bg-amber-100 text-amber-700',
+    };
+  }
+  return {
+    label: `${trust.completed_count} completed booking${trust.completed_count === 1 ? '' : 's'}`,
+    className: 'bg-blue-100 text-blue-700',
+  };
+}
+
 interface ProviderDashboardProps {
   initialTab?: ProviderTab;
   tabRequestId?: number;
@@ -321,6 +356,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           image: clientImage,
           reschedule_pending_approval: b.reschedule_pending_approval,
           rescheduled_by: b.rescheduled_by,
+          client_trust: b.client_trust as ClientTrust | null,
         };
       });
       setProviderBookings(mapped);
@@ -585,7 +621,20 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       <div className="flex-1">
                         <div className="flex items-start justify-between mb-2">
                           <div>
-                            <h3 className="text-gray-900">{booking.client}</h3>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h3 className="text-gray-900">{booking.client}</h3>
+                              {(() => {
+                                const badge = getClientTrustBadge(booking.client_trust);
+                                return (
+                                  <span
+                                    title="Based on this client's booking history across the whole platform"
+                                    className={`px-2 py-0.5 rounded-full text-xs font-medium ${badge.className}`}
+                                  >
+                                    {badge.label}
+                                  </span>
+                                );
+                              })()}
+                            </div>
                             <p className="text-sm text-gray-600">{booking.service || 'Service'}</p>
                           </div>
                           <div className="text-right">

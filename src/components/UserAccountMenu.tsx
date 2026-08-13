@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { User, Calendar, Wallet, Star, Settings, HelpCircle, ChevronRight, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { Avatar, AvatarImage, AvatarFallback } from './ui/avatar';
+import { getUploadUrl } from '../api/config';
 
 export type AccountMenuTarget = 'profile' | 'bookings' | 'wallet' | 'reviews' | 'settings' | 'help';
 
@@ -52,6 +53,11 @@ export function UserAccountMenu({ onNavigate }: UserAccountMenuProps) {
 
   if (!user) return null;
 
+  // user.profile_image is the raw stored path (see AuthContext.tsx) - resolved to a
+  // real, loadable URL here rather than upstream, since some consumers (e.g.
+  // ProviderDashboard's edit form) need the raw path back to round-trip through save.
+  const avatarUrl = getUploadUrl(user.profile_image);
+
   const handleItemClick = (target: AccountMenuTarget) => {
     setIsOpen(false);
     onNavigate(target);
@@ -66,7 +72,7 @@ export function UserAccountMenu({ onNavigate }: UserAccountMenuProps) {
         aria-expanded={isOpen}
       >
         <Avatar className="w-8 h-8">
-          {user.profile_image && <AvatarImage src={user.profile_image} alt={user.name || 'Profile'} />}
+          {avatarUrl && <AvatarImage src={avatarUrl} alt={user.name || 'Profile'} />}
           <AvatarFallback className="bg-gradient-to-br from-purple-400 to-pink-400 text-white text-sm">
             {user.name ? user.name.slice(0, 1).toUpperCase() : 'U'}
           </AvatarFallback>
@@ -83,7 +89,7 @@ export function UserAccountMenu({ onNavigate }: UserAccountMenuProps) {
           <div className="px-4 py-4">
             <div className="flex items-center gap-3">
               <Avatar className="account-menu-avatar">
-                {user.profile_image && <AvatarImage src={user.profile_image} alt={user.name || 'Profile'} />}
+                {avatarUrl && <AvatarImage src={avatarUrl} alt={user.name || 'Profile'} />}
                 <AvatarFallback className="bg-gradient-to-br from-purple-400 to-pink-400 text-white">
                   {user.name ? user.name.slice(0, 1).toUpperCase() : 'U'}
                 </AvatarFallback>
