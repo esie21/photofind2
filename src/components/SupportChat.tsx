@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Send, Paperclip, Check, CheckCheck, Loader2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import supportService, { SupportBooking, SupportCategory, SupportMessage, SupportTicket } from '../api/services/supportService';
-import { API_CONFIG } from '../api/config';
+import { API_CONFIG, getUploadUrl } from '../api/config';
 import { io as createSocket, Socket } from 'socket.io-client';
 
 interface SupportChatProps {
@@ -86,11 +86,6 @@ export function SupportChat({ mode, ticketId, onTicketCreated, className }: Supp
   const typingTimeoutRef = useRef<number | null>(null);
   const typingCooldownRef = useRef<number | null>(null);
   const loadedTicketIdRef = useRef<string | null>(null);
-
-  const staticUploadsBase = useMemo(
-    () => `${API_CONFIG.BASE_URL.replace(/\/api$/i, '')}/uploads`,
-    []
-  );
 
   const cleanupSocket = () => {
     if (socketRef.current) {
@@ -417,7 +412,7 @@ export function SupportChat({ mode, ticketId, onTicketCreated, className }: Supp
           const isMine = user && String(msg.sender_id) === String(user.id);
           const isSystem = msg.sender_role === 'system';
           const timestamp = new Date(msg.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-          const attachmentUrl = msg.attachment_url ? `${staticUploadsBase}/${msg.attachment_url}` : null;
+          const attachmentUrl = msg.attachment_url ? getUploadUrl(msg.attachment_url) : null;
 
           if (isSystem) {
             return (

@@ -105,10 +105,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 function normalizeUserImages(user: User) {
   if (!user) return user;
   // Delegate to getUploadUrl so upload paths resolve the same way everywhere - it also
-  // re-points legacy absolute URLs that hardcode a backend host.
+  // re-points legacy absolute URLs that hardcode a backend host. getUploadUrl already
+  // handles every shape of input (empty, full URL, or bare relative path) safely on its
+  // own, so no pre-filtering is needed here - the old guard below only called it for
+  // paths that were already a full URL or already "/uploads"-prefixed, which skipped
+  // the actual common case (a bare stored path like "users/<id>/avatar/avatar.webp"),
+  // leaving it unresolved and rendering as a broken image.
   const resolveUrl = (url?: string | null) => {
     if (!url) return url;
-    if (!/^https?:\/\//i.test(url) && !url.startsWith('/uploads')) return url;
     return getUploadUrl(url);
   };
 

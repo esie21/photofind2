@@ -3,6 +3,7 @@ import { Search, Camera, Video, Palette, Sparkles, Star, MapPin, ChevronRight, C
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import userService from '../api/services/userService';
 import { CATEGORY_OPTIONS } from '../constants/categories';
+import { getUploadUrl } from '../api/config';
 
 // Category configuration with icons, colors, and images
 const CATEGORY_CONFIG: Record<string, { icon: any; color: string; image: string }> = {
@@ -271,7 +272,7 @@ export function LandingPage({ onViewChange, onSearch, onCategorySelect }: Landin
                     <div className="bg-white rounded-2xl overflow-hidden shadow-md hover:shadow-xl transition-shadow">
                     <div className="relative h-64">
                       <ImageWithFallback
-                        src={provider.image || provider.profile_image || provider.imageUrl}
+                        src={getUploadUrl(provider.profile_image || provider.image || provider.imageUrl)}
                         alt={provider.name}
                         className="w-full h-full object-cover"
                       />

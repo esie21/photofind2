@@ -12,7 +12,12 @@ export function ImageWithFallback(props: React.ImgHTMLAttributes<HTMLImageElemen
 
   const { src, alt, style, className, ...rest } = props
 
-  return didError ? (
+  // A missing/empty src (e.g. a provider who never uploaded a photo) doesn't reliably
+  // fire onError across browsers, so it would otherwise render as a silent blank box
+  // instead of the same fallback a genuine load failure gets.
+  const showFallback = didError || !src
+
+  return showFallback ? (
     <div
       className={`inline-block bg-gray-100 text-center align-middle ${className ?? ''}`}
       style={style}

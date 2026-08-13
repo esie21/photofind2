@@ -10,6 +10,7 @@ import { ConfirmCompletionModal } from './ConfirmCompletionModal';
 import userService from '../api/services/userService';
 import bookingService from '../api/services/bookingService';
 import { CATEGORY_OPTIONS } from '../constants/categories';
+import { getUploadUrl } from '../api/config';
 
 interface ClientDashboardProps {
   onStartBooking: (provider?: any) => void;
@@ -257,7 +258,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
                     <div className="flex flex-col sm:flex-row gap-6">
                       <div className="relative w-full sm:w-32 h-32 flex-shrink-0">
                         <ImageWithFallback
-                          src={provider.image}
+                          src={getUploadUrl(provider.profile_image || provider.image)}
                           alt={provider.name}
                           className="w-full h-full object-cover rounded-xl"
                         />
@@ -450,7 +451,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
           <div role="dialog" aria-modal="true" aria-label="Provider profile" className="modal-card modal-card--2xl modal-card--plain">
             <div className="relative h-64">
               <ImageWithFallback
-                src={selectedProvider.image}
+                src={getUploadUrl(selectedProvider.profile_image || selectedProvider.image)}
                 alt={selectedProvider.name}
                 className="w-full h-full object-cover"
               />

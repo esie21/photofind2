@@ -5,7 +5,7 @@ import { ImageWithFallback } from './figma/ImageWithFallback';
 import { useAuth } from '../context/AuthContext';
 import messageService, { ChatMessage, Conversation } from '../api/services/messageService';
 import chatService, { BookingChatMessage } from '../api/services/chatService';
-import { API_CONFIG } from '../api/config';
+import { API_CONFIG, getUploadUrl } from '../api/config';
 import { io as createSocket, Socket } from 'socket.io-client';
 
 interface ChatInterfaceProps {
@@ -71,10 +71,6 @@ const participantId = useMemo(() => {
     });
     return resolved;
   }, [bookingIdProp, provider]);
-
-  const staticUploadsBase = useMemo(() => {
-    return `${API_CONFIG.BASE_URL.replace(/\/api$/i, '')}/uploads`;
-  }, []);
 
   const headerName = provider?.name || conversation?.other_user?.name || 'Conversation';
   const headerSubtitle =
@@ -397,7 +393,7 @@ const participantId = useMemo(() => {
           {messages.map((msg: any) => {
             const isMine = user && String(msg.sender_id) === String(user.id);
             const timestamp = new Date(msg.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-            const attachmentUrl = msg.attachment_url ? `${staticUploadsBase}/${msg.attachment_url}` : null;
+            const attachmentUrl = msg.attachment_url ? getUploadUrl(msg.attachment_url) : null;
             return (
               <div key={msg.id} className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-sm ${isMine ? 'order-2' : 'order-1'}`}>
