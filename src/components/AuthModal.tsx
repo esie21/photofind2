@@ -5,6 +5,7 @@ import { GoogleLogin, CredentialResponse } from '@react-oauth/google';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { TermsContent } from './TermsContent';
+import { API_CONFIG } from '../api/config';
 
 interface AuthModalProps {
   mode: 'login' | 'signup';
@@ -171,7 +172,11 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
 
   const checkEmailAvailability = async (emailToCheck: string): Promise<boolean> => {
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3001/api'}/auth/check-email`, {
+      // Relative path, same as every other request in the app (see api/config.ts) - a
+      // hardcoded localhost fallback here meant this always failed in production (no
+      // backend at localhost:3001 on a visitor's machine) and silently fell through to
+      // "available", skipping the early duplicate-email check outside of local dev.
+      const response = await fetch(`${API_CONFIG.BASE_URL}/auth/check-email`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: emailToCheck }),
@@ -536,18 +541,27 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
                         {showConfirmPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                       </button>
                     </div>
-                    {touched.confirmPassword && fieldErrors.confirmPassword && (
-                      <p className="mt-1 text-sm text-red-500 flex items-center gap-1">
-                        <AlertCircle className="w-3.5 h-3.5" />
-                        {fieldErrors.confirmPassword}
-                      </p>
-                    )}
-                    {touched.confirmPassword && !fieldErrors.confirmPassword && confirmPassword && (
-                      <p className="mt-1 text-sm text-green-600 flex items-center gap-1">
-                        <Check className="w-3.5 h-3.5" />
-                        Passwords match
-                      </p>
-                    )}
+                    {/* Fixed height (inline style, not a Tailwind class - this codebase ships a
+                        prebuilt static CSS snapshot, not a live Tailwind build, so an
+                        arbitrary class here could silently have no rule at all) so this
+                        message appearing on blur doesn't shift the Continue button below it.
+                        Clicking Continue is itself what blurs this field, so without this the
+                        button moves between mousedown and mouseup and the click never lands -
+                        this was silently breaking sign-up for the most common fill order. */}
+                    <div className="mt-1" style={{ minHeight: '20px' }}>
+                      {touched.confirmPassword && fieldErrors.confirmPassword && (
+                        <p className="text-sm text-red-500 flex items-center gap-1">
+                          <AlertCircle className="w-3.5 h-3.5" />
+                          {fieldErrors.confirmPassword}
+                        </p>
+                      )}
+                      {touched.confirmPassword && !fieldErrors.confirmPassword && confirmPassword && (
+                        <p className="text-sm text-green-600 flex items-center gap-1">
+                          <Check className="w-3.5 h-3.5" />
+                          Passwords match
+                        </p>
+                      )}
+                    </div>
                   </div>
                 )}
                 {error && (

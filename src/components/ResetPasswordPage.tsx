@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Eye, EyeOff, Loader, AlertCircle, CheckCircle, Check, XCircle } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
+import { API_CONFIG } from '../api/config';
 
 // Simple navigation helper (no react-router)
 const navigateToHome = () => {
@@ -76,8 +77,10 @@ export function ResetPasswordPage() {
       }
 
       try {
+        // Relative path (see api/config.ts) - a hardcoded localhost fallback here meant
+        // this could never reach the real backend in production.
         const response = await fetch(
-          `${import.meta.env.VITE_API_URL || 'http://localhost:3001/api'}/auth/verify-reset-token?token=${encodeURIComponent(token)}`
+          `${API_CONFIG.BASE_URL}/auth/verify-reset-token?token=${encodeURIComponent(token)}`
         );
         const data = await response.json();
 
@@ -124,8 +127,10 @@ export function ResetPasswordPage() {
     setLoading(true);
 
     try {
+      // Relative path (see api/config.ts) - a hardcoded localhost fallback here meant
+      // this could never reach the real backend in production.
       const response = await fetch(
-        `${import.meta.env.VITE_API_URL || 'http://localhost:3001/api'}/auth/reset-password`,
+        `${API_CONFIG.BASE_URL}/auth/reset-password`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

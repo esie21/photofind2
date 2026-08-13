@@ -102,7 +102,12 @@ export function UserAccountMenu({ onNavigate }: UserAccountMenuProps) {
           <div className="py-2">
             {MENU_ITEMS.filter(({ target }) =>
               !(target === 'bookings' && (user.role === 'provider' || user.role === 'admin')) &&
-              !(target === 'wallet' && user.role !== 'provider')
+              // Profile / Wallet & Earnings / Reviews only have a home on the provider
+              // dashboard today (see App.tsx's handleAccountMenuNavigate) - for anyone
+              // else they were a dead end that just popped a "coming soon" toast.
+              !(target === 'wallet' && user.role !== 'provider') &&
+              !(target === 'profile' && user.role !== 'provider') &&
+              !(target === 'reviews' && user.role !== 'provider')
             ).map(({ target, label, icon: Icon }) => (
               <button
                 key={target}
