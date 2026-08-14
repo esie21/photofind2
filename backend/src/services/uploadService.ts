@@ -11,8 +11,28 @@ import type { Request, Response, NextFunction } from 'express';
 export const UPLOADS_ROOT = path.resolve(__dirname, '../../../uploads');
 
 export const IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+// quicktime is here because that is what a .mov from an iPhone or a Mac announces
+// itself as, and those are the files providers will actually try to upload.
+export const VIDEO_MIME_TYPES = ['video/mp4', 'video/webm', 'video/quicktime'];
+export const MEDIA_MIME_TYPES = [...IMAGE_MIME_TYPES, ...VIDEO_MIME_TYPES];
 export const DOCUMENT_MIME_TYPES = [...IMAGE_MIME_TYPES, 'application/pdf'];
-export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB - images and documents
+// Video needs its own ceiling; 10MB is a few seconds of phone footage. Multer only
+// accepts a single per-file limit, so an upload that can carry video is configured with
+// this one and enforceMediaSizeLimits below holds images to the smaller figure after
+// the fact.
+export const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100MB
+/** Ceiling for one multi-file request, whatever the mix of types. */
+export const MAX_REQUEST_SIZE = 250 * 1024 * 1024; // 250MB
+
+export function isVideoMime(mimetype: string): boolean {
+  return VIDEO_MIME_TYPES.includes(mimetype);
+}
+
+/** The ceiling that applies to one particular file. */
+export function sizeLimitFor(mimetype: string): number {
+  return isVideoMime(mimetype) ? MAX_VIDEO_SIZE : MAX_FILE_SIZE;
+}
 
 // The extension is derived from the allow-listed type, never from the uploaded filename.
 // A file called "evil.html" sent as image/png is stored as .png, so it can never be
@@ -23,6 +43,9 @@ const EXTENSION_BY_MIME: Record<string, string> = {
   'image/gif': '.gif',
   'image/webp': '.webp',
   'application/pdf': '.pdf',
+  'video/mp4': '.mp4',
+  'video/webm': '.webm',
+  'video/quicktime': '.mov',
 };
 
 export function extensionFor(mimetype: string): string {
@@ -78,6 +101,7 @@ export function makeFileFilter(allowed: string[]) {
 }
 
 export const imageFileFilter = makeFileFilter(IMAGE_MIME_TYPES);
+export const mediaFileFilter = makeFileFilter(MEDIA_MIME_TYPES);
 export const documentFileFilter = makeFileFilter(DOCUMENT_MIME_TYPES);
 
 export function deleteUploadSafe(filePath: string | null | undefined): void {
@@ -102,12 +126,19 @@ export function discardUploads(req: any): void {
 // Leading bytes for the types we accept. `file.mimetype` is just the Content-Type the
 // client wrote on the part, so it proves nothing on its own - this checks the bytes that
 // actually landed.
+// ISO base media (MP4 and modern QuickTime alike) starts with a box length followed by
+// the type 'ftyp' at offset 4. Matroska/WebM starts with the EBML magic number.
+const isIsoBaseMedia = (b: Buffer) => b.slice(4, 8).toString('ascii') === 'ftyp';
+
 const SIGNATURES: Array<{ mime: string; test: (b: Buffer) => boolean }> = [
   { mime: 'image/png', test: b => b.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
   { mime: 'image/jpeg', test: b => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
   { mime: 'image/gif', test: b => b.slice(0, 6).toString('ascii') === 'GIF87a' || b.slice(0, 6).toString('ascii') === 'GIF89a' },
   { mime: 'image/webp', test: b => b.slice(0, 4).toString('ascii') === 'RIFF' && b.slice(8, 12).toString('ascii') === 'WEBP' },
   { mime: 'application/pdf', test: b => b.slice(0, 5).toString('ascii') === '%PDF-' },
+  { mime: 'video/mp4', test: isIsoBaseMedia },
+  { mime: 'video/quicktime', test: isIsoBaseMedia },
+  { mime: 'video/webm', test: b => b.slice(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])) },
 ];
 
 /** True when the file's leading bytes match the type it was uploaded as. */
@@ -138,9 +169,49 @@ export function verifyUploadedContent(req: any, res: Response, next: NextFunctio
     if (!contentMatchesType(f.path, f.mimetype)) {
       discardUploads(req);
       return res.status(400).json({
-        error: 'That file is not a valid image. Please upload a real JPEG, PNG, GIF or WEBP.',
+        error: isVideoMime(f.mimetype)
+          ? 'That file is not a valid video. Please upload a real MP4, WEBM or MOV.'
+          : 'That file is not a valid image. Please upload a real JPEG, PNG, GIF or WEBP.',
       });
     }
+  }
+  return next();
+}
+
+/**
+ * Express middleware: run AFTER multer on any upload that accepts both images and
+ * video.
+ *
+ * Multer takes one fileSize limit for the whole request, so an uploader configured to
+ * accept a 100MB video would also wave through a 100MB PNG. This applies the real
+ * ceiling for each file's own type.
+ */
+export function enforceMediaSizeLimits(req: any, res: Response, next: NextFunction) {
+  const files: any[] = [];
+  if (req.file) files.push(req.file);
+  if (Array.isArray(req.files)) files.push(...req.files);
+
+  let total = 0;
+  for (const f of files) {
+    const limit = sizeLimitFor(f.mimetype);
+    if (f.size > limit) {
+      discardUploads(req);
+      const kind = isVideoMime(f.mimetype) ? 'Videos' : 'Images';
+      return res.status(400).json({
+        error: `${kind} must be ${Math.round(limit / 1024 / 1024)}MB or smaller. "${f.originalname}" is larger than that.`,
+      });
+    }
+    total += f.size;
+  }
+
+  // The per-file video ceiling multiplies: a request carrying the maximum number of
+  // files at the maximum video size would land 2.4GB on the disk before any handler
+  // saw it. This bounds one request as a whole.
+  if (total > MAX_REQUEST_SIZE) {
+    discardUploads(req);
+    return res.status(400).json({
+      error: `That's too much at once. Upload up to ${Math.round(MAX_REQUEST_SIZE / 1024 / 1024)}MB per batch.`,
+    });
   }
   return next();
 }

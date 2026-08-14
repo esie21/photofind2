@@ -119,7 +119,11 @@ router.get('/', async (req: Request, res: Response) => {
     }
 
     // Use LATERAL join to fetch featured service
-    const sql = `SELECT u.id, u.email, u.name, u.role, u.profile_image, u.portfolio_images, u.bio, u.years_experience, u.location, u.rating, u.review_count, u.is_verified,
+    // Deliberately no portfolio_images or portfolio_meta: this is the card list, which
+    // renders a provider's avatar and one featured service. Shipping every provider's
+    // full portfolio - up to 24 paths each, plus captions, albums and poster paths -
+    // was bytes no caller has ever read. GET /providers/:id still returns them.
+    const sql = `SELECT u.id, u.email, u.name, u.role, u.profile_image, u.bio, u.years_experience, u.location, u.category, u.title, u.rating, u.review_count, u.is_verified,
       ${serviceSelect}
       FROM users u
       ${providersJoin}
@@ -155,10 +159,14 @@ router.get('/', async (req: Request, res: Response) => {
       name: r.name,
       role: r.role,
       profile_image: r.profile_image && r.profile_image.startsWith('/') ? `${baseUrl}${r.profile_image}` : r.profile_image,
-      portfolio_images: ensureArray(r.portfolio_images).map((p: string) => p && p.startsWith('/') ? `${baseUrl}${p}` : p),
       bio: r.bio,
       years_experience: r.years_experience,
       location: r.location,
+      // Both were missing from the SELECT above, so every consumer of this list saw an
+      // undefined category - the profile page fell back to the generic "Professional"
+      // and sent the booking flow no service label at all.
+      category: r.category,
+      title: r.title,
       rating: parseFloat(r.rating) || 0,
       review_count: parseInt(r.review_count) || 0,
       is_verified: !!r.is_verified,
@@ -244,6 +252,75 @@ router.get('/categories/stats', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Get category stats error:', error);
     res.status(500).json({ error: 'Failed to retrieve category statistics' });
+  }
+});
+
+// Public endpoint: a single provider.
+//
+// This route simply did not exist. The public profile page asked for it on every visit,
+// got a 404, and fell back to scanning the FIRST PAGE of GET /providers - twelve rows -
+// for a matching id. Any provider who didn't happen to rank in the top twelve got
+// "Provider not found" on their own profile, and nobody could link to them.
+//
+// Declared after '/categories/stats' on purpose: Express matches in order, and a ':id'
+// above it would swallow "categories".
+router.get('/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // users.id is a uuid column; a malformed value makes Postgres throw, which would
+    // surface as a 500 for what is really just a bad URL.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!UUID_RE.test(String(id || ''))) {
+      return res.status(404).json({ error: 'Provider not found' });
+    }
+
+    const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+
+    // Deliberately narrower than the row we hold internally: this is unauthenticated, so
+    // no email, verification documents or anything else a client has no business seeing.
+    const result = await pool.query(
+      `SELECT id, name, profile_image, portfolio_images, portfolio_meta, bio, years_experience,
+              location, category, title, rating, review_count, is_verified
+       FROM users
+       WHERE id = $1 AND role = 'provider'`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Provider not found' });
+    }
+
+    const r = result.rows[0];
+    const ensureArray = (v: any) => {
+      if (!v) return [];
+      if (Array.isArray(v)) return v;
+      try { return JSON.parse(v); } catch { return [v]; }
+    };
+    // Same absolute-URL handling as the list endpoint, so both paths hand the client
+    // identical values.
+    const absolutise = (p: string) => (p && p.startsWith('/') ? `${baseUrl}${p}` : p);
+
+    res.json({
+      id: r.id,
+      name: r.name,
+      profile_image: absolutise(r.profile_image),
+      portfolio_images: ensureArray(r.portfolio_images).map(absolutise),
+      // Keyed by the *stored* path, which is what portfolio_images holds before
+      // absolutise() runs - the client resolves both through the same helper.
+      portfolio_meta: r.portfolio_meta || {},
+      bio: r.bio || '',
+      years_experience: r.years_experience || 0,
+      location: r.location || '',
+      category: r.category || '',
+      title: r.title || '',
+      rating: parseFloat(r.rating) || 0,
+      review_count: parseInt(r.review_count) || 0,
+      is_verified: !!r.is_verified,
+    });
+  } catch (error: any) {
+    console.error('Get provider error:', error?.stack || error);
+    res.status(500).json({ error: 'Failed to retrieve provider' });
   }
 });
 

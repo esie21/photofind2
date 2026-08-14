@@ -2832,3 +2832,476 @@ html {
   overscroll-behavior: contain;
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+
+/* ==========================================================================
+   Portfolio: the provider's editor and the public gallery.
+
+   Written by hand for the same reason .modal-lightbox above is: this project
+   ships src/index.css as a checked-in Tailwind BUILD OUTPUT, with no Tailwind
+   step in vite.config.ts. Utilities that weren't already in the file when it
+   was generated - bg-black/70, inset-x-0, top-2, columns-2, focus-within: -
+   produce no CSS at all, so markup that relies on them silently does nothing.
+   Everything below is therefore expressed as real CSS.
+   ========================================================================== */
+
+/* --- Editor grid ---------------------------------------------------------- */
+
+.portfolio-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  border-radius: 0.75rem;
+}
+
+@media (width >= 48rem) {
+  .portfolio-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* Files are being dragged in from outside the browser. */
+.portfolio-grid--dropping {
+  outline: 2px solid #9333ea;
+  outline-offset: 4px;
+}
+
+.portfolio-tile {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border-radius: 0.75rem;
+}
+
+.portfolio-tile--dragging {
+  opacity: 0.4;
+}
+
+.portfolio-tile--selected {
+  outline: 2px solid #9333ea;
+  outline-offset: 2px;
+}
+
+.portfolio-tile-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.portfolio-tile-image img,
+.portfolio-tile-image video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* The tile itself is the drag handle; a nested image would start its own
+     native image-drag instead. */
+  pointer-events: none;
+}
+
+.portfolio-tile-image:focus-visible {
+  outline: 2px solid #9333ea;
+  outline-offset: 2px;
+}
+
+/* --- Badges and selection ------------------------------------------------- */
+
+.portfolio-badge {
+  position: absolute;
+  top: 0.5rem;
+  max-width: 70%;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.portfolio-badge--cover {
+  left: 0.5rem;
+  background-color: #9333ea;
+  color: #fff;
+}
+
+.portfolio-badge--album {
+  right: 0.5rem;
+  background-color: rgba(0, 0, 0, 0.6);
+  color: #fff;
+}
+
+.portfolio-check {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.375rem;
+  border: 1px solid #d1d5db;
+  background-color: rgba(255, 255, 255, 0.9);
+  pointer-events: none;
+}
+
+.portfolio-check--on {
+  border-color: #9333ea;
+  background-color: #9333ea;
+  color: #fff;
+}
+
+/* --- Per-tile actions ----------------------------------------------------- */
+
+/* A bar along the bottom edge only. The previous version covered the whole tile,
+   which put an invisible layer over the remove button and swallowed its clicks. */
+.portfolio-actions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  padding: 0.375rem;
+  border-bottom-left-radius: 0.75rem;
+  border-bottom-right-radius: 0.75rem;
+  background-image: linear-gradient(to top, rgba(0, 0, 0, 0.7), transparent);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.portfolio-tile:hover .portfolio-actions,
+.portfolio-actions:focus-within {
+  opacity: 1;
+}
+
+/* A touch device never hovers, so hidden-until-hover would mean unreachable. */
+@media (hover: none) {
+  .portfolio-actions {
+    opacity: 1;
+  }
+}
+
+.portfolio-action {
+  padding: 0.375rem;
+  border-radius: 0.375rem;
+  background-color: rgba(255, 255, 255, 0.9);
+  transition: background-color 0.15s ease;
+}
+
+.portfolio-action:hover:not(:disabled) {
+  background-color: #fff;
+}
+
+.portfolio-action:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* Removal is confirmed on the tile itself - deleting also unlinks the file. */
+.portfolio-confirm {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-radius: 0.75rem;
+  background-color: rgba(0, 0, 0, 0.75);
+  text-align: center;
+}
+
+/* --- Upload progress ------------------------------------------------------ */
+
+.portfolio-progress {
+  height: 0.375rem;
+  border-radius: 9999px;
+  background-color: #f3f4f6;
+  overflow: hidden;
+}
+
+.portfolio-progress-bar {
+  height: 100%;
+  background-color: #9333ea;
+  transition: width 0.2s ease;
+}
+
+/* --- Album filter (public profile) ---------------------------------------- */
+
+.portfolio-albums {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.portfolio-album-chip {
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  border: 1px solid #e5e7eb;
+  background-color: #fff;
+  color: #4b5563;
+  font-size: 0.875rem;
+  transition: background-color 0.15s ease;
+}
+
+.portfolio-album-chip:hover {
+  background-color: #f9fafb;
+}
+
+.portfolio-album-chip--active {
+  border-color: #9333ea;
+  background-color: #9333ea;
+  color: #fff;
+}
+
+/* --- Public gallery ------------------------------------------------------- */
+
+/* Photographers' work is not square. A fixed 1:1 grid centre-cropped every
+   portrait and every panorama; columns keep each image's real proportions. */
+.portfolio-masonry {
+  columns: 2;
+  column-gap: 1rem;
+}
+
+@media (width >= 40rem) {
+  .portfolio-masonry {
+    columns: 3;
+  }
+}
+
+.portfolio-masonry-item {
+  display: block;
+  width: 100%;
+  margin-bottom: 1rem;
+  border-radius: 0.75rem;
+  overflow: hidden;
+  /* Without this a photo can be split across two columns. */
+  break-inside: avoid;
+  position: relative;
+  background-color: #f3f4f6;
+}
+
+.portfolio-masonry-item img,
+.portfolio-masonry-item video {
+  display: block;
+  width: 100%;
+  height: auto;
+  transition: opacity 0.15s ease;
+}
+
+.portfolio-masonry-item:hover img,
+.portfolio-masonry-item:hover video {
+  opacity: 0.9;
+}
+
+.portfolio-masonry-item:focus-visible {
+  outline: 2px solid #9333ea;
+  outline-offset: 2px;
+}
+
+.portfolio-masonry-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1.5rem 0.75rem 0.5rem;
+  background-image: linear-gradient(to top, rgba(0, 0, 0, 0.75), transparent);
+  color: #fff;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  pointer-events: none;
+}
+
+/* --- Lightbox extras ------------------------------------------------------ */
+
+/* .modal-lightbox-close is styled above; these are the pieces the portfolio
+   viewer adds. The translucent backgrounds are here rather than in the markup
+   because bg-white/10 is one of the utilities this stylesheet never emitted. */
+.modal-lightbox-close,
+.modal-lightbox-nav,
+.modal-lightbox-counter {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.modal-lightbox-close:hover,
+.modal-lightbox-nav:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.modal-lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2.5rem;
+  height: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  transition: background-color 0.15s ease;
+}
+
+.modal-lightbox-nav--prev {
+  left: 1rem;
+}
+
+.modal-lightbox-nav--next {
+  right: 1rem;
+}
+
+.modal-lightbox-counter {
+  position: absolute;
+  bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+}
+
+/* The caption shown under a portfolio photo in the viewer. */
+.portfolio-lightbox-caption {
+  max-width: 32rem;
+  text-align: center;
+  color: #fff;
+}
+
+.portfolio-lightbox-caption span {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.875rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* The caption/album editor inside the viewer, on the provider's own dashboard. */
+.portfolio-detail {
+  width: 100%;
+  max-width: 28rem;
+  padding: 1rem;
+  border-radius: 0.75rem;
+  background-color: #fff;
+}
+
+.portfolio-detail-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+}
+
+.portfolio-detail-media img,
+.portfolio-detail-media video {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: 0.5rem;
+}
+
+.portfolio-detail-media video {
+  background-color: #000;
+}
+
+/* The image viewer stacks a photo over its caption; without an explicit ceiling the
+   photo takes the full viewport height and pushes the caption off-screen. */
+.portfolio-viewer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.portfolio-viewer img,
+.portfolio-viewer video {
+  max-height: calc(100dvh - 9rem);
+  border-radius: 0.5rem;
+}
+
+/* Cover strip at the top of a public profile: the provider's first portfolio image,
+   dimmed so the name and avatar in front of it stay readable. */
+.portfolio-cover {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.5;
+}
+
+/* Utilities the checked-in Tailwind build never emitted, restored at their standard
+   values. Markup across the app already asks for these - a button written as
+   "px-3 py-1.5 rounded-md" was rendering with no vertical padding and square corners
+   because the classes resolved to nothing. */
+.py-0\.5 {
+  padding-block: 0.125rem;
+}
+
+.py-1\.5 {
+  padding-block: 0.375rem;
+}
+
+.pt-1 {
+  padding-top: 0.25rem;
+}
+
+.rounded-md {
+  border-radius: 0.375rem;
+}
+
+.hover\:bg-white:hover {
+  background-color: #fff;
+}
+
+/* --- Video items ---------------------------------------------------------- */
+
+/* A still on its own doesn't say "this one moves". The badge does, and it sits above
+   the thumbnail in both grids without intercepting the click that opens it. */
+.portfolio-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 9999px;
+  background-color: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  pointer-events: none;
+}
+
+.portfolio-duration {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.5rem;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  background-color: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-size: 0.6875rem;
+  line-height: 1rem;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* The action bar sits along the same bottom edge, so on a tile in edit mode the
+   duration would collide with it. Hovering reveals the controls; the duration steps
+   aside. */
+.portfolio-tile:hover .portfolio-duration {
+  opacity: 0;
+}
+
+/* A video in the viewer gets the browser's own controls, which need room. */
+.portfolio-viewer video {
+  width: auto;
+  max-width: 100%;
+  background-color: #000;
+}

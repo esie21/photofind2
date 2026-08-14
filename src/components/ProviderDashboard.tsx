@@ -1,7 +1,9 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
-import { Upload, Calendar, PhilippinePeso, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle, ShieldCheck, FileText } from 'lucide-react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { Upload, Calendar, PhilippinePeso, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle, ShieldCheck, FileText, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import { CATEGORY_OPTIONS } from '../constants/categories';
 import { ImageWithFallback } from './figma/ImageWithFallback';
+import { PortfolioThumbnail, PortfolioPlayer } from './PortfolioMedia';
+import { useModal } from '../hooks/useModal';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { BookingCardSkeleton, ServiceCardSkeleton, StatsCardSkeleton } from './ui/skeleton';
@@ -12,13 +14,43 @@ import serviceService from '../api/services/serviceService';
 import bookingService from '../api/services/bookingService';
 import availabilityService from '../api/services/availabilityService';
 import reviewService, { Review, ReviewStats } from '../api/services/reviewService';
-import { getUploadUrl } from '../api/config';
+import { getUploadUrl, getStoredPath } from '../api/config';
+import type { PortfolioMeta } from '../api/services/authService';
+import {
+  IMAGE_MIME_TYPES,
+  MEDIA_MIME_TYPES,
+  isVideoFile,
+  isVideoPath,
+  formatDuration,
+  generatePoster,
+  generateThumbnail,
+} from '../utils/media';
 import { ChatInterface } from './ChatInterface';
 import { WalletDashboard } from './WalletDashboard';
 import { RescheduleModal } from './RescheduleModal';
 import { CompleteBookingModal } from './CompleteBookingModal';
 
 type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
+
+/**
+ * A service row as the API returns it, in the shape the pricing editor works with.
+ * Three copies of this mapping had drifted apart - one of them disagreed with the other
+ * two about whether pricing_type 'both' enables the hourly rate.
+ */
+const toPackage = (s: any) => ({
+  id: s.id,
+  title: s.title || '',
+  description: s.description || '',
+  price: parseFloat(s.price) || 0,
+  category: s.category || '',
+  // Support both new and legacy pricing fields
+  hourly_rate: s.hourly_rate || (s.pricing_type === 'hourly' ? parseFloat(s.price) : null),
+  package_price: s.package_price || (s.pricing_type === 'package' ? parseFloat(s.price) : null),
+  duration_minutes: s.duration_minutes || null,
+  // Enable flags for UI
+  enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly' || s.pricing_type === 'both'),
+  enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
+});
 
 interface ClientTrust {
   completed_count: number;
@@ -72,7 +104,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   }, [tabRequestId]);
   const [showChat, setShowChat] = useState(false);
   const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
-  const { user, refreshUser } = useAuth();
+  const { user, refreshUser, applyUser } = useAuth();
   const toast = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const portfolioFileRef = useRef<HTMLInputElement | null>(null);
@@ -82,6 +114,31 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
   const [uploadingPortfolio, setUploadingPortfolio] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  // Uploading a video is several steps - capture a poster, send the file, send the
+  // poster - and a bare percentage would sit at 0 through the first of them.
+  const [uploadStage, setUploadStage] = useState('');
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [uploadingProfileImage, setUploadingProfileImage] = useState(false);
+  // Index of the image the provider has asked to remove, awaiting confirmation.
+  // Deleting is irreversible - the backend unlinks the file - so one stray click on a
+  // small icon used to be enough to lose a photo for good.
+  const [portfolioPendingDelete, setPortfolioPendingDelete] = useState<number | null>(null);
+  // Any portfolio write (remove / reorder / caption) in flight, so nothing fires twice.
+  const [portfolioBusy, setPortfolioBusy] = useState(false);
+  const [portfolioPreview, setPortfolioPreview] = useState<number | null>(null);
+  // A rearrangement the provider is still working on. Held locally so that dragging ten
+  // photos into place is one save at the end, not ten round trips - and so it can be
+  // abandoned wholesale with Cancel.
+  const [portfolioDraft, setPortfolioDraft] = useState<string[] | null>(null);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  // Bulk selection, by stored path rather than index, so it survives a reorder.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [bulkAlbum, setBulkAlbum] = useState('');
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
+  // Caption/album being edited in the image detail dialog.
+  const [detailDraft, setDetailDraft] = useState<{ caption: string; album: string }>({ caption: '', album: '' });
   const [packages, setPackages] = useState<any[]>([]);
   const [isLoadingPackages, setIsLoadingPackages] = useState(false);
   const [packagesError, setPackagesError] = useState<string | null>(null);
@@ -126,10 +183,64 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
     // until the image 404'd. Display URLs are built at render time instead.
     profile_image: u?.profile_image ?? '',
     portfolio_images: (u?.portfolio_images || []) as string[],
+    portfolio_meta: (u?.portfolio_meta || {}) as PortfolioMeta,
   });
 
-  const PROFILE_IMAGE_PLACEHOLDER =
-    'https://images.unsplash.com/photo-1623783356340-95375aac85ce?...';
+  // These mirror the server's own rules (uploadService.MAX_FILE_SIZE, MAX_VIDEO_SIZE,
+  // MEDIA_MIME_TYPES and users.ts MAX_PORTFOLIO_FILES). Checking here first means a
+  // provider who picks thirty photos, a 25MB RAW export or a ten-minute clip is told
+  // immediately, instead of waiting out a long upload only for the backend to reject
+  // the entire batch.
+  const MAX_PORTFOLIO_IMAGES = 24;
+  const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+  const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+  const MAX_BATCH_BYTES = 250 * 1024 * 1024;
+  // Nothing enforces this server-side - the file is whatever length it is - but a
+  // portfolio is a showreel, not a feature. Capping it keeps both the upload and the
+  // client's eventual download honest, since nothing here transcodes.
+  const MAX_VIDEO_SECONDS = 60;
+  const ALLOWED_IMAGE_TYPES = IMAGE_MIME_TYPES;
+  const ALLOWED_MEDIA_TYPES = MEDIA_MIME_TYPES;
+
+  /**
+   * Returns an error message if these files can't be uploaded, or null if they can.
+   *
+   * `slotsLeft` is only meaningful for the portfolio; pass null for single uploads.
+   * `allowVideo` is false for the profile photo, which is an image and nothing else.
+   */
+  const validateMediaFiles = (
+    files: File[],
+    slotsLeft: number | null,
+    allowVideo = true
+  ): string | null => {
+    if (slotsLeft !== null && files.length > slotsLeft) {
+      return slotsLeft === 0
+        ? `You've reached the ${MAX_PORTFOLIO_IMAGES}-item limit. Remove one to add another.`
+        : `You can add ${slotsLeft} more item${slotsLeft === 1 ? '' : 's'} - you selected ${files.length}.`;
+    }
+
+    const allowed = allowVideo ? ALLOWED_MEDIA_TYPES : ALLOWED_IMAGE_TYPES;
+    const wrongType = files.find((f) => !allowed.includes(f.type) && !(allowVideo && isVideoFile(f)));
+    if (wrongType) {
+      return allowVideo
+        ? `"${wrongType.name}" isn't a supported file. Use JPEG, PNG, GIF, WEBP, MP4, WEBM or MOV.`
+        : `"${wrongType.name}" isn't a supported image. Use JPEG, PNG, GIF or WEBP.`;
+    }
+
+    const tooBig = files.find((f) => f.size > (isVideoFile(f) ? MAX_VIDEO_BYTES : MAX_UPLOAD_BYTES));
+    if (tooBig) {
+      const limit = isVideoFile(tooBig) ? MAX_VIDEO_BYTES : MAX_UPLOAD_BYTES;
+      return `"${tooBig.name}" is larger than ${limit / 1024 / 1024}MB.`;
+    }
+
+    // Matches uploadService.MAX_REQUEST_SIZE - the server rejects the whole batch past
+    // this, so catching it here saves sending the bytes first.
+    const total = files.reduce((sum, f) => sum + f.size, 0);
+    if (total > MAX_BATCH_BYTES) {
+      return `That's ${Math.round(total / 1024 / 1024)}MB at once. Upload up to ${MAX_BATCH_BYTES / 1024 / 1024}MB per batch.`;
+    }
+    return null;
+  };
 
   const [formState, setFormState] = useState<any>(() => seedFormState(user));
 
@@ -170,14 +281,181 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   };
 
 
-  useEffect(() => {
-    if (formState?.profile_image) {
-      console.log('ProviderDashboard: profile image set to', formState.profile_image);
+  /**
+   * Writes a new portfolio arrangement and/or its captions to the server, then to the
+   * form.
+   *
+   * Server first, deliberately: updating local state up front made a failed request
+   * look like it had worked, and the change silently reverted on the next refresh.
+   *
+   * The image list always goes with the request even when only captions changed. The
+   * backend prunes portfolio_meta against it, so sending both is what keeps a removed
+   * photo's caption from lingering in the column.
+   */
+  const persistPortfolio = async (
+    next: { images?: string[]; meta?: PortfolioMeta },
+    success: { title: string; body: string }
+  ) => {
+    if (!user || portfolioBusy) return false;
+
+    const images = next.images ?? (formState.portfolio_images || []);
+    const keys = new Set(images.map((img: string) => getStoredPath(img)));
+    // Mirror the server's pruning locally, so the form doesn't hold captions for images
+    // that no longer exist until the next refresh.
+    const sourceMeta: PortfolioMeta = next.meta ?? (formState.portfolio_meta || {});
+    const meta: PortfolioMeta = {};
+    for (const [path, value] of Object.entries(sourceMeta)) {
+      if (keys.has(getStoredPath(path))) meta[getStoredPath(path)] = value;
     }
-    if (formState?.portfolio_images) {
-      console.log('ProviderDashboard: portfolio images count', formState.portfolio_images.length);
+
+    setPortfolioBusy(true);
+    try {
+      // The PUT returns the full updated row, so the signed-in user is refreshed from
+      // that rather than by a second call to /auth/me - which is what every reorder,
+      // caption edit and deletion used to cost.
+      const updated = await userService.updateUser(user.id, {
+        portfolio_images: images,
+        portfolio_meta: meta,
+      });
+      setFormState((s: any) => ({
+        ...s,
+        portfolio_images: (updated.portfolio_images || images) as string[],
+        portfolio_meta: (updated.portfolio_meta || meta) as PortfolioMeta,
+      }));
+      applyUser(updated);
+      toast.success(success.title, success.body);
+      return true;
+    } catch (err: any) {
+      console.error('Portfolio update failed', err);
+      toast.error('Could not update your portfolio', err?.message || 'Please try again.');
+      return false;
+    } finally {
+      setPortfolioBusy(false);
     }
-  }, [formState.profile_image, formState.portfolio_images]);
+  };
+
+  /** Uploads a batch of photos and videos, shared by the file picker and the drop zone. */
+  const uploadPortfolioFiles = async (files: File[], slotsLeft: number) => {
+    if (!user || files.length === 0) return;
+
+    // Check before uploading, not after. The backend rejects the whole batch if it would
+    // breach the limit, so without this a provider could sit through a 20-file upload
+    // and end up with none of them.
+    const problem = validateMediaFiles(files, slotsLeft);
+    if (problem) {
+      toast.error('Cannot add those files', problem);
+      return;
+    }
+
+    setUploadingPortfolio(true);
+    setUploadProgress(0);
+    try {
+      // Every item gets a small derived image before anything is sent: videos a poster
+      // frame, photos a gallery-sized thumbnail. The grids render these instead of the
+      // originals - a 24-photo portfolio was fetching tens of megabytes to draw tiles a
+      // few hundred pixels wide.
+      //
+      // Doing it first also means a clip that turns out to be too long is caught before
+      // its bytes go over the wire, since the browser is the only thing here that can
+      // decode video.
+      setUploadStage(`Preparing ${files.length} file${files.length === 1 ? '' : 's'}...`);
+      const previews: Array<{ file: File; poster?: File; thumb?: File; duration?: number; width?: number; height?: number } | null> = [];
+
+      for (const file of files) {
+        if (isVideoFile(file)) {
+          const result = await generatePoster(file);
+          if (result && result.duration > MAX_VIDEO_SECONDS + 1) {
+            toast.error(
+              'That video is too long',
+              `"${file.name}" runs ${formatDuration(result.duration)}. Portfolio videos can be up to ${MAX_VIDEO_SECONDS} seconds.`
+            );
+            return;
+          }
+          // A null result just means this browser couldn't decode the file (Chrome and
+          // Firefox generally refuse .mov). The upload still goes ahead; the thumbnail
+          // falls back to whatever first frame the viewer's own browser can show.
+          previews.push(
+            result
+              ? {
+                  file,
+                  poster: result.poster,
+                  duration: result.duration,
+                  width: result.width,
+                  height: result.height,
+                }
+              : null
+          );
+        } else {
+          const result = await generateThumbnail(file);
+          previews.push(
+            result ? { file, thumb: result.thumb, width: result.width, height: result.height } : null
+          );
+        }
+      }
+
+      setUploadStage('Uploading...');
+      const previous = new Set(
+        ((formState.portfolio_images || []) as string[]).map((img) => getStoredPath(img))
+      );
+      const resp = await userService.uploadPortfolioImages(user.id, files, setUploadProgress);
+
+      // The server appends in request order and rejects the whole batch if any file
+      // fails its checks, so the new paths line up one-for-one with what was sent.
+      const added = ((resp.portfolio_images || []) as string[]).filter(
+        (img) => !previous.has(getStoredPath(img))
+      );
+
+      const withPreviews = added
+        .map((path, index) => ({ path, preview: previews[index] }))
+        .filter((pair) => pair.preview);
+
+      if (withPreviews.length > 0) {
+        setUploadStage(`Saving ${withPreviews.length} thumbnail${withPreviews.length === 1 ? '' : 's'}...`);
+        // In parallel: these are small and independent, and sending them one at a time
+        // made a twenty-photo upload wait out twenty consecutive round trips. Failures
+        // are tolerated individually - the originals are already safely stored, and a
+        // missing thumbnail only means that tile loads the full-size file.
+        await Promise.allSettled(
+          withPreviews.map(({ path, preview }) =>
+            userService
+              .uploadPortfolioPreview(user.id, getStoredPath(path), {
+                kind: preview!.poster ? 'poster' : 'thumb',
+                file: (preview!.poster || preview!.thumb)!,
+                duration: preview!.duration,
+                width: preview!.width,
+                height: preview!.height,
+              })
+              .catch((e) => {
+                console.error('Preview upload failed for', path, e);
+                throw e;
+              })
+          )
+        );
+      }
+
+      // One read at the end settles what all those parallel writes produced, and doubles
+      // as the refresh the signed-in user needs. The form is set directly because the
+      // resync effect is deliberately paused while editing, so new items would otherwise
+      // not appear until the edit ended.
+      const fresh = (await refreshUser()) || resp;
+      setFormState((s: any) => ({
+        ...s,
+        portfolio_images: (fresh.portfolio_images || []) as string[],
+        portfolio_meta: (fresh.portfolio_meta || {}) as PortfolioMeta,
+      }));
+      toast.success(
+        'Added to your portfolio',
+        `${files.length} file${files.length > 1 ? 's' : ''} uploaded.`
+      );
+    } catch (err: any) {
+      console.error('Portfolio upload failed', err);
+      toast.error('Upload failed', err?.message || 'Could not upload those files.');
+    } finally {
+      setUploadingPortfolio(false);
+      setUploadProgress(0);
+      setUploadStage('');
+    }
+  };
 
   // Calculate real stats from bookings
   const stats = (() => {
@@ -215,109 +493,56 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, editMode]);
 
-  // Load services/packages for the provider
+  // Leaving edit mode - by saving or by cancelling - abandons any portfolio work that
+  // was still only staged locally, so it can't reappear the next time editing starts.
   useEffect(() => {
-    const loadPackages = async () => {
-      if (!user || user.role !== 'provider') return;
+    if (editMode) return;
+    setPortfolioDraft(null);
+    setPortfolioPendingDelete(null);
+    setDragIndex(null);
+    setSelectMode(false);
+    setSelectedPaths([]);
+    setBulkAlbum('');
+    setBulkDeleteConfirm(false);
+  }, [editMode]);
 
-      setIsLoadingPackages(true);
-      try {
-        const allServices = await serviceService.getAllServices();
-        console.log('All services loaded:', allServices.length);
-        console.log('Current user ID:', user.id);
-        console.log('Sample service:', allServices[0]);
+  /**
+   * The provider's own services, in the shape the pricing editor works with.
+   *
+   * This used to call getAllServices() - every service on the platform - and filter by
+   * provider id in the browser, in three separate places. The per-provider endpoint has
+   * always existed and the backend already resolves the users-vs-providers foreign key
+   * for it, so the whole list was being fetched and thrown away.
+   */
+  const loadPackages = useCallback(async () => {
+    if (!user || user.role !== 'provider') return;
 
-        // Filter services for current provider (handle both snake_case and camelCase)
-        const providerServices = allServices.filter((service: any) => {
-          const serviceUserId = String(service.providerId || service.provider_id || '');
-          const currentUserId = String(user.id || '');
-          const matches = serviceUserId === currentUserId;
-          if (!matches && service.providerId !== undefined) {
-            console.log('Service mismatch:', {
-              serviceId: service.id,
-              serviceProviderId: service.providerId,
-              serviceProvider_id: service.provider_id,
-              currentUserId: user.id
-            });
-          }
-          return matches;
-        });
-
-        console.log('Filtered provider services:', providerServices.length);
-
-        if (providerServices.length > 0) {
-          setPackages(providerServices.map((s: any) => ({
-            id: s.id,
-            title: s.title || '',
-            description: s.description || '',
-            price: parseFloat(s.price) || 0,
-            category: s.category || '',
-            // Support both new and legacy pricing fields
-            hourly_rate: s.hourly_rate || (s.pricing_type === 'hourly' ? parseFloat(s.price) : null),
-            package_price: s.package_price || (s.pricing_type === 'package' ? parseFloat(s.price) : null),
-            duration_minutes: s.duration_minutes || null,
-            // Enable flags for UI
-            enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly'),
-            enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
-          })));
-        } else {
-          // Start empty. This used to seed three placeholder packages with id: null -
-          // which looked like real services in the editor, so the next profile save
-          // (even one that only changed the bio) created all three as genuine bookable
-          // services at prices the provider never chose.
-          setPackages([]);
-        }
-      } catch (error: any) {
-        // Same reasoning as above - never invent services the provider didn't create,
-        // least of all when we don't even know what they already have.
-        console.error('Failed to load packages:', error);
-        setPackagesError(error?.message || 'Could not load your services.');
-        setPackages([]);
-      } finally {
-        setIsLoadingPackages(false);
-      }
-    };
-
-    loadPackages();
+    setIsLoadingPackages(true);
+    setPackagesError(null);
+    try {
+      const providerServices = await serviceService.getServicesByProvider(user.id);
+      // Start empty when there are none. This used to seed three placeholder packages
+      // with id: null - which looked like real services in the editor, so the next
+      // profile save (even one that only changed the bio) created all three as genuine
+      // bookable services at prices the provider never chose.
+      setPackages((providerServices || []).map(toPackage));
+    } catch (error: any) {
+      // Same reasoning as above - never invent services the provider didn't create,
+      // least of all when we don't even know what they already have.
+      console.error('Failed to load packages:', error);
+      setPackagesError(error?.message || 'Could not load your services.');
+      setPackages([]);
+    } finally {
+      setIsLoadingPackages(false);
+    }
   }, [user]);
 
-  // Reload packages when exiting edit mode (in case packages were saved)
+  // Load on sign-in, and again whenever edit mode ends, since services may have been
+  // saved. Two near-identical effects used to do this, each fetching the full service
+  // list independently.
   useEffect(() => {
-    if (!editMode && user && user.role === 'provider') {
-      const loadPackages = async () => {
-        setIsLoadingPackages(true);
-        try {
-          const allServices = await serviceService.getAllServices();
-          // Filter services for current provider (handle both snake_case and camelCase)
-          const providerServices = allServices.filter(
-            (service: any) => String(service.providerId || service.provider_id) === String(user.id)
-          );
-
-          if (providerServices.length > 0) {
-            setPackages(providerServices.map((s: any) => ({
-              id: s.id,
-              title: s.title || '',
-              description: s.description || '',
-              price: parseFloat(s.price) || 0,
-              category: s.category || '',
-              // Support both new and legacy pricing fields
-              hourly_rate: s.hourly_rate || (s.pricing_type === 'hourly' ? parseFloat(s.price) : null),
-              package_price: s.package_price || (s.pricing_type === 'package' ? parseFloat(s.price) : null),
-              duration_minutes: s.duration_minutes || null,
-              // Enable flags for UI
-              enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly'),
-              enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
-            })));
-          }
-        } catch (error) {
-          console.error('Failed to reload packages:', error);
-        } finally {
-          setIsLoadingPackages(false);
-        }
-      };
-      loadPackages();
-    }
-  }, [editMode, user]);
+    loadPackages();
+  }, [loadPackages, editMode]);
 
   const fetchBookings = async () => {
     if (!user || (user.role !== 'provider' && user.role !== 'admin')) return;
@@ -515,12 +740,86 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
     setAllBookingPage(1);
   }, [allBookingFilter]);
 
-  const portfolioImages = [
-    'https://images.unsplash.com/photo-1623783356340-95375aac85ce?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx3ZWRkaW5nJTIwcGhvdG9ncmFwaGVyfGVufDF8fHx8MTc2NDQwNzk1NHww&ixlib=rb-4.1.0&q=80&w=1080',
-    'https://images.unsplash.com/photo-1643264623879-bb85ea39c62a?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMHBob3RvZ3JhcGhlciUyMHByb2Zlc3Npb25hbHxlbnwxfHx8fDE3NjQ0MDc5NTR8MA&ixlib=rb-4.1.0&q=80&w=1080',
-    'https://images.unsplash.com/photo-1643968612613-fd411aecd1fd?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxwaG90b2dyYXBoZXIlMjBjYW1lcmElMjBwcm9mZXNzaW9uYWx8ZW58MXx8fHwxNzY0NDAwNjc1fDA&ixlib=rb-4.1.0&q=80&w=1080',
-    'https://images.unsplash.com/photo-1760780567530-389d8a3fba75?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxjcmVhdGl2ZSUyMHByb2Zlc3Npb25hbCUyMHN0dWRpb3xlbnwxfHx8fDE3NjQzNzkwODF8MA&ixlib=rb-4.1.0&q=80&w=1080',
-  ];
+  const portfolioImages: string[] = formState.portfolio_images || [];
+  const portfolioMeta: PortfolioMeta = formState.portfolio_meta || {};
+  const portfolioSlotsLeft = Math.max(0, MAX_PORTFOLIO_IMAGES - portfolioImages.length);
+
+  // What the grid renders: the unsaved arrangement while one is in progress, otherwise
+  // the saved order.
+  const displayOrder = portfolioDraft ?? portfolioImages;
+  const orderDirty = useMemo(
+    () =>
+      portfolioDraft !== null &&
+      (portfolioDraft.length !== portfolioImages.length ||
+        portfolioDraft.some((img, i) => img !== portfolioImages[i])),
+    [portfolioDraft, portfolioImages]
+  );
+
+  // Dragging fires a state update on every dragenter, so the whole dashboard re-renders
+  // dozens of times over one gesture. These are the values the grid reads on each of
+  // those renders; recomputing them every time is the difference between a smooth drag
+  // and a stuttering one on a full 24-item portfolio.
+  const metaFor = useCallback(
+    (image: string) => portfolioMeta[getStoredPath(image)] || {},
+    [portfolioMeta]
+  );
+
+  /** Opens the detail dialog for one image, seeded with its current caption and album. */
+  const openImageDetail = (index: number) => {
+    const meta = metaFor((portfolioDraft ?? (formState.portfolio_images || []))[index] || '');
+    setDetailDraft({ caption: meta.caption || '', album: meta.album || '' });
+    setPortfolioPreview(index);
+  };
+
+  // Albums are whatever the provider has actually typed - there is no fixed list to
+  // maintain, and the datalist below turns previous answers into suggestions.
+  const albumNames = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          Object.values(portfolioMeta)
+            .map((m) => (m?.album || '').trim())
+            .filter(Boolean)
+        )
+      ).sort((a, b) => a.localeCompare(b)),
+    [portfolioMeta]
+  );
+
+  /** Moves an image within the working order. */
+  const moveImage = (from: number, to: number) => {
+    const list = [...displayOrder];
+    if (from < 0 || to < 0 || from >= list.length || to >= list.length || from === to) return;
+    const [moved] = list.splice(from, 1);
+    list.splice(to, 0, moved);
+    setPortfolioDraft(list);
+  };
+
+  const toggleSelected = (image: string) => {
+    const path = getStoredPath(image);
+    setSelectedPaths((prev) =>
+      prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path]
+    );
+  };
+  const isSelected = (image: string) => selectedPaths.includes(getStoredPath(image));
+
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedPaths([]);
+    setBulkAlbum('');
+    setBulkDeleteConfirm(false);
+  };
+
+  const previewOpen =
+    portfolioPreview !== null && portfolioPreview >= 0 && portfolioPreview < displayOrder.length;
+  const previewImage = previewOpen ? displayOrder[portfolioPreview!] : '';
+
+  // Providers could only ever see their portfolio as small thumbnails here - there was
+  // no way to check a photo at full size, let alone label it, without opening their own
+  // public profile.
+  const { overlayProps: previewOverlayProps, cardProps: previewCardProps } = useModal(
+    () => setPortfolioPreview(null),
+    { enabled: previewOpen, closeOnEscape: !portfolioBusy, label: 'Portfolio image details' }
+  );
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -1066,10 +1365,9 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                             category: formState.category,
                             profile_image: formState.profile_image,
                             portfolio_images: formState.portfolio_images,
+                            portfolio_meta: formState.portfolio_meta,
                           };
-                          console.log('Saving profile payload', { payload, userId: user.id });
-                          const res = await userService.updateUser(user.id, payload);
-                          console.log('Update response', res);
+                          await userService.updateUser(user.id, payload);
 
                           // Save packages/services
                           if (packages.length > 0) {
@@ -1104,25 +1402,11 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                   }
                                 })
                               );
-                              console.log('Packages saved successfully');
 
                               // Reload packages to get IDs for newly created ones
-                              const allServices = await serviceService.getAllServices();
-                              const providerServices = allServices.filter(
-                                (service: any) => String(service.providerId || service.provider_id) === String(user.id)
-                              );
-                              setPackages(providerServices.map((s: any) => ({
-                                id: s.id,
-                                title: s.title || '',
-                                description: s.description || '',
-                                price: parseFloat(s.price) || 0,
-                                category: s.category || '',
-                                hourly_rate: s.hourly_rate || (s.pricing_type === 'hourly' ? parseFloat(s.price) : null),
-                                package_price: s.package_price || (s.pricing_type === 'package' ? parseFloat(s.price) : null),
-                                duration_minutes: s.duration_minutes || null,
-                                enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly' || s.pricing_type === 'both'),
-                                enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
-                              })));
+                              const providerServices =
+                                await serviceService.getServicesByProvider(user.id);
+                              setPackages((providerServices || []).map(toPackage));
                             } catch (packageError: any) {
                               // This used to be swallowed with "continue even if packages
                               // fail to save", so the profile reported success while the
@@ -1179,35 +1463,68 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
               <div className="space-y-6">
                 <div className="flex items-start gap-6">
                   <div className="relative">
-                    <ImageWithFallback
-                      src={getUploadUrl(formState.profile_image) || PROFILE_IMAGE_PLACEHOLDER}
-                      alt="Profile"
-                      className="w-24 h-24 object-cover rounded-2xl"
-                    />
+                    {formState.profile_image ? (
+                      <ImageWithFallback
+                        src={getUploadUrl(formState.profile_image)}
+                        alt="Your profile photo"
+                        className="w-24 h-24 object-cover rounded-2xl"
+                      />
+                    ) : (
+                      // Initials, matching what clients see on the public profile. The
+                      // old fallback pointed at a truncated Unsplash URL that could never
+                      // load, so "no photo yet" rendered as a broken image.
+                      <div className="w-24 h-24 rounded-2xl bg-purple-100 flex items-center justify-center">
+                        <span className="text-3xl text-purple-600 font-medium">
+                          {(formState.name || user?.name || '?').charAt(0).toUpperCase()}
+                        </span>
+                      </div>
+                    )}
                     <input
                       type="file"
                       ref={fileInputRef}
                       name="profile"
-                      accept="image/*"
+                      accept={ALLOWED_IMAGE_TYPES.join(',')}
                       className="hidden"
                       onChange={async (e) => {
                         const file = e.target.files?.[0];
                         if (!file || !user) return;
+
+                        // allowVideo is false: a profile photo is a photo.
+                        const problem = validateMediaFiles([file], null, false);
+                        if (problem) {
+                          toast.error('Cannot use that image', problem);
+                          if (fileInputRef.current) fileInputRef.current.value = '';
+                          return;
+                        }
+
+                        setUploadingProfileImage(true);
                         try {
                           const response = await userService.uploadProfileImage(user.id, file);
-                          await refreshUser();
                           setFormState((s: any) => ({ ...s, profile_image: response.profile_image }));
-                        } catch (err) {
+                          await refreshUser();
+                          toast.success('Photo updated', 'Your new profile photo is live.');
+                        } catch (err: any) {
+                          // This was a bare console.error: the upload could fail for any
+                          // reason - too large, wrong type, offline - and the provider
+                          // was told nothing at all, just an unchanged photo.
                           console.error('Profile image upload failed', err);
+                          toast.error('Upload failed', err?.message || 'Could not upload that photo.');
+                        } finally {
+                          setUploadingProfileImage(false);
+                          if (fileInputRef.current) fileInputRef.current.value = '';
                         }
                       }}
                     />
                     <button
                       onClick={() => { if (editMode) fileInputRef.current?.click(); }}
-                      className="absolute -bottom-2 -right-2 w-8 h-8 bg-purple-600 text-white rounded-full flex items-center justify-center hover:bg-purple-700"
-                      title="Change profile image"
+                      disabled={!editMode || uploadingProfileImage}
+                      className="absolute -bottom-2 -right-2 w-8 h-8 bg-purple-600 text-white rounded-full flex items-center justify-center hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      title={editMode ? 'Change profile photo' : 'Click "Edit Profile" to change your photo'}
+                      aria-label="Change profile photo"
                     >
-                      <Camera className="w-4 h-4" />
+                      {uploadingProfileImage
+                        ? <RefreshCw className="w-4 h-4 animate-spin" />
+                        : <Camera className="w-4 h-4" />}
                     </button>
                   </div>
                   <div className="flex-1">
@@ -1428,11 +1745,20 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
 
             {/* Portfolio */}
             <div className="bg-white rounded-2xl p-6 shadow-sm">
-              <div className="flex items-center justify-between mb-6">
-                <h2 className="text-gray-900">Portfolio</h2>
+              <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+                <div>
+                  <h2 className="text-gray-900">Portfolio</h2>
+                  {/* The 24-image cap and the fact that the first image doubles as the
+                      public cover photo were both invisible here until an upload failed. */}
+                  <p className="text-xs text-gray-500 mt-1">
+                    {portfolioImages.length} of {MAX_PORTFOLIO_IMAGES} photos and videos
+                    {portfolioImages.length > 0 && ' - drag to rearrange; the first one is your cover'}
+                  </p>
+                </div>
+
                 <input
                   type="file"
-                  accept="image/*"
+                  accept={ALLOWED_MEDIA_TYPES.join(',')}
                   ref={portfolioFileRef}
                   name="images"
                   id="profile-portfolio"
@@ -1440,91 +1766,387 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                   className="hidden"
                   onChange={async (e) => {
                     const files = Array.from(e.target.files || []);
-                    if (!user || files.length === 0) return;
-                    setUploadingPortfolio(true);
-                    try {
-                      const resp = await userService.uploadPortfolioImages(user.id, files);
-                      // Update the form directly rather than relying on refreshUser():
-                      // the resync effect is deliberately paused while editing, so the
-                      // new images would otherwise not appear until the edit ended.
-                      setFormState((s: any) => ({
-                        ...s,
-                        portfolio_images: (resp.portfolio_images || []) as string[],
-                      }));
-                      await refreshUser();
-                      toast.success('Images added', `${files.length} image${files.length > 1 ? 's' : ''} uploaded.`);
-                    } catch (err: any) {
-                      console.error('Portfolio update failed', err);
-                      toast.error('Upload failed', err?.message || 'Could not upload those images.');
-                    } finally {
-                      setUploadingPortfolio(false);
-                      if (portfolioFileRef.current) portfolioFileRef.current.value = '';
-                    }
+                    // Clear the input before awaiting, so picking the same file twice in
+                    // a row still fires a change event.
+                    if (portfolioFileRef.current) portfolioFileRef.current.value = '';
+                    await uploadPortfolioFiles(files, portfolioSlotsLeft);
                   }}
                 />
-                <button
-                  onClick={() => { if (editMode) portfolioFileRef.current?.click(); }}
-                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={!editMode || uploadingPortfolio}
-                >
-                  <Plus className="w-4 h-4" />
-                  {uploadingPortfolio ? 'Uploading...' : 'Add Images'}
-                </button>
-              </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {(formState.portfolio_images || []).map((image: string, index: number) => (
-                  <div key={index} className="relative group aspect-square">
-                    <ImageWithFallback
-                      src={getUploadUrl(image)}
-                      alt={`Portfolio ${index + 1}`}
-                      className="w-full h-full object-cover rounded-xl"
-                    />
-                    {editMode && (
+                {editMode && (
+                  <div className="flex items-center gap-2">
+                    {portfolioImages.length > 0 && (
                       <button
-                        onClick={async () => {
-                          if (!user) return;
-                          const arr = (formState.portfolio_images || []).filter((_: any, i: number) => i !== index);
-                          try {
-                            // Persist first, then update the UI. Removing it locally up
-                            // front meant a failed request still looked like a successful
-                            // delete, and the image reappeared on the next refresh.
-                            await userService.updateUser(user.id, { portfolio_images: arr });
-                            setFormState((s: any) => ({ ...s, portfolio_images: arr }));
-                            await refreshUser();
-                          } catch (err: any) {
-                            console.error('Failed to remove image', err);
-                            toast.error('Could not remove image', err?.message || 'Please try again.');
-                          }
-                        }}
-                        className="absolute top-2 right-2 p-2 bg-white rounded-md hover:bg-gray-100"
-                        title="Remove image"
+                        onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+                        className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm"
                       >
-                        <XCircle className="w-4 h-4 text-red-600" />
+                        {selectMode ? 'Done' : 'Select'}
                       </button>
                     )}
-                    {editMode && (
-                      <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center">
+                    <button
+                      onClick={() => portfolioFileRef.current?.click()}
+                      className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      disabled={uploadingPortfolio || portfolioSlotsLeft === 0}
+                      title={portfolioSlotsLeft === 0 ? `Limit of ${MAX_PORTFOLIO_IMAGES} images reached` : undefined}
+                    >
+                      <Plus className="w-4 h-4" />
+                      {uploadingPortfolio ? 'Uploading...' : 'Add Media'}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Real progress, straight from the request. "Uploading..." on its own gave
+                  no sign of whether a slow batch was still moving. */}
+              {uploadingPortfolio && (
+                <div className="mb-4">
+                  <div className="portfolio-progress">
+                    <div
+                      className="portfolio-progress-bar"
+                      style={{ width: `${uploadProgress}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {uploadStage || 'Uploading...'}{uploadProgress > 0 ? ` ${uploadProgress}%` : ''}
+                  </p>
+                </div>
+              )}
+
+              {/* Rearranging is staged locally and saved once, rather than one request
+                  per nudge - dragging ten photos into place is a single write. */}
+              {orderDirty && (
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3 p-3 bg-purple-50 border border-purple-200 rounded-xl">
+                  <p className="text-sm text-purple-900">
+                    New arrangement not saved yet. The first image becomes your cover photo.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      disabled={portfolioBusy}
+                      onClick={async () => {
+                        const ok = await persistPortfolio(
+                          { images: portfolioDraft || [] },
+                          { title: 'Order saved', body: 'Your portfolio now appears in this order.' }
+                        );
+                        if (ok) setPortfolioDraft(null);
+                      }}
+                      className="px-3 py-1.5 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                    >
+                      {portfolioBusy ? 'Saving...' : 'Save order'}
+                    </button>
+                    <button
+                      disabled={portfolioBusy}
+                      onClick={() => setPortfolioDraft(null)}
+                      className="px-3 py-1.5 bg-white border border-gray-200 text-sm rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {editMode && selectMode && (
+                <div className="mb-4 p-3 bg-gray-50 border border-gray-200 rounded-xl space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm text-gray-700">{selectedPaths.length} selected</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        list="portfolio-albums"
+                        value={bulkAlbum}
+                        onChange={(e) => setBulkAlbum(e.target.value)}
+                        placeholder="Album name"
+                        maxLength={60}
+                        className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                      />
+                      <button
+                        disabled={portfolioBusy || selectedPaths.length === 0}
+                        onClick={async () => {
+                          const album = bulkAlbum.trim();
+                          const nextMeta: PortfolioMeta = { ...portfolioMeta };
+                          for (const path of selectedPaths) {
+                            const current = nextMeta[path] || {};
+                            if (album) {
+                              nextMeta[path] = { ...current, album };
+                            } else {
+                              // An empty album name is how images come back out of one.
+                              const { album: _removed, ...rest } = current;
+                              nextMeta[path] = rest;
+                            }
+                          }
+                          const ok = await persistPortfolio(
+                            { images: displayOrder, meta: nextMeta },
+                            {
+                              title: album ? `Moved to ${album}` : 'Removed from album',
+                              body: `${selectedPaths.length} image${selectedPaths.length === 1 ? '' : 's'} updated.`,
+                            }
+                          );
+                          if (ok) {
+                            setPortfolioDraft(null);
+                            exitSelectMode();
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                      >
+                        {bulkAlbum.trim() ? 'Move to album' : 'Clear album'}
+                      </button>
+                      <button
+                        disabled={portfolioBusy || selectedPaths.length === 0}
+                        onClick={() => setBulkDeleteConfirm(true)}
+                        className="px-3 py-1.5 border border-red-200 text-red-600 text-sm rounded-lg hover:bg-red-50 disabled:opacity-50"
+                      >
+                        Remove
+                      </button>
+                      <button
+                        onClick={exitSelectMode}
+                        className="px-3 py-1.5 border border-gray-200 text-sm rounded-lg hover:bg-white"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+
+                  {bulkDeleteConfirm && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-red-50 border border-red-200 rounded-lg">
+                      <p className="text-sm text-red-800">
+                        Remove {selectedPaths.length} image{selectedPaths.length === 1 ? '' : 's'}? This cannot be undone.
+                      </p>
+                      <div className="flex gap-2">
                         <button
-                          onClick={() => portfolioFileRef.current?.click()}
-                          className="p-2 bg-white rounded-lg hover:bg-gray-100"
-                          title="Add more images"
+                          disabled={portfolioBusy}
+                          onClick={async () => {
+                            const removing = new Set(selectedPaths);
+                            const next = displayOrder.filter((img) => !removing.has(getStoredPath(img)));
+                            const ok = await persistPortfolio(
+                              { images: next },
+                              {
+                                title: 'Images removed',
+                                body: `${selectedPaths.length} image${selectedPaths.length === 1 ? '' : 's'} deleted.`,
+                              }
+                            );
+                            if (ok) {
+                              setPortfolioDraft(null);
+                              exitSelectMode();
+                            }
+                          }}
+                          className="px-3 py-1.5 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 disabled:opacity-50"
                         >
-                          <Upload className="w-5 h-5 text-gray-700" />
+                          {portfolioBusy ? 'Removing...' : 'Remove them'}
+                        </button>
+                        <button
+                          disabled={portfolioBusy}
+                          onClick={() => setBulkDeleteConfirm(false)}
+                          className="px-3 py-1.5 bg-white border border-gray-200 text-sm rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          Keep them
                         </button>
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Previously used album names become suggestions, so "Weddings" doesn't end
+                  up alongside "weddings" and "Wedding". */}
+              <datalist id="portfolio-albums">
+                {albumNames.map((album) => (
+                  <option key={album} value={album} />
                 ))}
-                <button
-                  onClick={() => { if (editMode) portfolioFileRef.current?.click(); }}
-                  disabled={!editMode || uploadingPortfolio}
-                  title={editMode ? 'Add images' : 'Click "Edit Profile" to add images'}
-                  className="aspect-square border-2 border-dashed border-gray-300 rounded-xl hover:border-purple-500 hover:bg-purple-50 transition-all flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Plus className="w-8 h-8 text-gray-400" />
-                </button>
+              </datalist>
+
+              <div
+                onDragOver={(e) => {
+                  // Only react to files coming in from outside; a tile being dragged
+                  // within the grid carries no Files entry.
+                  if (!editMode || uploadingPortfolio) return;
+                  if (!Array.from(e.dataTransfer.types || []).includes('Files')) return;
+                  e.preventDefault();
+                  setIsDraggingFiles(true);
+                }}
+                onDragLeave={(e) => {
+                  // Moving between two tiles fires dragleave on the container; ignore it
+                  // unless the pointer has genuinely left the grid.
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                  setIsDraggingFiles(false);
+                }}
+                onDrop={async (e) => {
+                  if (!editMode || uploadingPortfolio) return;
+                  const files = Array.from(e.dataTransfer.files || []);
+                  if (files.length === 0) return;
+                  e.preventDefault();
+                  setIsDraggingFiles(false);
+                  await uploadPortfolioFiles(files, portfolioSlotsLeft);
+                }}
+                className={`portfolio-grid ${isDraggingFiles ? 'portfolio-grid--dropping' : ''}`}
+              >
+                {displayOrder.map((image: string, index: number) => {
+                  const meta = metaFor(image);
+                  const selected = isSelected(image);
+                  return (
+                    <div
+                      // Keyed by path, not position: during a drag the positions change on
+                      // every dragenter, and an index key would tear down the very element
+                      // being dragged.
+                      key={getStoredPath(image)}
+                      className={`portfolio-tile ${dragIndex === index ? 'portfolio-tile--dragging' : ''} ${
+                        selected ? 'portfolio-tile--selected' : ''
+                      }`}
+                      draggable={editMode && !selectMode && !portfolioBusy}
+                      onDragStart={(e) => {
+                        setDragIndex(index);
+                        e.dataTransfer.effectAllowed = 'move';
+                        // Firefox ignores a drag that carries no data at all.
+                        e.dataTransfer.setData('text/plain', String(index));
+                      }}
+                      onDragEnter={() => {
+                        // Reorder as the pointer passes over each tile, so the grid shows
+                        // the result before the drop rather than after it.
+                        if (dragIndex === null || dragIndex === index) return;
+                        moveImage(dragIndex, index);
+                        setDragIndex(index);
+                      }}
+                      onDragOver={(e) => {
+                        if (dragIndex !== null) e.preventDefault();
+                      }}
+                      onDragEnd={() => setDragIndex(null)}
+                      onDrop={() => setDragIndex(null)}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => (selectMode ? toggleSelected(image) : openImageDetail(index))}
+                        className="portfolio-tile-image"
+                        title={selectMode ? 'Select this item' : 'View and label this item'}
+                      >
+                        <PortfolioThumbnail
+                          path={image}
+                          meta={meta}
+                          alt={meta.caption || `Portfolio item ${index + 1}`}
+                        />
+                      </button>
+
+                      {selectMode && (
+                        <span
+                          className={`portfolio-check ${selected ? 'portfolio-check--on' : ''}`}
+                        >
+                          {selected && <CheckCircle className="w-4 h-4" />}
+                        </span>
+                      )}
+
+                      {!selectMode && index === 0 && (
+                        <span className="portfolio-badge portfolio-badge--cover">
+                          Cover
+                        </span>
+                      )}
+
+                      {!selectMode && meta.album && (
+                        <span className="portfolio-badge portfolio-badge--album">
+                          {meta.album}
+                        </span>
+                      )}
+
+                      {/* Removal is confirmed in place. The old single-click X was both
+                          irreversible and, because a full-size hover overlay was painted
+                          over it, usually unclickable anyway. */}
+                      {editMode && !selectMode && portfolioPendingDelete === index ? (
+                        <div className="portfolio-confirm">
+                          <p className="text-white text-xs">Remove this image?</p>
+                          <div className="flex gap-2">
+                            <button
+                              disabled={portfolioBusy}
+                              onClick={async () => {
+                                const next = displayOrder.filter((_, i) => i !== index);
+                                const ok = await persistPortfolio(
+                                  { images: next },
+                                  {
+                                    title: 'Image removed',
+                                    body: 'It no longer appears on your public profile.',
+                                  }
+                                );
+                                if (ok) {
+                                  setPortfolioDraft(null);
+                                  setPortfolioPendingDelete(null);
+                                }
+                              }}
+                              className="px-2 py-1 bg-red-600 text-white text-xs rounded-md hover:bg-red-700 disabled:opacity-50"
+                            >
+                              {portfolioBusy ? 'Removing...' : 'Remove'}
+                            </button>
+                            <button
+                              disabled={portfolioBusy}
+                              onClick={() => setPortfolioPendingDelete(null)}
+                              className="px-2 py-1 bg-white text-gray-700 text-xs rounded-md hover:bg-gray-100 disabled:opacity-50"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : editMode && !selectMode && (
+                        // A bar along the bottom edge only - it can't cover the image or
+                        // the badges above it, and it stays visible while focused so every
+                        // action is reachable by keyboard as well as by mouse.
+                        <div className="portfolio-actions">
+                          <button
+                            disabled={portfolioBusy || index === 0}
+                            onClick={() => moveImage(index, index - 1)}
+                            className="portfolio-action"
+                            title="Move earlier"
+                            aria-label={`Move image ${index + 1} earlier`}
+                          >
+                            <ChevronLeft className="w-4 h-4 text-gray-700" />
+                          </button>
+                          <button
+                            disabled={portfolioBusy || index === displayOrder.length - 1}
+                            onClick={() => moveImage(index, index + 1)}
+                            className="portfolio-action"
+                            title="Move later"
+                            aria-label={`Move image ${index + 1} later`}
+                          >
+                            <ChevronRight className="w-4 h-4 text-gray-700" />
+                          </button>
+                          <button
+                            disabled={portfolioBusy}
+                            onClick={() => openImageDetail(index)}
+                            className="portfolio-action"
+                            title="Caption and album"
+                            aria-label={`Edit details for image ${index + 1}`}
+                          >
+                            <Edit className="w-4 h-4 text-gray-700" />
+                          </button>
+                          <button
+                            disabled={portfolioBusy}
+                            onClick={() => setPortfolioPendingDelete(index)}
+                            className="portfolio-action"
+                            title="Remove image"
+                            aria-label={`Remove portfolio image ${index + 1}`}
+                          >
+                            <XCircle className="w-4 h-4 text-red-600" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {portfolioSlotsLeft > 0 && !selectMode && (
+                  <button
+                    onClick={() => { if (editMode) portfolioFileRef.current?.click(); }}
+                    disabled={!editMode || uploadingPortfolio}
+                    title={editMode ? 'Add images' : 'Click "Edit Profile" to add images'}
+                    className="aspect-square border-2 border-dashed border-gray-300 rounded-xl hover:border-purple-500 hover:bg-purple-50 transition-all flex flex-col items-center justify-center gap-1 px-2 text-center disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Plus className="w-8 h-8 text-gray-400" />
+                    <span className="text-xs text-gray-400">
+                      {editMode ? 'Drop photos or video' : `${portfolioSlotsLeft} left`}
+                    </span>
+                  </button>
+                )}
               </div>
+
+              {portfolioImages.length === 0 && (
+                <p className="text-sm text-gray-500 mt-4">
+                  Clients browse your portfolio before they book. Add a few of your best
+                  shots - the first one becomes the cover photo on your public profile, and
+                  you can group the rest into albums.
+                </p>
+              )}
             </div>
 
             {/* Pricing & Packages */}
@@ -2354,6 +2976,129 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
             toast.success('Evidence submitted', 'Awaiting client confirmation. They have 48 hours to respond.');
           }}
         />
+      )}
+
+      {/* Full-size view of one portfolio item, and where it gets labelled */}
+      {previewOpen && (
+        <div className="modal-lightbox" {...previewOverlayProps}>
+          <button
+            onClick={() => setPortfolioPreview(null)}
+            className="modal-lightbox-close w-10 h-10 rounded-full flex items-center justify-center"
+            aria-label="Close preview"
+          >
+            <X className="w-6 h-6 text-white" />
+          </button>
+
+          <div
+            {...previewCardProps}
+            className="flex flex-col items-center gap-4 w-full"
+          >
+            <div className="portfolio-detail-media">
+              <PortfolioPlayer
+                path={previewImage}
+                meta={metaFor(previewImage)}
+                alt={metaFor(previewImage).caption || `Portfolio item ${portfolioPreview! + 1}`}
+              />
+            </div>
+
+            {editMode ? (
+              <div className="portfolio-detail space-y-3">
+                <div>
+                  <label htmlFor="portfolio-caption" className="block text-sm text-gray-700 mb-1">
+                    Caption
+                  </label>
+                  <input
+                    id="portfolio-caption"
+                    value={detailDraft.caption}
+                    onChange={(e) => setDetailDraft((d) => ({ ...d, caption: e.target.value }))}
+                    maxLength={140}
+                    placeholder="e.g. Golden hour at Nasugbu"
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">{detailDraft.caption.length}/140</p>
+                </div>
+
+                <div>
+                  <label htmlFor="portfolio-album" className="block text-sm text-gray-700 mb-1">
+                    Album
+                  </label>
+                  <input
+                    id="portfolio-album"
+                    list="portfolio-albums"
+                    value={detailDraft.album}
+                    onChange={(e) => setDetailDraft((d) => ({ ...d, album: e.target.value }))}
+                    maxLength={60}
+                    placeholder="e.g. Weddings"
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">
+                    Clients can filter your portfolio by album. Leave blank to keep it ungrouped.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    disabled={portfolioBusy}
+                    onClick={async () => {
+                      const path = getStoredPath(previewImage);
+                      const caption = detailDraft.caption.trim();
+                      const album = detailDraft.album.trim();
+                      const nextMeta: PortfolioMeta = { ...portfolioMeta };
+                      if (caption || album) {
+                        nextMeta[path] = {
+                          ...(caption ? { caption } : {}),
+                          ...(album ? { album } : {}),
+                        };
+                      } else {
+                        delete nextMeta[path];
+                      }
+                      const ok = await persistPortfolio(
+                        { meta: nextMeta },
+                        { title: 'Details saved', body: 'This image is labelled on your public profile.' }
+                      );
+                      if (ok) setPortfolioPreview(null);
+                    }}
+                    className="px-4 py-2 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                  >
+                    {portfolioBusy ? 'Saving...' : 'Save details'}
+                  </button>
+
+                  {portfolioPreview !== 0 && (
+                    <button
+                      disabled={portfolioBusy}
+                      onClick={() => {
+                        // Staged like every other rearrangement, so it is saved with the
+                        // rest of the order rather than as its own separate write.
+                        moveImage(portfolioPreview!, 0);
+                        setPortfolioPreview(null);
+                      }}
+                      className="px-4 py-2 border border-gray-200 text-sm rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Make cover photo
+                    </button>
+                  )}
+
+                  <button
+                    disabled={portfolioBusy}
+                    onClick={() => setPortfolioPreview(null)}
+                    className="px-4 py-2 border border-gray-200 text-sm rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              (metaFor(previewImage).caption || metaFor(previewImage).album) && (
+                <div className="portfolio-lightbox-caption">
+                  {metaFor(previewImage).caption && <p>{metaFor(previewImage).caption}</p>}
+                  {metaFor(previewImage).album && (
+                    <span>{metaFor(previewImage).album}</span>
+                  )}
+                </div>
+              )
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

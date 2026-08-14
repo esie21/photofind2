@@ -52,6 +52,27 @@ export function getUploadUrl(filePath: string | null | undefined): string {
   return `${STATIC_BASE_URL}/${cleanPath}`;
 }
 
+/**
+ * The inverse of getUploadUrl: turns any stored or display form of an upload back into
+ * the bare path the database holds ("users/<id>/portfolio/123.jpg").
+ *
+ * Mirrors normaliseStoredPath in backend/src/routes/users.ts. Needed because
+ * portfolio_meta is keyed by the stored path, while the image list a client is holding
+ * may be a display URL - looking metadata up with the wrong one silently finds nothing.
+ */
+export function getStoredPath(filePath: string | null | undefined): string {
+  let v = String(filePath ?? '').trim();
+  if (!v) return '';
+  if (/^https?:\/\//i.test(v)) {
+    const at = v.indexOf('/uploads/');
+    if (at === -1) return v; // genuinely external
+    v = v.slice(at);
+  }
+  v = v.replace(/^\/+/, '');
+  while (/^uploads\//i.test(v)) v = v.replace(/^uploads\//i, '');
+  return v;
+}
+
 export const API_CONFIG = {
   BASE_URL: API_BASE,
   DIRECT_UPLOAD_URL: DIRECT_BACKEND_URL,
@@ -75,6 +96,7 @@ export const API_CONFIG = {
       DELETE: (id: string) => `/users/${id}`,
       UPLOAD_PROFILE: (id: string) => `/users/${id}/upload/profile`,
       UPLOAD_PORTFOLIO: (id: string) => `/users/${id}/upload/portfolio`,
+      UPLOAD_PORTFOLIO_PREVIEW: (id: string) => `/users/${id}/upload/portfolio-preview`,
       UPLOAD_VERIFICATION: (id: string) => `/users/${id}/upload/verification`,
     },
     // Providers endpoints

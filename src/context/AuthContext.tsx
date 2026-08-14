@@ -9,6 +9,15 @@ interface AuthContextProps {
   loginWithGoogle: (data: { credential: string; role?: 'client' | 'provider'; intent: 'login' | 'signup'; termsAccepted?: boolean }) => Promise<{ user?: User; needsRole?: boolean; profile?: { email: string; name: string; picture?: string | null } }>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<User | null>;
+  /**
+   * Replaces the signed-in user with one the caller already has in hand.
+   *
+   * Endpoints that mutate the profile return the full updated row, so calling
+   * refreshUser() afterwards spends a second round trip re-fetching what the first
+   * response already contained - noticeable on the portfolio editor, where every
+   * reorder, caption and deletion paid for it.
+   */
+  applyUser: (user: User) => void;
 }
 
 const AuthContext = createContext<AuthContextProps | undefined>(undefined);
@@ -92,7 +101,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, signup, loginWithGoogle, logout, refreshUser }}>
+    <AuthContext.Provider
+      value={{ user, token, login, signup, loginWithGoogle, logout, refreshUser, applyUser: setUser }}
+    >
       {children}
     </AuthContext.Provider>
   );

@@ -375,7 +375,7 @@ router.get('/me', async (req: Request, res: Response) => {
     );
 
     const result = await pool.query(
-      'SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents FROM users WHERE id = $1',
+      'SELECT id, email, name, role, profile_image, portfolio_images, portfolio_meta, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents FROM users WHERE id = $1',
       [decoded.userId]
     );
 
