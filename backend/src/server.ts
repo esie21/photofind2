@@ -147,12 +147,28 @@ if (process.env.NODE_ENV !== 'production') {
 //
 // Uploads are user-supplied bytes, so they are served inert: nosniff stops the browser
 // second-guessing the declared type, the CSP neuters any markup that does get rendered,
-// and anything that isn't a plain image is sent as a download rather than displayed.
+// and anything that isn't plain media is sent as a download rather than displayed.
 // Upload validation should already prevent such a file existing - this is the backstop.
-const INLINE_SAFE_TYPES = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
+//
+// Video extensions belong here for the same reason images do: a portfolio video has to
+// play in a <video> tag, and Content-Disposition: attachment would make the browser
+// download the file instead. They are no more executable than a JPEG, and nosniff plus
+// the sandbox CSP still apply. express.static answers Range requests on its own, so
+// seeking and streaming work without anything further.
+const INLINE_SAFE_TYPES = new Set([
+  '.jpg', '.jpeg', '.png', '.gif', '.webp',
+  '.mp4', '.webm', '.mov',
+]);
 app.use(
   '/uploads',
   express.static(path.resolve(__dirname, '../../uploads'), {
+    // Uploaded files are immutable: every filename is a timestamp plus a random
+    // component, generated once, and an edited photo is written as a new file rather
+    // than over the old one. Without this, express.static defaults to no-cache, so a
+    // profile with 24 portfolio items cost 24 conditional requests on every single
+    // view - a full round trip each, just to be told nothing had changed.
+    maxAge: '1y',
+    immutable: true,
     setHeaders: (res, filePath) => {
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");

@@ -11,11 +11,14 @@ import {
   safeSegment,
   resolveInsideRoot,
   generateFilename,
+  MAX_VIDEO_SIZE,
   imageFileFilter,
+  mediaFileFilter,
   documentFileFilter,
   deleteUploadSafe,
   discardUploads,
   verifyUploadedContent,
+  enforceMediaSizeLimits,
   handleUpload,
 } from '../services/uploadService';
 const router = Router();
@@ -28,6 +31,34 @@ const router = Router();
 
 const MAX_PORTFOLIO_FILES = 24;
 const MAX_VERIFICATION_FILES = 5;
+const MAX_CAPTION_LENGTH = 140;
+const MAX_ALBUM_LENGTH = 60;
+
+/**
+ * Per-item portfolio metadata, keyed by the stored path. See users.portfolio_meta.
+ *
+ * caption and album are the provider's to edit. Everything else describes the file -
+ * a video's poster and duration, a photo's gallery thumbnail, the original's intrinsic
+ * dimensions - and is written only by the preview endpoint. PUT /users/:id carries
+ * those through untouched rather than accepting them from the client.
+ */
+interface PortfolioEntry {
+  caption?: string;
+  album?: string;
+  poster?: string;
+  duration?: number;
+  thumb?: string;
+  width?: number;
+  height?: number;
+}
+
+type PortfolioMeta = Record<string, PortfolioEntry>;
+
+// Every SELECT that returns a user to the owner or an admin. Kept in one place because
+// there are five of them, and a column added to only four is how a field ends up
+// mysteriously undefined on exactly one screen.
+const USER_COLUMNS =
+  'id, email, name, role, profile_image, portfolio_images, portfolio_meta, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents';
 
 // Stored image paths are relative to the uploads root ("users/<id>/avatar/x.png").
 // Clients that post back a *display* URL instead ("/uploads/users/...") used to have it
@@ -83,11 +114,34 @@ const makeUserStorage = (folderOf: (file: Express.Multer.File) => string, prefix
     },
   });
 
+// A profile photo is an image and nothing else, so it keeps the strict filter and the
+// small ceiling. The portfolio is the only place video is accepted.
 const upload = multer({
-  storage: makeUserStorage(file => (file.fieldname === 'profile' ? 'avatar' : 'portfolio'), ''),
+  storage: makeUserStorage(() => 'avatar', ''),
   fileFilter: imageFileFilter,
-  limits: { fileSize: MAX_FILE_SIZE, files: MAX_PORTFOLIO_FILES },
+  limits: { fileSize: MAX_FILE_SIZE, files: 1 },
 });
+
+const uploadPortfolio = multer({
+  storage: makeUserStorage(() => 'portfolio', ''),
+  fileFilter: mediaFileFilter,
+  // The larger of the two limits, because multer only takes one; enforceMediaSizeLimits
+  // then holds images to MAX_FILE_SIZE.
+  limits: { fileSize: MAX_VIDEO_SIZE, files: MAX_PORTFOLIO_FILES },
+});
+
+// Previews - a video's poster frame, a photo's gallery thumbnail - are generated in the
+// browser and uploaded separately, because there is neither ffmpeg nor an image library
+// in this stack to derive them here.
+const uploadPreview = multer({
+  storage: makeUserStorage(() => 'previews', 'preview-'),
+  fileFilter: imageFileFilter,
+  limits: { fileSize: MAX_FILE_SIZE, files: 1 },
+});
+
+const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov'];
+export const isVideoPath = (value: string) =>
+  VIDEO_EXTENSIONS.includes(path.extname(String(value || '')).toLowerCase());
 
 const uploadVerification = multer({
   storage: makeUserStorage(() => 'verification', 'doc-'),
@@ -98,7 +152,7 @@ const uploadVerification = multer({
 // Get all users - admin only
 router.get('/', verifyToken, checkRole('admin'), async (req: Request, res: Response) => {
   try {
-    const result = await pool.query('SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, title, is_verified, verification_status, created_at FROM users');
+    const result = await pool.query(`SELECT ${USER_COLUMNS}, created_at FROM users`);
     res.json(result.rows);
   } catch (error) {
     console.error('Get users error:', error);
@@ -115,7 +169,7 @@ router.get('/:id', verifyToken, async (req: any, res: Response) => {
       return res.status(403).json({ error: 'Insufficient permissions', debug: process.env.NODE_ENV !== 'production' ? { reqUserId: req.userId, targetId: userId, role: req.role } : undefined });
     }
 
-    const result = await pool.query('SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents, created_at FROM users WHERE id = $1', [userId]);
+    const result = await pool.query(`SELECT ${USER_COLUMNS}, created_at FROM users WHERE id = $1`, [userId]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -135,8 +189,7 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
-    const { name, bio, years_experience, location, category, title, profile_image, portfolio_images } = req.body;
-    console.log('Update user payload', { reqUserId: req.userId, targetId: userId, payload: { name, bio, years_experience, location, category, title, profile_image, portfolio_images } });
+    const { name, bio, years_experience, location, category, title, profile_image, portfolio_images, portfolio_meta } = req.body;
 
     // Validate before touching the database. Without this, values that simply don't fit
     // the column (a name over 100 chars, a location over 255, a years_experience outside
@@ -174,6 +227,98 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
       return res.status(400).json({ error: 'portfolio_images must be an array' });
     }
 
+    // Captions and albums arrive as a path -> { caption, album } map. Validate every
+    // entry rather than trusting the shape: this lands in a JSONB column that both the
+    // dashboard and the public profile render.
+    let incomingMeta: PortfolioMeta | undefined;
+    if (portfolio_meta !== undefined && portfolio_meta !== null) {
+      if (typeof portfolio_meta !== 'object' || Array.isArray(portfolio_meta)) {
+        return res.status(400).json({ error: 'portfolio_meta must be an object' });
+      }
+      const entries = Object.entries(portfolio_meta as Record<string, any>);
+      if (entries.length > MAX_PORTFOLIO_FILES) {
+        return res.status(400).json({ error: `portfolio_meta cannot describe more than ${MAX_PORTFOLIO_FILES} images` });
+      }
+      incomingMeta = {};
+      for (const [key, value] of entries) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return res.status(400).json({ error: 'Each portfolio_meta entry must be an object' });
+        }
+        const caption = value.caption == null ? '' : String(value.caption).trim();
+        const album = value.album == null ? '' : String(value.album).trim();
+        if (caption.length > MAX_CAPTION_LENGTH) {
+          return res.status(400).json({ error: `Captions must be ${MAX_CAPTION_LENGTH} characters or fewer` });
+        }
+        if (album.length > MAX_ALBUM_LENGTH) {
+          return res.status(400).json({ error: `Album names must be ${MAX_ALBUM_LENGTH} characters or fewer` });
+        }
+        // An entry with neither is just noise - don't persist it.
+        if (!caption && !album) continue;
+        incomingMeta[normaliseStoredPath(key)] = {
+          ...(caption ? { caption } : {}),
+          ...(album ? { album } : {}),
+        };
+      }
+    }
+
+    // Read the current portfolio up front. It is needed for knowing which files are
+    // about to become orphans, for keeping metadata in step with the items that still
+    // exist, and for carrying poster frames through - all before the UPDATE is built.
+    let droppedImages: string[] = [];
+    let droppedPosters: string[] = [];
+    let metaToWrite: PortfolioMeta | undefined;
+
+    if (Array.isArray(portfolio_images) || incomingMeta !== undefined) {
+      const before = await pool.query(
+        'SELECT portfolio_images, portfolio_meta FROM users WHERE id = $1',
+        [userId]
+      );
+      const previousImages: string[] = before.rows[0]?.portfolio_images || [];
+      const previousMeta: PortfolioMeta = before.rows[0]?.portfolio_meta || {};
+
+      // Whether the client sent metadata or not, what gets stored is pruned to the items
+      // that remain. Otherwise a caption for a deleted photo would sit in the column
+      // indefinitely and reattach itself if that path were ever reused.
+      const source: PortfolioMeta = incomingMeta ?? previousMeta;
+      const keeping = Array.isArray(portfolio_images)
+        ? new Set(portfolio_images.map((v: any) => normaliseStoredPath(v)))
+        : null;
+
+      metaToWrite = {};
+      const paths = new Set([...Object.keys(source), ...Object.keys(previousMeta)]);
+      for (const key of paths) {
+        const path = normaliseStoredPath(key);
+        if (keeping && !keeping.has(path)) continue;
+
+        const submitted = source[key] || source[path] || {};
+        const held = previousMeta[key] || previousMeta[path] || {};
+        const entry: PortfolioEntry = {
+          ...(submitted.caption ? { caption: submitted.caption } : {}),
+          ...(submitted.album ? { album: submitted.album } : {}),
+          // Everything below is written by the preview endpoint, which validates the file
+          // and the path it belongs to. A profile save must not be able to set, change
+          // or - as it previously would have - silently drop them.
+          ...(held.poster ? { poster: held.poster } : {}),
+          ...(held.duration ? { duration: held.duration } : {}),
+          ...(held.thumb ? { thumb: held.thumb } : {}),
+          ...(held.width && held.height ? { width: held.width, height: held.height } : {}),
+        };
+        if (Object.keys(entry).length > 0) metaToWrite[path] = entry;
+      }
+
+      if (Array.isArray(portfolio_images)) {
+        // Removing an item used to only rewrite this column, leaving the file on disk
+        // forever - uploads grew but never shrank.
+        droppedImages = previousImages.filter(img => !keeping!.has(normaliseStoredPath(img)));
+        // A removed item's derived files - poster frame, thumbnail - are just as
+        // orphaned as the original.
+        droppedPosters = droppedImages.flatMap((img) => {
+          const held = previousMeta[normaliseStoredPath(img)] || {};
+          return [held.poster, held.thumb].filter((p): p is string => !!p);
+        });
+      }
+    }
+
     // Build dynamic update
     const updates = [] as string[];
     const values: any[] = [];
@@ -208,6 +353,10 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
         Array.isArray(portfolio_images) ? portfolio_images.map(normaliseStoredPath) : portfolio_images
       );
     }
+    if (metaToWrite !== undefined) {
+      updates.push(`portfolio_meta = $${idx++}`);
+      values.push(JSON.stringify(metaToWrite));
+    }
     if (category !== undefined) {
       updates.push(`category = $${idx++}`);
       values.push(category === null ? null : String(category).trim());
@@ -221,25 +370,12 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
       return res.status(400).json({ error: 'No updates provided' });
     }
 
-    const sql = `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${idx} RETURNING id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents`;
+    const sql = `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${idx} RETURNING ${USER_COLUMNS}`;
     values.push(userId);
 
-    // Note which portfolio images are about to disappear from the array, so their files
-    // can be removed too. Removing an image used to only rewrite this column, leaving the
-    // file on disk forever - uploads grew but never shrank.
-    let droppedImages: string[] = [];
-    if (Array.isArray(portfolio_images)) {
-      const before = await pool.query('SELECT portfolio_images FROM users WHERE id = $1', [userId]);
-      const previous: string[] = before.rows[0]?.portfolio_images || [];
-      const keeping = new Set(portfolio_images.map((v: any) => String(v)));
-      droppedImages = previous.filter(img => !keeping.has(String(img)));
-    }
-
-    console.log('Executing SQL', { sql, values });
     const result = await pool.query(sql, values);
-    console.log('SQL result for update', result.rows[0]);
 
-    for (const img of droppedImages) {
+    for (const img of [...droppedImages, ...droppedPosters]) {
       try {
         deleteUploadSafe(resolveInsideRoot(UPLOADS_ROOT, img));
       } catch {
@@ -310,7 +446,7 @@ router.post('/:id/upload/profile',
     );
 
     const result = await pool.query(
-      'SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents FROM users WHERE id = $1',
+      `SELECT ${USER_COLUMNS} FROM users WHERE id = $1`,
       [userId]
     );
 
@@ -327,8 +463,9 @@ router.post('/:id/upload/profile',
 router.post('/:id/upload/portfolio',
   verifyToken,
   requireSelfOrAdmin,
-  handleUpload(upload.array('images', MAX_PORTFOLIO_FILES)),
+  handleUpload(uploadPortfolio.array('images', MAX_PORTFOLIO_FILES)),
   verifyUploadedContent,
+  enforceMediaSizeLimits,
   async (req: any, res: Response) => {
   try {
     const userId = req.params.id;
@@ -362,13 +499,109 @@ router.post('/:id/upload/portfolio',
 
     await pool.query('UPDATE users SET portfolio_images = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newArr, userId]);
 
-    const result = await pool.query('SELECT id, email, name, role, profile_image, portfolio_images, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents FROM users WHERE id = $1', [userId]);
+    const result = await pool.query(`SELECT ${USER_COLUMNS} FROM users WHERE id = $1`, [userId]);
 
     console.log('Portfolio images uploaded:', urls.length, 'files');
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Upload portfolio error', err);
     res.status(500).json({ error: 'Failed to upload portfolio images' });
+  }
+});
+
+// Derived preview image for a portfolio item: a video's poster frame, or a photo's
+// gallery-sized thumbnail.
+//
+// Both are produced in the browser - there is no image or video library in this backend
+// - and both are sent as their own request naming the item they belong to. Riding along
+// with the original upload and pairing by position would silently attach the wrong
+// preview to the wrong item the moment one file failed its checks.
+router.post('/:id/upload/portfolio-preview',
+  verifyToken,
+  requireSelfOrAdmin,
+  handleUpload(uploadPreview.single('preview')),
+  verifyUploadedContent,
+  async (req: any, res: Response) => {
+  try {
+    const userId = req.params.id;
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No preview uploaded' });
+    }
+
+    const kind = String(req.body?.kind || '');
+    if (kind !== 'poster' && kind !== 'thumb') {
+      discardUploads(req);
+      return res.status(400).json({ error: "kind must be 'poster' or 'thumb'" });
+    }
+
+    const target = normaliseStoredPath(req.body?.target);
+    if (!target) {
+      discardUploads(req);
+      return res.status(400).json({ error: 'Which portfolio item this belongs to must be given' });
+    }
+
+    const existing = await pool.query(
+      'SELECT portfolio_images, portfolio_meta FROM users WHERE id = $1',
+      [userId]
+    );
+    const images: string[] = existing.rows[0]?.portfolio_images || [];
+
+    // The target has to be one of this user's own portfolio entries. Without the check,
+    // any authenticated user could write an arbitrary path into their metadata and have
+    // it rendered against their profile.
+    if (!images.some((img) => normaliseStoredPath(img) === target)) {
+      discardUploads(req);
+      return res.status(404).json({ error: 'That item is not in your portfolio' });
+    }
+    if (kind === 'poster' && !isVideoPath(target)) {
+      discardUploads(req);
+      return res.status(400).json({ error: 'Only videos have poster frames' });
+    }
+
+    const meta: PortfolioMeta = existing.rows[0]?.portfolio_meta || {};
+    const entry = meta[target] || {};
+    const replaced = kind === 'poster' ? entry.poster : entry.thumb;
+
+    // Duration and dimensions are only ever used for a badge and for reserving layout
+    // space, but they still come off the wire, so they are range-checked rather than
+    // stored as given.
+    const inRange = (value: unknown, max: number) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0 && n < max ? Math.round(n) : undefined;
+    };
+    const duration = inRange(req.body?.duration, 86400);
+    const width = inRange(req.body?.width, 100000);
+    const height = inRange(req.body?.height, 100000);
+
+    const storedPath = `users/${userId}/previews/${req.file.filename}`;
+    meta[target] = {
+      ...entry,
+      ...(kind === 'poster' ? { poster: storedPath } : { thumb: storedPath }),
+      ...(duration ? { duration } : {}),
+      ...(width && height ? { width, height } : {}),
+    };
+
+    await pool.query(
+      'UPDATE users SET portfolio_meta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [JSON.stringify(meta), userId]
+    );
+
+    // Replacing a preview leaves the old file on disk otherwise.
+    if (replaced && replaced !== storedPath) {
+      try {
+        deleteUploadSafe(resolveInsideRoot(UPLOADS_ROOT, replaced));
+      } catch {
+        console.warn('Refusing to delete a stored path outside uploads:', replaced);
+      }
+    }
+
+    const result = await pool.query(`SELECT ${USER_COLUMNS} FROM users WHERE id = $1`, [userId]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Upload portfolio preview error', err);
+    discardUploads(req);
+    res.status(500).json({ error: 'Failed to upload preview image' });
   }
 });
 

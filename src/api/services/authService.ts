@@ -31,6 +31,26 @@ export interface GoogleAuthResponse extends AuthResponse {
   };
 }
 
+/**
+ * Per-image portfolio metadata, keyed by the image's stored path (use getStoredPath()
+ * from api/config to derive the key from whatever form of the path you are holding).
+ */
+export interface PortfolioImageMeta {
+  caption?: string;
+  album?: string;
+  /** Video only: stored path of the still frame shown before it plays. */
+  poster?: string;
+  /** Video only: length in seconds. */
+  duration?: number;
+  /** Photo only: stored path of the small copy the galleries render. */
+  thumb?: string;
+  /** Intrinsic size of the original, so a gallery can reserve its space before it loads. */
+  width?: number;
+  height?: number;
+}
+
+export type PortfolioMeta = Record<string, PortfolioImageMeta>;
+
 export interface User {
   id: string;
   email: string;
@@ -39,6 +59,8 @@ export interface User {
   createdAt?: string;
   profile_image?: string;
   portfolio_images?: string[];
+  /** Caption/album for each portfolio image, keyed by its stored path. */
+  portfolio_meta?: PortfolioMeta;
   bio?: string;
   years_experience?: number;
   location?: string;

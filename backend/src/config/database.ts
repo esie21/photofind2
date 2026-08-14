@@ -83,6 +83,12 @@ export async function initializeTables() {
     // Ensure new columns exist (safe for existing DBs)
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_images TEXT[] DEFAULT '{}'::text[];`);
+    // Per-image caption and album, keyed by the stored image path:
+    //   { "users/<id>/portfolio/123.jpg": { "caption": "...", "album": "Weddings" } }
+    // Keyed by path rather than by index so it survives reordering and removal, and
+    // deliberately separate from portfolio_images, which stays the single source of
+    // truth for what exists and in what order. Rows with no metadata just have '{}'.
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_meta JSONB DEFAULT '{}'::jsonb;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS years_experience INTEGER DEFAULT 0;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);`);
