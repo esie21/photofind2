@@ -4,6 +4,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { testConnection, initializeTables } from './config/database';
 import { pool } from './config/database';
+import { JWT_SECRET } from './config/authConfig';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
 import debugRoutes from './routes/debug';
@@ -137,8 +138,11 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/reviews', reviewsRoutes);
 app.use('/api/support', supportRoutes);
 
-// Register debug routes only in non-production
-if (process.env.NODE_ENV !== 'production') {
+// Register debug routes only when explicitly running in development. Opt-in, not
+// `!== 'production'`: these routes are unauthenticated and one of them rewrites any
+// account's password from its email alone, so an environment that never sets NODE_ENV
+// must not get them. See routes/debug.ts.
+if (process.env.NODE_ENV === 'development') {
   app.use('/api/debug', debugRoutes);
 }
 
@@ -278,7 +282,7 @@ io.use((socket: Socket, next: (err?: Error) => void) => {
   if (!token) return next(new Error('Unauthorized'));
 
   try {
-    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'your_secret_key');
+    const decoded: any = jwt.verify(token, JWT_SECRET);
     (socket.data as any).userId = String(decoded.userId);
     next();
   } catch (_e) {

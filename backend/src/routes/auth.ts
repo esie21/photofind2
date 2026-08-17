@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { isValidEmail, isStrongPassword, setSecureCookie, clearSecureCookie, logSecurityEvent, passwordResetLimiter, loginLimiter } from '../middleware/security';
 import { verifyToken } from '../middleware/auth';
+import { JWT_SECRET } from '../config/authConfig';
 
 const router = Router();
 
@@ -60,7 +61,7 @@ function issueAuthToken(user: { id: string; role: string }) {
       role: user.role,
       iat: Math.floor(Date.now() / 1000),
     },
-    process.env.JWT_SECRET || 'your_secret_key',
+    JWT_SECRET,
     {
       expiresIn: '24h',
       algorithm: 'HS256',
@@ -159,7 +160,7 @@ router.post('/login', loginLimiter, async (req: AuthRequest, res: Response) => {
         role: user.role,
         iat: Math.floor(Date.now() / 1000),
       },
-      process.env.JWT_SECRET || 'your_secret_key',
+      JWT_SECRET,
       {
         expiresIn: '24h',
         algorithm: 'HS256',
@@ -387,7 +388,7 @@ router.post('/signup', async (req: AuthRequest, res: Response) => {
         role: user.role,
         iat: Math.floor(Date.now() / 1000),
       },
-      process.env.JWT_SECRET || 'your_secret_key',
+      JWT_SECRET,
       {
         expiresIn: '24h',
         algorithm: 'HS256',
@@ -423,7 +424,7 @@ router.get('/me', async (req: Request, res: Response) => {
     const token = authHeader.split(' ')[1];
     const decoded: any = jwt.verify(
       token,
-      process.env.JWT_SECRET || 'your_secret_key'
+      JWT_SECRET
     );
 
     const result = await pool.query(
