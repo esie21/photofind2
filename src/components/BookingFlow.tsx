@@ -444,9 +444,14 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
 
   // Pricing based on booking type selection
   const isHourlyPricing = bookingType === 'hourly';
+  // Both branches fall back to the flat `price` column, same as the package branch
+  // already did. A service whose specific hourly_rate/package_price came back empty -
+  // a stale row from before the backend wrote those columns correctly, or any other gap
+  // between what's configured and what loaded - should charge whatever price the service
+  // does have, not silently charge nothing for an hour of a provider's time.
   const basePrice = selectedServiceData
     ? (bookingType === 'hourly'
-        ? (selectedServiceData.hourly_rate || 0)
+        ? (selectedServiceData.hourly_rate || selectedServiceData.price || 0)
         : (selectedServiceData.package_price || selectedServiceData.price || 0))
     : 0;
   const packageDurationMinutes = selectedServiceData?.duration_minutes || 0;

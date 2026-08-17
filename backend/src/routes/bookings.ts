@@ -524,7 +524,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
   const clientId = req.userId; // from verifyToken
   // booking_mode is deliberately not read from the body - see the comment where
   // `mode` is set below.
-  const { provider_id, service_id, start_date, end_date, total_price } = req.body;
+  const { provider_id, service_id, start_date, end_date, total_price, slot_ids } = req.body;
 
   if (!clientId) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -578,7 +578,16 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
         ? new Date(String(end_date))
         : new Date(startForPrice.getTime() + packageDuration * 60 * 1000);
       const durationMinutes = Math.round((endForPrice.getTime() - startForPrice.getTime()) / (1000 * 60));
-      const hours = Math.max(1, durationMinutes / 60);
+      // Was floored to a minimum of 1 hour, which is what an 8-hour booking needed
+      // guarding against - but it also silently doubled the minimum price for any
+      // booking shorter than an hour (a 30-minute slot billed at a full hour's rate),
+      // rejecting a client's own, correctly proportional, price as "Invalid price".
+      // Slot selection already guarantees a positive duration, but a value of exactly
+      // 0 would otherwise let a booking through for free.
+      if (durationMinutes <= 0) {
+        return res.status(400).json({ error: 'Invalid price', detail: 'Booking duration must be greater than zero' });
+      }
+      const hours = durationMinutes / 60;
       const minPrice = servicePrice * hours * (1 + platformFeeRate);
       if (submittedPrice < minPrice * 0.99) {
         return res.status(400).json({
@@ -700,6 +709,24 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
 
       const result = await client.query(insertQuery, values);
       const booking = result.rows[0];
+
+      // The client already held these slots (POST /availability/slots/held) before
+      // submitting, and sends them back here - but this route never read slot_ids at
+      // all, so a booking was created in the bookings table while its time_slots rows
+      // stayed exactly as they were. The bookings-table conflict check above still
+      // stopped a real double-booking, but nothing ever flipped the slot picker's own
+      // data to 'booked': the hold this booking replaces would just sit there until it
+      // expired on its own timer, and the grid would then show the now-booked time as
+      // available again - looking free right up until a second client tried to submit
+      // and got a 409 that the picker gave them no reason to expect.
+      if (Array.isArray(slot_ids) && slot_ids.length > 0) {
+        await client.query(
+          `UPDATE time_slots
+           SET status = 'booked', booking_id = $1, held_by = NULL, hold_expires_at = NULL
+           WHERE id::text = ANY($2) AND provider_id::text = $3`,
+          [String(booking.id), slot_ids.map((id: any) => String(id)), providerUserIdStr]
+        );
+      }
 
       await client.query('COMMIT');
 

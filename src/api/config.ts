@@ -87,6 +87,7 @@ export const API_CONFIG = {
       LOGOUT: '/auth/logout',
       ME: '/auth/me',
       GOOGLE: '/auth/google',
+      CHANGE_PASSWORD: '/auth/change-password',
     },
     // Users endpoints
     USERS: {

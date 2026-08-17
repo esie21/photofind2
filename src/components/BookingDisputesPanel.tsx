@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useModal } from '../hooks/useModal';
-import { AlertTriangle, CheckCircle, X, Loader2, Image, Eye, User, Clock, FileText } from 'lucide-react';
+import { AlertTriangle, CheckCircle, X, Loader2, Image, Eye, User, Clock, FileText, Calendar, PhilippinePeso } from 'lucide-react';
 import bookingService, { DisputedBooking, BookingEvidence } from '../api/services/bookingService';
 import { getUploadUrl } from '../api/config';
 
@@ -336,6 +336,38 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 </div>
               </div>
 
+              {/* Schedule & Price - this and the timeline below were the actual gap: the
+                  reason and evidence were here, but resolving a dispute means judging
+                  what happened against what was booked, and neither the shoot's own
+                  date/time nor whether the client had even paid was shown anywhere. */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-gray-50 rounded-xl p-4">
+                  <p className="flex items-center gap-1.5 text-xs font-medium text-gray-500 mb-1">
+                    <Calendar className="w-3.5 h-3.5" />
+                    Scheduled
+                  </p>
+                  <p className="text-sm font-medium text-gray-900">
+                    {(selectedDispute as any).start_date ? formatDate((selectedDispute as any).start_date) : '—'}
+                  </p>
+                </div>
+                <div className="bg-gray-50 rounded-xl p-4">
+                  <p className="flex items-center gap-1.5 text-xs font-medium text-gray-500 mb-1">
+                    <PhilippinePeso className="w-3.5 h-3.5" />
+                    Price
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-gray-900">
+                      ₱{Number((selectedDispute as any).total_price || (selectedDispute as any).totalPrice || 0).toLocaleString()}
+                    </p>
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                      (selectedDispute as any).payment_status === 'paid' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                    }`}>
+                      {(selectedDispute as any).payment_status === 'paid' ? 'Paid' : 'Payment due'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
               {/* Dispute Reason */}
               {selectedDispute.dispute_reason && (
                 <div className="bg-red-50 rounded-xl p-4">
@@ -351,6 +383,37 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                   <p className="text-sm text-blue-700">{selectedDispute.completion_notes}</p>
                 </div>
               )}
+
+              {/* Status Timeline */}
+              {(() => {
+                const d = selectedDispute as any;
+                const timeline: { label: string; at: string }[] = [];
+                if (d.created_at || selectedDispute.createdAt) timeline.push({ label: 'Booking requested', at: d.created_at || selectedDispute.createdAt });
+                if (d.accepted_at) timeline.push({ label: 'Accepted by provider', at: d.accepted_at });
+                if (d.provider_completed_at) timeline.push({ label: 'Marked complete by provider', at: d.provider_completed_at });
+                if (d.client_confirmed_at) timeline.push({ label: 'Completion confirmed by client', at: d.client_confirmed_at });
+                if (d.dispute_resolved_at) timeline.push({ label: 'Dispute resolved', at: d.dispute_resolved_at });
+                if (d.cancelled_at) timeline.push({ label: 'Cancelled', at: d.cancelled_at });
+                if (d.completed_at) timeline.push({ label: 'Completed', at: d.completed_at });
+                timeline.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+                if (timeline.length === 0) return null;
+                return (
+                  <div>
+                    <p className="text-sm font-medium text-gray-700 mb-2">Timeline</p>
+                    <div className="bg-gray-50 rounded-xl p-4 space-y-2">
+                      {timeline.map((entry, i) => (
+                        <div key={i} className="flex items-start gap-2 text-sm">
+                          <Clock className="w-3.5 h-3.5 text-gray-400 flex-shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <p className="text-gray-700">{entry.label}</p>
+                            <p className="text-xs text-gray-400">{formatDate(entry.at)}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* All Evidence */}
               <div>

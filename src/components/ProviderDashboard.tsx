@@ -29,6 +29,7 @@ import { ChatInterface } from './ChatInterface';
 import { WalletDashboard } from './WalletDashboard';
 import { RescheduleModal } from './RescheduleModal';
 import { CompleteBookingModal } from './CompleteBookingModal';
+import { BookingDetailsModal } from './BookingDetailsModal';
 
 type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
 
@@ -104,6 +105,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   }, [tabRequestId]);
   const [showChat, setShowChat] = useState(false);
   const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
+  const [detailsBooking, setDetailsBooking] = useState<any>(null);
   const { user, refreshUser, applyUser } = useAuth();
   const toast = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -582,6 +584,31 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           reschedule_pending_approval: b.reschedule_pending_approval,
           rescheduled_by: b.rescheduled_by,
           client_trust: b.client_trust as ClientTrust | null,
+          // Everything below exists on the raw response (BookingsPage's mapping already
+          // reads all of it) but was dropped here, so BookingDetailsModal had nothing to
+          // render and the dispute banner below could never show the client's actual
+          // reason - dispute_reason was referenced but never populated.
+          service_description: b.service_description,
+          service_category: b.service_category,
+          service_duration_minutes: b.service_duration_minutes,
+          payment_due_at: b.payment_due_at,
+          created_at: b.created_at,
+          accepted_at: b.accepted_at,
+          rejected_at: b.rejected_at,
+          cancelled_at: b.cancelled_at,
+          completed_at: b.completed_at,
+          cancellation_reason: b.cancellation_reason,
+          dispute_reason: b.dispute_reason,
+          dispute_resolution: b.dispute_resolution,
+          dispute_resolved_at: b.dispute_resolved_at,
+          provider_completed_at: b.provider_completed_at,
+          client_confirmed_at: b.client_confirmed_at,
+          completion_notes: b.completion_notes,
+          rescheduled_at: b.rescheduled_at,
+          reschedule_reason: b.reschedule_reason,
+          reschedule_count: b.reschedule_count,
+          original_start_date: b.original_start_date,
+          original_end_date: b.original_end_date,
         };
       });
       setProviderBookings(mapped);
@@ -1382,15 +1409,20 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                   // Use package_price as primary price for backward compatibility
                                   const primaryPrice = pkg.enable_package ? pkg.package_price : pkg.hourly_rate;
 
+                                  // null, not undefined, when a mode is off: updateService sends a
+                                  // partial update, and the backend only touches a column when the
+                                  // field is present at all - undefined would leave a stale rate from
+                                  // before the toggle was switched off sitting in the row, which
+                                  // would make the toggle look re-enabled the next time this loads.
                                   const serviceData = {
                                     title: pkg.title,
                                     description: pkg.description,
                                     price: primaryPrice || 0,
                                     category: pkg.category || 'Photography',
                                     pricing_type: pricingType,
-                                    hourly_rate: pkg.enable_hourly ? pkg.hourly_rate : undefined,
-                                    package_price: pkg.enable_package ? pkg.package_price : undefined,
-                                    duration_minutes: pkg.enable_package ? (pkg.duration_minutes || undefined) : undefined,
+                                    hourly_rate: pkg.enable_hourly ? pkg.hourly_rate : null,
+                                    package_price: pkg.enable_package ? pkg.package_price : null,
+                                    duration_minutes: pkg.enable_package ? (pkg.duration_minutes || null) : null,
                                   };
 
                                   if (pkg.id) {
@@ -2182,7 +2214,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                   ))}
                 </div>
               ) : packagesError ? (
-                <InlineError message={packagesError} onRetry={() => setPackages([])} />
+                <InlineError message={packagesError} onRetry={loadPackages} />
               ) : packages.length === 0 ? (
                 <div className="p-8 border-2 border-dashed border-gray-200 rounded-xl text-center">
                   <Tag className="w-8 h-8 text-gray-300 mx-auto mb-3" />
@@ -2235,6 +2267,14 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                           {editMode && (
                             <button
                               onClick={async () => {
+                                // Deleting a saved service is immediate and permanent - it also
+                                // detaches it from every booking (past and upcoming) that was
+                                // ever made against it, since those keep the booking but lose
+                                // the service reference. A brand-new, not-yet-saved row (no
+                                // pkg.id) has none of that at stake, so it's removed silently.
+                                if (pkg.id && !confirm(`Delete "${pkg.title || 'this service'}"? This can't be undone, and any past or upcoming bookings for it will lose their service details.`)) {
+                                  return;
+                                }
                                 if (pkg.id && user) {
                                   try {
                                     await serviceService.deleteService(pkg.id);
@@ -2762,6 +2802,24 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                               )}
                               <button
                                 onClick={() => {
+                                  setDetailsBooking({
+                                    ...booking,
+                                    otherParty: {
+                                      id: booking.client_id,
+                                      name: booking.client,
+                                      image: booking.image,
+                                      email: booking.clientEmail,
+                                    },
+                                    price: booking.amount,
+                                  });
+                                }}
+                                className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
+                              >
+                                <FileText className="w-4 h-4" />
+                                View Details
+                              </button>
+                              <button
+                                onClick={() => {
                                   setSelectedBookingId(booking.id);
                                   setShowChat(true);
                                 }}
@@ -2942,6 +3000,14 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           />
         );
       })()}
+
+      {detailsBooking && (
+        <BookingDetailsModal
+          booking={detailsBooking}
+          isProvider
+          onClose={() => setDetailsBooking(null)}
+        />
+      )}
 
       {/* Reschedule Modal */}
       {showRescheduleModal && rescheduleBooking && (

@@ -335,7 +335,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   try {
     const userId = req.userId;
-    const { title, description, price, hourly_price, category, images, pricing_type, duration_minutes } = req.body;
+    const { title, description, price, hourly_rate, package_price, category, images, pricing_type, duration_minutes } = req.body;
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -368,7 +368,13 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     const hasDescription = existingColumns.includes('description');
     const hasPricingType = existingColumns.includes('pricing_type');
     const hasDurationMinutes = existingColumns.includes('duration_minutes');
-    const hasHourlyPrice = existingColumns.includes('hourly_price');
+    // 'hourly_rate' and 'package_price' are what the pricing editor actually sends and
+    // what every read path (toPackage(), the booking flow) reads back. 'hourly_price' is
+    // a legacy column nothing writes to on purpose; matching its name here silently
+    // dropped every hourly rate and package price the moment a service used both pricing
+    // modes at once, since neither had anywhere real to land.
+    const hasHourlyRate = existingColumns.includes('hourly_rate');
+    const hasPackagePrice = existingColumns.includes('package_price');
 
     // Build dynamic INSERT query based on existing columns
     const columns: string[] = ['provider_id', 'title', 'price'];
@@ -413,10 +419,17 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       paramIndex++;
     }
 
-    if (hasHourlyPrice) {
-      columns.push('hourly_price');
+    if (hasHourlyRate) {
+      columns.push('hourly_rate');
       placeholders.push(`$${paramIndex}`);
-      values.push(hourly_price || null);
+      values.push(hourly_rate || null);
+      paramIndex++;
+    }
+
+    if (hasPackagePrice) {
+      columns.push('package_price');
+      placeholders.push(`$${paramIndex}`);
+      values.push(package_price || null);
       paramIndex++;
     }
 
@@ -479,7 +492,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
   try {
     const { id } = req.params;
     const userId = req.userId;
-    const { title, description, price, hourly_price, category, images, pricing_type, duration_minutes } = req.body;
+    const { title, description, price, hourly_rate, package_price, category, images, pricing_type, duration_minutes } = req.body;
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -522,7 +535,11 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const hasUpdatedAt = existingColumns.includes('updated_at');
     const hasPricingType = existingColumns.includes('pricing_type');
     const hasDurationMinutes = existingColumns.includes('duration_minutes');
-    const hasHourlyPrice = existingColumns.includes('hourly_price');
+    // Same fix as the create route above: write the columns the pricing editor and the
+    // booking flow actually read ('hourly_rate', 'package_price'), not the unused legacy
+    // 'hourly_price' column.
+    const hasHourlyRate = existingColumns.includes('hourly_rate');
+    const hasPackagePrice = existingColumns.includes('package_price');
 
     // Build dynamic UPDATE query based on existing columns
     const updates: string[] = [];
@@ -571,9 +588,15 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       paramIndex++;
     }
 
-    if (hasHourlyPrice && hourly_price !== undefined) {
-      updates.push(`hourly_price = $${paramIndex}`);
-      values.push(hourly_price);
+    if (hasHourlyRate && hourly_rate !== undefined) {
+      updates.push(`hourly_rate = $${paramIndex}`);
+      values.push(hourly_rate);
+      paramIndex++;
+    }
+
+    if (hasPackagePrice && package_price !== undefined) {
+      updates.push(`package_price = $${paramIndex}`);
+      values.push(package_price);
       paramIndex++;
     }
 

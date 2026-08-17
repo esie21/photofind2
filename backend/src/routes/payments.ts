@@ -88,16 +88,16 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
       });
     }
 
-    // Validate payment amount against service price (prevent underpayment)
+    // Sanity-check the stored price, not a re-derivation of it: POST /bookings already
+    // validated total_price against the service's real (duration-aware) minimum at
+    // creation time, and this endpoint takes no client-supplied price to re-check against
+    // - booking_id is the only input. Comparing against the flat, unscaled service_price
+    // instead used to reject any booking whose correct price was legitimately less than
+    // one full flat unit, which every hourly booking under an hour is.
     const bookingPrice = parseFloat(booking.total_price || 0);
-    const servicePrice = parseFloat(booking.service_price || 0);
-    if (servicePrice > 0 && bookingPrice < servicePrice) {
+    if (bookingPrice <= 0) {
       await dbClient.query('ROLLBACK');
-      return res.status(400).json({
-        error: 'Payment amount is less than the service price',
-        expected: servicePrice,
-        received: bookingPrice
-      });
+      return res.status(400).json({ error: 'This booking has no valid price to charge.' });
     }
 
     // A booking can accumulate several payment rows - a new one is inserted below

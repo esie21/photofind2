@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useModal } from '../hooks/useModal';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
@@ -12,7 +12,8 @@ import adminService, {
 import { Users, PhilippinePeso, TrendingUp, AlertCircle, Search, Filter, Eye, X, CheckCircle, XCircle, Clock, Shield, FileText, Download, MessageSquare } from 'lucide-react';
 import { BookingDisputesPanel } from './BookingDisputesPanel';
 import { SupportChat } from './SupportChat';
-import { getUploadUrl } from '../api/config';
+import { getUploadUrl, API_CONFIG } from '../api/config';
+import { io as createSocket } from 'socket.io-client';
 
 type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit' | 'support';
 
@@ -64,6 +65,10 @@ export function AdminDashboard() {
   const [auditEntityFilter, setAuditEntityFilter] = useState('all');
   const [auditStartDate, setAuditStartDate] = useState('');
   const [auditEndDate, setAuditEndDate] = useState('');
+  // getLogs has accepted a userId filter since it was written; nothing in this tab ever
+  // sent one, so seeing everything one actor did meant paging through the whole table by
+  // eye. Label is kept alongside the id purely for display - the id is what's sent.
+  const [auditUserFilter, setAuditUserFilter] = useState<{ id: string; label: string } | null>(null);
   const [auditOptions, setAuditOptions] = useState<{ actions: string[]; entityTypes: string[] }>({ actions: [], entityTypes: [] });
   const [expandedAuditId, setExpandedAuditId] = useState<string | null>(null);
   const [exportingAudit, setExportingAudit] = useState(false);
@@ -106,7 +111,7 @@ export function AdminDashboard() {
   }, [activeTab, chartPeriod, userSearch, userRoleFilter, userStatusFilter, userPage, verificationPage,
     reviewStatusFilter, reviewPage, disputeStatusFilter, disputePriorityFilter, disputePage, auditPage,
     auditActionFilter, auditEntityFilter, auditStartDate, auditEndDate,
-    supportStatusFilter, supportPage, user]);
+    supportStatusFilter, supportPage, auditUserFilter, user]);
 
   const loadTabData = async () => {
     setLoading(true);
@@ -189,6 +194,7 @@ export function AdminDashboard() {
   // `endDate` is pushed to the end of the chosen day so an inclusive range behaves the
   // way a reader expects.
   const auditFilters = () => ({
+    userId: auditUserFilter?.id || undefined,
     action: auditActionFilter !== 'all' ? auditActionFilter : undefined,
     entityType: auditEntityFilter !== 'all' ? auditEntityFilter : undefined,
     startDate: auditStartDate || undefined,
@@ -214,30 +220,57 @@ export function AdminDashboard() {
     }
   };
 
+  // Hard ceiling on a single export, so a runaway filter (or none at all) on a table
+  // that's been accumulating for years can't page forever. Comfortably above anything
+  // an admin would actually need in one CSV; if it's hit, the export is flagged as
+  // incomplete rather than silently passed off as the full record.
+  const MAX_EXPORT_ROWS = 5000;
+  const AUDIT_EXPORT_PAGE_SIZE = 200; // mirrors auditService.MAX_PAGE_SIZE server-side
+
   const exportAuditCsv = async () => {
     setExportingAudit(true);
     try {
-      // Pull the current filter at the server's maximum page size rather than only the
-      // rows on screen.
-      const resp = await adminService.getAuditLogs({ ...auditFilters(), limit: 200, offset: 0 });
+      // A single page silently dropped everything past the server's 200-row cap - an
+      // export whose entire point is being the complete record was quietly missing rows
+      // whenever a filter matched more than that. Page through every match instead, up
+      // to MAX_EXPORT_ROWS.
+      const filters = auditFilters();
+      const rows: typeof auditLogs = [];
+      let offset = 0;
+      let truncated = false;
+      while (rows.length < MAX_EXPORT_ROWS) {
+        const resp = await adminService.getAuditLogs({ ...filters, limit: AUDIT_EXPORT_PAGE_SIZE, offset });
+        rows.push(...resp.data);
+        offset += AUDIT_EXPORT_PAGE_SIZE;
+        if (offset >= resp.meta.total || resp.data.length === 0) break;
+        if (rows.length >= MAX_EXPORT_ROWS) {
+          truncated = true;
+          break;
+        }
+      }
+
       const escape = (v: any) => {
         const str = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
         return `"${str.replace(/"/g, '""')}"`;
       };
       const header = ['Timestamp', 'User', 'Email', 'Action', 'Entity Type', 'Entity ID', 'IP Address', 'Old Values', 'New Values', 'Metadata'];
-      const rows = resp.data.map(l => [
+      const csvRows = rows.map(l => [
         l.created_at, l.user_name || 'System', l.user_email || '', l.action,
         l.entity_type, l.entity_id || '', l.ip_address || '',
         l.old_values, l.new_values, l.metadata || (l as any).details,
       ].map(escape).join(','));
-      const csv = [header.map(escape).join(','), ...rows].join('\r\n');
+      const csv = [header.map(escape).join(','), ...csvRows].join('\r\n');
 
       const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `audit-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `audit-logs-${new Date().toISOString().slice(0, 10)}${truncated ? '-partial' : ''}.csv`;
       a.click();
       URL.revokeObjectURL(url);
+
+      if (truncated) {
+        setError(`Export stopped at ${MAX_EXPORT_ROWS} rows - narrow the filters (date range, action, or user) to get a complete export of a larger match.`);
+      }
     } catch (err: any) {
       setError(err?.message || 'Failed to export audit logs');
     } finally {
@@ -258,6 +291,43 @@ export function AdminDashboard() {
       return resp.data[0]?.id || null;
     });
   };
+
+  // Held in refs so the socket handler below - registered once for the life of the
+  // admin session - always sees the current tab and filter/page instead of whatever
+  // they were when the connection was opened.
+  const loadSupportTicketsDataRef = useRef(loadSupportTicketsData);
+  loadSupportTicketsDataRef.current = loadSupportTicketsData;
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+
+  // A new ticket, or a reply on one nobody has open, used to sit invisible in the queue
+  // until an admin happened to change the status filter or page - the list was only ever
+  // fetched on those triggers. This keeps it live while the Support tab is open.
+  useEffect(() => {
+    if (user?.role !== 'admin') return undefined;
+    const token = localStorage.getItem('authToken');
+    if (!token) return undefined;
+
+    const socket = createSocket(API_CONFIG.SOCKET_URL, {
+      transports: ['websocket'],
+      auth: { token },
+    });
+
+    let refreshTimer: number | null = null;
+    socket.on('support:queue_update', () => {
+      if (activeTabRef.current !== 'support') return;
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        loadSupportTicketsDataRef.current().catch(() => {});
+      }, 800);
+    });
+
+    return () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      socket.disconnect();
+    };
+  }, [user?.role]);
 
   // Action handlers
   const handleVerifyProvider = async (id: string) => {
@@ -1108,7 +1178,7 @@ export function AdminDashboard() {
           <button
             onClick={() => {
               setAuditActionFilter('all'); setAuditEntityFilter('all');
-              setAuditStartDate(''); setAuditEndDate(''); setAuditPage(0);
+              setAuditStartDate(''); setAuditEndDate(''); setAuditUserFilter(null); setAuditPage(0);
             }}
             className="px-4 py-2 border border-gray-200 rounded-lg text-sm hover:bg-gray-50"
           >
@@ -1123,6 +1193,22 @@ export function AdminDashboard() {
             {exportingAudit ? 'Exporting...' : 'Export CSV'}
           </button>
         </div>
+        {auditUserFilter && (
+          <div className="mt-3 flex items-center gap-2">
+            <span className="text-xs text-gray-500">Filtered to actor:</span>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-700">
+              {auditUserFilter.label}
+              <button
+                type="button"
+                onClick={() => { setAuditUserFilter(null); setAuditPage(0); }}
+                aria-label="Clear actor filter"
+                className="hover:text-purple-900"
+              >
+                ×
+              </button>
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
@@ -1153,7 +1239,22 @@ export function AdminDashboard() {
                 >
                   <td className="py-4 px-6 text-sm text-gray-500">{formatDateTime(log.created_at)}</td>
                   <td className="py-4 px-6">
-                    <div className="text-sm font-medium text-gray-900">{log.user_name || 'System'}</div>
+                    {log.user_id ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setAuditUserFilter({ id: log.user_id!, label: log.user_name || log.user_email || log.user_id! });
+                          setAuditPage(0);
+                        }}
+                        title="Filter to this actor"
+                        className="text-sm font-medium text-gray-900 hover:text-purple-700 hover:underline text-left"
+                      >
+                        {log.user_name || 'Unknown'}
+                      </button>
+                    ) : (
+                      <div className="text-sm font-medium text-gray-900">System</div>
+                    )}
                     <div className="text-xs text-gray-500">{log.user_email || '-'}</div>
                   </td>
                   <td className="py-4 px-6">
@@ -1303,7 +1404,14 @@ export function AdminDashboard() {
               </button>
             </div>
           )}
-          <SupportChat mode="admin" ticketId={selectedSupportTicketId} className="h-[560px]" />
+          {/* Refresh the queue as the thread moves - a reply changes a ticket's status
+              and its unread count, and the list was otherwise frozen at page load. */}
+          <SupportChat
+            mode="admin"
+            ticketId={selectedSupportTicketId}
+            onActivity={() => { loadSupportTicketsData().catch(() => {}); }}
+            className="h-[560px]"
+          />
         </div>
       </div>
 

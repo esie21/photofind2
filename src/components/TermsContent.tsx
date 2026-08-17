@@ -108,9 +108,6 @@ const SECTIONS: Section[] = [
 export function TermsContent() {
   return (
     <div>
-      <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
-        This is a starting template, not legal advice. Have it reviewed by a qualified lawyer before relying on it for a live product.
-      </div>
       <p className="text-xs text-gray-400 mb-6">Last updated: {LAST_UPDATED}</p>
 
       <div className="space-y-6">

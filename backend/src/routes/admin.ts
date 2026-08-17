@@ -618,7 +618,11 @@ router.delete('/reviews/:id', async (req: Request & { userId?: string }, res: Re
 
 router.get('/support-tickets', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { status = 'all', limit = '20', offset = '0' } = req.query;
+    const { status = 'all' } = req.query;
+    // Matches the cap on /support/tickets/my - nothing stopped an arbitrarily large
+    // limit from reaching the database here.
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
 
     const conditions: string[] = [];
     const params: any[] = [];
@@ -653,13 +657,13 @@ router.get('/support-tickets', async (req: Request & { userId?: string }, res: R
       ORDER BY COALESCE(lm.created_at, t.created_at) DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    params.push(parseInt(limit as string), parseInt(offset as string));
+    params.push(limit, offset);
 
     const dataResult = await pool.query(dataQuery, params);
 
     return res.json({
       data: dataResult.rows.map((r: any) => ({ ...r, unread_count: parseInt(r.unread_count) || 0 })),
-      meta: { total: parseInt(countResult.rows[0].total), limit: parseInt(limit as string), offset: parseInt(offset as string) },
+      meta: { total: parseInt(countResult.rows[0].total), limit, offset },
     });
   } catch (error) {
     console.error('Error fetching support tickets:', error);
@@ -687,6 +691,7 @@ router.patch('/support-tickets/:id', async (req: Request & { userId?: string }, 
       `UPDATE support_tickets SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2 RETURNING *`,
       [status, ticketId]
     );
+    const ticket = updated.rows[0];
 
     await auditService.log({
       userId: adminId,
@@ -694,11 +699,36 @@ router.patch('/support-tickets/:id', async (req: Request & { userId?: string }, 
       entityType: 'support_ticket',
       entityId: ticketId,
       oldValues: { status: oldTicket.rows[0].status },
-      newValues: { status: updated.rows[0].status },
+      newValues: { status: ticket.status },
       req,
     });
 
-    return res.json({ data: updated.rows[0] });
+    // A status change made without also sending a message used to be invisible to the
+    // user - no notification, and their open chat kept showing the old status until they
+    // reloaded or a new message happened to arrive. Same fix as the message-send path in
+    // routes/support.ts, just for the status-only case.
+    if (status !== oldTicket.rows[0].status) {
+      const STATUS_LABELS: Record<string, string> = { open: 'reopened', in_progress: 'is being worked on', resolved: 'marked as resolved' };
+      try {
+        await notificationService.create({
+          userId: String(ticket.user_id),
+          type: 'system',
+          title: 'Support ticket updated',
+          message: `Your support ticket was ${STATUS_LABELS[status] || `updated to ${status}`}.`,
+          data: { action: 'support_message', ticket_id: ticketId },
+        });
+      } catch (notifError) {
+        console.error('Failed to notify user of support status change:', notifError);
+      }
+
+      const io = (req.app as any).get('io');
+      if (io) {
+        io.to(`support:${ticketId}`).emit('support:status', { ticketId, status: ticket.status });
+        io.to('support:admin').emit('support:queue_update', { ticketId, reason: 'status' });
+      }
+    }
+
+    return res.json({ data: ticket });
   } catch (error) {
     console.error('Error updating support ticket:', error);
     return res.status(500).json({ error: 'Failed to update support ticket' });
