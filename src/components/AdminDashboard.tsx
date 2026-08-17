@@ -17,6 +17,45 @@ import { io as createSocket } from 'socket.io-client';
 
 type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit' | 'support';
 
+/**
+ * A user's avatar, falling back to their initial.
+ *
+ * Both admin lists used to render `profile_image` straight into an <img src>. It holds
+ * a path relative to the uploads root ("users/<id>/avatar/x.webp"), so the browser
+ * resolved it against the page origin instead of the upload host and it 404'd - while
+ * accounts whose photo is an absolute Google/Unsplash URL kept working, which is why
+ * only some avatars appeared broken. Every other view in the app already goes through
+ * getUploadUrl.
+ *
+ * A failed load falls back to the same initial a photoless account gets, rather than the
+ * browser's broken-image glyph - a file that has gone missing from disk (the uploads
+ * tree is not in git) should not look different from never having uploaded one.
+ */
+function AdminAvatar({ src, name, className, textClassName }: {
+  src?: string | null;
+  name?: string | null;
+  className: string;
+  textClassName: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  const resolved = src ? getUploadUrl(src) : '';
+
+  return (
+    <div className={`${className} bg-gray-200 flex items-center justify-center overflow-hidden flex-shrink-0`}>
+      {resolved && !failed ? (
+        <img
+          src={resolved}
+          alt=""
+          className="w-full h-full object-cover"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <span className={`text-gray-500 font-medium ${textClassName}`}>{name?.charAt(0) || '?'}</span>
+      )}
+    </div>
+  );
+}
+
 export function AdminDashboard() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>('overview');
@@ -720,13 +759,12 @@ export function AdminDashboard() {
                 <tr key={u.id} className={`hover:bg-gray-50 ${u.deleted_at ? 'bg-red-50' : ''}`}>
                   <td className="py-4 px-6">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center overflow-hidden">
-                        {u.profile_image ? (
-                          <img src={u.profile_image} alt="" className="w-full h-full object-cover" />
-                        ) : (
-                          <span className="text-gray-500 font-medium">{u.name?.charAt(0) || '?'}</span>
-                        )}
-                      </div>
+                      <AdminAvatar
+                        src={u.profile_image}
+                        name={u.name}
+                        className="w-10 h-10 rounded-full"
+                        textClassName=""
+                      />
                       <div>
                         <p className="text-sm font-medium text-gray-900">{u.name}</p>
                         <p className="text-xs text-gray-500">{u.email}</p>
@@ -818,13 +856,12 @@ export function AdminDashboard() {
           {pendingVerifications.map((provider) => (
             <div key={provider.id} className="bg-white rounded-2xl shadow-sm p-6">
               <div className="flex gap-4">
-                <div className="w-20 h-20 rounded-xl bg-gray-200 flex items-center justify-center overflow-hidden flex-shrink-0">
-                  {provider.profile_image ? (
-                    <img src={provider.profile_image} alt="" className="w-full h-full object-cover" />
-                  ) : (
-                    <span className="text-gray-500 text-2xl font-medium">{provider.name?.charAt(0) || '?'}</span>
-                  )}
-                </div>
+                <AdminAvatar
+                  src={provider.profile_image}
+                  name={provider.name}
+                  className="w-20 h-20 rounded-xl"
+                  textClassName="text-2xl"
+                />
                 <div className="flex-1 min-w-0">
                   <h3 className="text-lg font-medium text-gray-900">{provider.name}</h3>
                   <p className="text-sm text-gray-500">{provider.email}</p>
