@@ -1195,6 +1195,10 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       placeholder="e.g., Vacation, Personal day..."
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                     />
+                    {/* This used to be a private note, so say plainly that it is not. */}
+                    <p className="text-xs text-gray-500 mt-1">
+                      Clients see this on the booking calendar, so keep it brief and public-friendly.
+                    </p>
                   </div>
 
                   <button
@@ -1314,10 +1318,24 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                   ))}
                 </div>
               ) : (() => {
-                const upcomingBookings = providerBookings.filter(b =>
-                  ['accepted', 'confirmed', 'pending'].includes(b.status) &&
-                  new Date(b.date) >= new Date()
+                // Compared against the start of today in Manila, using the raw start_date.
+                //
+                // This used to re-parse `b.date`, which is a formatted display string
+                // ("Tue, Aug 18, 2026"), and compare it to `new Date()`. Parsing it back
+                // yields midnight, so every booking scheduled for today dropped out of
+                // this list the moment the clock passed midnight - a 6:30am booking was
+                // hidden at 5:41am, hours before it started. Re-parsing a localised string
+                // is also fragile in its own right: if that format ever changes the result
+                // is Invalid Date and the comparison hides every booking instead.
+                const startOfTodayManila = new Date(
+                  `${new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' })}T00:00:00+08:00`
                 );
+                const upcomingBookings = providerBookings.filter(b => {
+                  if (!['accepted', 'confirmed', 'pending'].includes(b.status)) return false;
+                  const start = new Date(b.start_date || b.date);
+                  if (isNaN(start.getTime())) return false;
+                  return start >= startOfTodayManila;
+                });
 
                 if (upcomingBookings.length === 0) {
                   return (
