@@ -7,19 +7,28 @@ import fs from 'fs';
 import { notificationService } from '../services/notificationService';
 import {
   UPLOADS_ROOT,
-  MAX_FILE_SIZE,
+  MAX_VIDEO_SIZE,
+  DOCUMENT_MIME_TYPES,
+  VIDEO_MIME_TYPES,
+  makeFileFilter,
   safeSegment,
   resolveInsideRoot,
   generateFilename,
-  documentFileFilter,
   discardUploads,
   verifyUploadedContent,
+  enforceMediaSizeLimits,
   handleUpload,
 } from '../services/uploadService';
 
 interface AuthedRequest extends Request {
   userId?: string;
 }
+
+// chat_messages.content is TEXT and express.json accepts a 10MB body, so without a cap a
+// single message could be megabytes of prose that no recipient could read and every
+// history fetch would have to carry. Mirrors MAX_MESSAGE_LENGTH in routes/support.ts,
+// which already enforced this on its own thread.
+const MAX_MESSAGE_LENGTH = 5000;
 
 type BookingRow = {
   id: string;
@@ -72,10 +81,23 @@ const storage = multer.diskStorage({
 
 // Was `multer({ storage })` - no type filter and no size limit at all, so any file
 // of any size was accepted (a .exe went through and was stored happily).
+//
+// Accepts video as well as images and PDF. The chat renderer has always had a <video>
+// branch for attachment_type 'video' and getAttachmentMeta below has always classified
+// one, but the filter here refused it - so picking a video produced a rejected upload
+// against UI that was ready to display it.
+//
+// multer takes a single per-file limit, so it is configured with the video ceiling and
+// enforceMediaSizeLimits then holds images back down to MAX_FILE_SIZE - the same pairing
+// the portfolio upload in routes/users.ts uses.
+// Not mediaFileFilter, which is images and video only - chat has always taken PDF too,
+// and switching to it wholesale would have quietly dropped that.
+const chatFileFilter = makeFileFilter([...DOCUMENT_MIME_TYPES, ...VIDEO_MIME_TYPES]);
+
 const upload = multer({
   storage,
-  fileFilter: documentFileFilter,
-  limits: { fileSize: MAX_FILE_SIZE, files: 1 },
+  fileFilter: chatFileFilter,
+  limits: { fileSize: MAX_VIDEO_SIZE, files: 1 },
 });
 
 function getAttachmentMeta(file: any) {
@@ -333,6 +355,7 @@ router.post('/send',
   verifyToken,
   handleUpload(upload.single('file')),
   verifyUploadedContent,
+  enforceMediaSizeLimits,
   async (req: AuthedRequest, res: Response) => {
   try {
     const currentUserId = req.userId;
@@ -343,6 +366,11 @@ router.post('/send',
     if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
     if (!bookingId) return res.status(400).json({ error: 'Missing booking_id' });
     if (!content && !file) return res.status(400).json({ error: 'Missing content or file' });
+    if (content.length > MAX_MESSAGE_LENGTH) {
+      // Whatever multer already wrote is orphaned once this request is refused.
+      discardUploads(req);
+      return res.status(400).json({ error: `Messages must be ${MAX_MESSAGE_LENGTH} characters or fewer` });
+    }
 
     const booking = await getBookingForUser(bookingId, String(currentUserId));
     if (booking === null) return res.status(404).json({ error: 'Booking not found' });
@@ -552,7 +580,7 @@ router.get('/direct/:recipientId/history', verifyToken, async (req: AuthedReques
     msgs.rows.reverse();
 
     // Mark messages as read
-    await pool.query(
+    const marked = await pool.query(
       `UPDATE chat_messages
        SET read_at = CURRENT_TIMESTAMP
        WHERE chat_id = $1
@@ -561,6 +589,24 @@ router.get('/direct/:recipientId/history', verifyToken, async (req: AuthedReques
          AND read_at IS NULL`,
       [chat.id, currentUserId]
     );
+
+    // Tell the sender their messages have been read. The booking thread does this (see
+    // the chat:read emit in its own history/read path) but the direct one only ever
+    // wrote read_at to the database, so the other side's ticks stayed single until they
+    // reloaded the whole conversation. Direct chats have no shared socket room - both
+    // participants are only ever in their own user:<id> room - so it goes there.
+    if (marked.rowCount) {
+      const otherUserId = String(chat.user_a) === String(currentUserId) ? chat.user_b : chat.user_a;
+      const io = (req.app as any).get('io');
+      if (io && otherUserId) {
+        io.to(`user:${otherUserId}`).emit('chat:read', {
+          chatId: chat.id,
+          readerId: String(currentUserId),
+          readAt: new Date().toISOString(),
+          isDirect: true,
+        });
+      }
+    }
 
     return res.json({
       data: {
@@ -579,6 +625,7 @@ router.post('/direct/:recipientId/send',
   verifyToken,
   handleUpload(upload.single('file')),
   verifyUploadedContent,
+  enforceMediaSizeLimits,
   async (req: AuthedRequest, res: Response) => {
   try {
     const currentUserId = req.userId;
@@ -589,6 +636,10 @@ router.post('/direct/:recipientId/send',
     if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
     if (!recipientId) return res.status(400).json({ error: 'Missing recipient_id' });
     if (!content && !file) return res.status(400).json({ error: 'Missing content or file' });
+    if (content.length > MAX_MESSAGE_LENGTH) {
+      discardUploads(req);
+      return res.status(400).json({ error: `Messages must be ${MAX_MESSAGE_LENGTH} characters or fewer` });
+    }
 
     // Verify recipient exists
     const recipientCheck = await pool.query('SELECT id, name FROM users WHERE id::text = $1', [recipientId]);

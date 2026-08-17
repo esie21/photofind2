@@ -11,9 +11,12 @@ export interface ChatMessage {
   id: number;
   conversation_id: number;
   sender_id: string; // Changed to string for UUID
-  content: string;
+  /** Null when the message carries only an attachment. */
+  content: string | null;
   created_at: string;
   read_at?: string | null;
+  attachment_type?: 'image' | 'video' | 'file' | null;
+  attachment_name?: string | null;
 }
 
 export interface Conversation {

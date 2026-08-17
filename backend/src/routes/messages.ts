@@ -214,11 +214,16 @@ router.get(
           lm.id AS last_message_id,
           lm.content AS last_message_content,
           lm.sender_id AS last_message_sender_id,
-          lm.created_at AS last_message_created_at
+          lm.created_at AS last_message_created_at,
+          -- A message carrying only an attachment stores content NULL, so a preview built
+          -- from content alone rendered a real photo or video as "No messages yet". These
+          -- let the list describe what was actually sent.
+          lm.attachment_type AS last_message_attachment_type,
+          lm.attachment_name AS last_message_attachment_name
         FROM chats c
         JOIN users u ON u.id::text = CASE WHEN c.user_a = $1 THEN c.user_b ELSE c.user_a END
         LEFT JOIN LATERAL (
-          SELECT m.id, m.content, m.sender_id, m.created_at
+          SELECT m.id, m.content, m.sender_id, m.created_at, m.attachment_type, m.attachment_name
           FROM chat_messages m
           WHERE m.chat_id::text = c.id::text
           ORDER BY m.created_at DESC
@@ -243,6 +248,8 @@ router.get(
               content: row.last_message_content,
               sender_id: row.last_message_sender_id,
               created_at: row.last_message_created_at,
+              attachment_type: row.last_message_attachment_type ?? null,
+              attachment_name: row.last_message_attachment_name ?? null,
             }
           : null,
       }));

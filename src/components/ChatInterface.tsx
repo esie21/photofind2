@@ -14,6 +14,26 @@ interface ChatInterfaceProps {
   onClose: () => void;
 }
 
+/** Mirrors MAX_MESSAGE_LENGTH in backend/src/routes/chat.ts. */
+const MAX_MESSAGE_LENGTH = 5000;
+
+// Mirrors what routes/chat.ts accepts: DOCUMENT_MIME_TYPES + VIDEO_MIME_TYPES, and the
+// two ceilings enforceMediaSizeLimits applies. Checking here first means an oversized
+// video is refused instantly instead of being uploaded until multer kills the stream.
+const ALLOWED_ATTACHMENT_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'application/pdf',
+  'video/mp4',
+  'video/webm',
+  // What a .mov from an iPhone or a Mac announces itself as.
+  'video/quicktime',
+];
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+
 export function ChatInterface({ provider, bookingId: bookingIdProp, onClose }: ChatInterfaceProps) {
   const { overlayProps, cardProps } = useModal(onClose, { label: 'Conversation' });
   const [message, setMessage] = useState('');
@@ -135,7 +155,12 @@ const participantId = useMemo(() => {
         socket.on('chat:message', (payload: any) => {
           // Handle both booking and direct chat messages
           const matchesBooking = roomType === 'booking' && String(payload?.bookingId ?? '') === String(roomId);
-          const matchesDirect = roomType === 'direct' && (payload?.isDirect || String(payload?.chatId ?? '') === String(roomId));
+          // `payload.isDirect || chatId === roomId` matched on isDirect alone, and direct
+          // messages are delivered to this user's personal room - which carries every
+          // conversation they are in - so a message from another thread was appended to
+          // whichever one happened to be open. The server always sends chatId alongside
+          // isDirect, so match on it.
+          const matchesDirect = roomType === 'direct' && String(payload?.chatId ?? '') === String(roomId);
 
           if (!matchesBooking && !matchesDirect) return;
 
@@ -167,6 +192,11 @@ const participantId = useMemo(() => {
 
         socket.on('chat:read', (payload: any) => {
           if (roomType === 'booking' && String(payload?.bookingId ?? '') !== String(roomId)) return;
+          // A direct read receipt arrives on this user's personal room, which carries
+          // events for every one of their conversations - without matching the chat it
+          // belongs to, someone reading a message in another thread would tick the
+          // messages in whichever one happens to be open.
+          if (roomType === 'direct' && String(payload?.chatId ?? '') !== String(roomId)) return;
           const readAt = String(payload?.readAt || new Date().toISOString());
           const readerId = String(payload?.readerId ?? '');
           if (!readerId || readerId === String(user.id)) return;
@@ -471,13 +501,31 @@ const participantId = useMemo(() => {
             <input
               ref={fileInputRef}
               type="file"
+              accept={ALLOWED_ATTACHMENT_TYPES.join(',')}
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0];
-                if (file) {
-                  setPendingFile(file);
-                }
+                // Clear the input first, so picking the same file twice in a row still
+                // fires a change event.
                 if (fileInputRef.current) fileInputRef.current.value = '';
+                if (!file) return;
+
+                // Checked here as well as on the server. Without it an oversized file was
+                // uploaded in full and only then refused - and a video large enough for
+                // multer to abort the stream mid-flight tore down the connection, which
+                // the browser reports as "Failed to fetch" with nothing to explain it.
+                if (!ALLOWED_ATTACHMENT_TYPES.includes(file.type)) {
+                  setError(`"${file.name}" isn't a supported attachment. Use an image, PDF, or video (MP4, WebM, MOV).`);
+                  return;
+                }
+                const limit = file.type.startsWith('video/') ? MAX_VIDEO_BYTES : MAX_FILE_BYTES;
+                if (file.size > limit) {
+                  setError(`"${file.name}" is larger than ${limit / 1024 / 1024}MB.`);
+                  return;
+                }
+
+                setError(null);
+                setPendingFile(file);
               }}
             />
             <button
@@ -498,6 +546,9 @@ const participantId = useMemo(() => {
                   }
                 }}
                 placeholder={user ? 'Type a message...' : 'Sign in to start messaging'}
+                // Mirrors MAX_MESSAGE_LENGTH in routes/chat.ts, so an over-long message is
+                // stopped while typing rather than accepted and then refused on send.
+                maxLength={MAX_MESSAGE_LENGTH}
                 className="w-full bg-transparent outline-none resize-none text-gray-900 placeholder:text-gray-500"
                 rows={1}
                 disabled={!user || sending || loading}
