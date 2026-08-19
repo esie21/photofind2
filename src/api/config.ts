@@ -87,6 +87,7 @@ export const API_CONFIG = {
       LOGOUT: '/auth/logout',
       ME: '/auth/me',
       GOOGLE: '/auth/google',
+      CHANGE_PASSWORD: '/auth/change-password',
     },
     // Users endpoints
     USERS: {
@@ -116,6 +117,8 @@ export const API_CONFIG = {
       COMPLETE: (id: string) => `/bookings/${id}/complete`,
       CONFIRM: (id: string) => `/bookings/${id}/confirm`,
       EVIDENCE: (id: string) => `/bookings/${id}/evidence`,
+      DISPUTE_EVIDENCE: (id: string) => `/bookings/${id}/dispute-evidence`,
+      DISPUTE_RESPONSE: (id: string) => `/bookings/${id}/dispute-response`,
       RESOLVE_DISPUTE: (id: string) => `/bookings/${id}/resolve-dispute`,
       RESCHEDULE: (id: string) => `/bookings/${id}/reschedule`,
       RESCHEDULE_APPROVE: (id: string) => `/bookings/${id}/reschedule/approve`,

@@ -29,6 +29,8 @@ import { ChatInterface } from './ChatInterface';
 import { WalletDashboard } from './WalletDashboard';
 import { RescheduleModal } from './RescheduleModal';
 import { CompleteBookingModal } from './CompleteBookingModal';
+import { DisputeResponsePanel } from './DisputeResponsePanel';
+import { BookingDetailsModal } from './BookingDetailsModal';
 
 type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
 
@@ -104,6 +106,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   }, [tabRequestId]);
   const [showChat, setShowChat] = useState(false);
   const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
+  const [detailsBooking, setDetailsBooking] = useState<any>(null);
   const { user, refreshUser, applyUser } = useAuth();
   const toast = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -262,6 +265,13 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
       }
       if (pkg.enable_package && !(Number(pkg.package_price) > 0)) {
         return `"${label}" needs a package price greater than zero.`;
+      }
+      // A new service used to start pre-filled with 'Photography' and save that way
+      // if the picker was never touched, so a videographer's or makeup artist's first
+      // service silently landed under the wrong category - invisible to them and
+      // unfindable by clients filtering on their actual specialty.
+      if (!pkg.category || !String(pkg.category).trim()) {
+        return `"${label}" needs a category.`;
       }
     }
     return null;
@@ -582,6 +592,33 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           reschedule_pending_approval: b.reschedule_pending_approval,
           rescheduled_by: b.rescheduled_by,
           client_trust: b.client_trust as ClientTrust | null,
+          // Everything below exists on the raw response (BookingsPage's mapping already
+          // reads all of it) but was dropped here, so BookingDetailsModal had nothing to
+          // render and the dispute banner below could never show the client's actual
+          // reason - dispute_reason was referenced but never populated.
+          service_description: b.service_description,
+          service_category: b.service_category,
+          service_duration_minutes: b.service_duration_minutes,
+          payment_due_at: b.payment_due_at,
+          created_at: b.created_at,
+          accepted_at: b.accepted_at,
+          rejected_at: b.rejected_at,
+          cancelled_at: b.cancelled_at,
+          completed_at: b.completed_at,
+          cancellation_reason: b.cancellation_reason,
+          dispute_reason: b.dispute_reason,
+          dispute_response: b.dispute_response,
+          dispute_response_at: b.dispute_response_at,
+          dispute_resolution: b.dispute_resolution,
+          dispute_resolved_at: b.dispute_resolved_at,
+          provider_completed_at: b.provider_completed_at,
+          client_confirmed_at: b.client_confirmed_at,
+          completion_notes: b.completion_notes,
+          rescheduled_at: b.rescheduled_at,
+          reschedule_reason: b.reschedule_reason,
+          reschedule_count: b.reschedule_count,
+          original_start_date: b.original_start_date,
+          original_end_date: b.original_end_date,
         };
       });
       setProviderBookings(mapped);
@@ -1168,6 +1205,10 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       placeholder="e.g., Vacation, Personal day..."
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                     />
+                    {/* This used to be a private note, so say plainly that it is not. */}
+                    <p className="text-xs text-gray-500 mt-1">
+                      Clients see this on the booking calendar, so keep it brief and public-friendly.
+                    </p>
                   </div>
 
                   <button
@@ -1287,10 +1328,24 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                   ))}
                 </div>
               ) : (() => {
-                const upcomingBookings = providerBookings.filter(b =>
-                  ['accepted', 'confirmed', 'pending'].includes(b.status) &&
-                  new Date(b.date) >= new Date()
+                // Compared against the start of today in Manila, using the raw start_date.
+                //
+                // This used to re-parse `b.date`, which is a formatted display string
+                // ("Tue, Aug 18, 2026"), and compare it to `new Date()`. Parsing it back
+                // yields midnight, so every booking scheduled for today dropped out of
+                // this list the moment the clock passed midnight - a 6:30am booking was
+                // hidden at 5:41am, hours before it started. Re-parsing a localised string
+                // is also fragile in its own right: if that format ever changes the result
+                // is Invalid Date and the comparison hides every booking instead.
+                const startOfTodayManila = new Date(
+                  `${new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' })}T00:00:00+08:00`
                 );
+                const upcomingBookings = providerBookings.filter(b => {
+                  if (!['accepted', 'confirmed', 'pending'].includes(b.status)) return false;
+                  const start = new Date(b.start_date || b.date);
+                  if (isNaN(start.getTime())) return false;
+                  return start >= startOfTodayManila;
+                });
 
                 if (upcomingBookings.length === 0) {
                   return (
@@ -1382,15 +1437,23 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                   // Use package_price as primary price for backward compatibility
                                   const primaryPrice = pkg.enable_package ? pkg.package_price : pkg.hourly_rate;
 
+                                  // null, not undefined, when a mode is off: updateService sends a
+                                  // partial update, and the backend only touches a column when the
+                                  // field is present at all - undefined would leave a stale rate from
+                                  // before the toggle was switched off sitting in the row, which
+                                  // would make the toggle look re-enabled the next time this loads.
                                   const serviceData = {
                                     title: pkg.title,
                                     description: pkg.description,
                                     price: primaryPrice || 0,
-                                    category: pkg.category || 'Photography',
+                                    // validatePackages already blocks Save until every
+                                    // package has an explicit category - no more
+                                    // silent 'Photography' fallback here.
+                                    category: pkg.category,
                                     pricing_type: pricingType,
-                                    hourly_rate: pkg.enable_hourly ? pkg.hourly_rate : undefined,
-                                    package_price: pkg.enable_package ? pkg.package_price : undefined,
-                                    duration_minutes: pkg.enable_package ? (pkg.duration_minutes || undefined) : undefined,
+                                    hourly_rate: pkg.enable_hourly ? pkg.hourly_rate : null,
+                                    package_price: pkg.enable_package ? pkg.package_price : null,
+                                    duration_minutes: pkg.enable_package ? (pkg.duration_minutes || null) : null,
                                   };
 
                                   if (pkg.id) {
@@ -2160,7 +2223,10 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                         id: null,
                         title: 'New Service',
                         description: 'Description of service features and benefits...',
-                        category: 'Photography',
+                        // Left unset deliberately - see validatePackages. Pre-filling
+                        // this let a first service save as 'Photography' without the
+                        // picker ever being touched.
+                        category: '',
                         hourly_rate: 500,
                         package_price: 2000,
                         duration_minutes: 240,
@@ -2182,7 +2248,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                   ))}
                 </div>
               ) : packagesError ? (
-                <InlineError message={packagesError} onRetry={() => setPackages([])} />
+                <InlineError message={packagesError} onRetry={loadPackages} />
               ) : packages.length === 0 ? (
                 <div className="p-8 border-2 border-dashed border-gray-200 rounded-xl text-center">
                   <Tag className="w-8 h-8 text-gray-300 mx-auto mb-3" />
@@ -2235,6 +2301,14 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                           {editMode && (
                             <button
                               onClick={async () => {
+                                // Deleting a saved service is immediate and permanent - it also
+                                // detaches it from every booking (past and upcoming) that was
+                                // ever made against it, since those keep the booking but lose
+                                // the service reference. A brand-new, not-yet-saved row (no
+                                // pkg.id) has none of that at stake, so it's removed silently.
+                                if (pkg.id && !confirm(`Delete "${pkg.title || 'this service'}"? This can't be undone, and any past or upcoming bookings for it will lose their service details.`)) {
+                                  return;
+                                }
                                 if (pkg.id && user) {
                                   try {
                                     await serviceService.deleteService(pkg.id);
@@ -2277,7 +2351,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                         <div className="mt-3">
                           <label className="block text-xs text-gray-500 mb-1">Service Category</label>
                           <select
-                            value={pkg.category || 'Photography'}
+                            value={pkg.category || ''}
                             onChange={(e) => {
                               const updated = [...packages];
                               updated[index].category = e.target.value;
@@ -2285,6 +2359,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                             }}
                             className="w-full sm:w-48 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none bg-white"
                           >
+                            <option value="">Select a category</option>
                             {CATEGORY_OPTIONS.map((cat) => (
                               <option key={cat} value={cat}>{cat}</option>
                             ))}
@@ -2449,7 +2524,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                               id: null,
                               title: 'New Service',
                               description: 'Description of service features and benefits...',
-                              category: 'Photography',
+                              category: '',
                               hourly_rate: 500,
                               package_price: 2000,
                               duration_minutes: 240,
@@ -2754,12 +2829,41 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                           : 'The client has disputed this booking. An admin will review it shortly.'}
                                       </p>
                                       <p className="text-xs text-red-600 mt-2">
-                                        Status: Under Admin Review. You will be notified of the resolution.
+                                        Status: Under Admin Review. Respond below so the admin hears your side.
                                       </p>
                                     </div>
                                   </div>
+                                  {/* The provider previously had no way to answer a
+                                      dispute: completion_notes are written before the
+                                      dispute exists, so nothing they could say ever
+                                      addressed what the client actually alleged. */}
+                                  <DisputeResponsePanel
+                                    bookingId={booking.id}
+                                    role="provider"
+                                    existingResponse={booking.dispute_response}
+                                    existingResponseAt={booking.dispute_response_at}
+                                    onSubmitted={fetchBookings}
+                                  />
                                 </div>
                               )}
+                              <button
+                                onClick={() => {
+                                  setDetailsBooking({
+                                    ...booking,
+                                    otherParty: {
+                                      id: booking.client_id,
+                                      name: booking.client,
+                                      image: booking.image,
+                                      email: booking.clientEmail,
+                                    },
+                                    price: booking.amount,
+                                  });
+                                }}
+                                className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
+                              >
+                                <FileText className="w-4 h-4" />
+                                View Details
+                              </button>
                               <button
                                 onClick={() => {
                                   setSelectedBookingId(booking.id);
@@ -2942,6 +3046,14 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           />
         );
       })()}
+
+      {detailsBooking && (
+        <BookingDetailsModal
+          booking={detailsBooking}
+          isProvider
+          onClose={() => setDetailsBooking(null)}
+        />
+      )}
 
       {/* Reschedule Modal */}
       {showRescheduleModal && rescheduleBooking && (

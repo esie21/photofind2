@@ -40,20 +40,26 @@ export function HelpSupportPage({ onGoToBookings }: HelpSupportPageProps = {}) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [loadingTickets, setLoadingTickets] = useState(true);
+  const [ticketsError, setTicketsError] = useState<string | null>(null);
   const [activeTicketId, setActiveTicketId] = useState<string | null>(null);
   const hasAutoSelected = useRef(false);
 
   const loadTickets = async () => {
-    setLoadingTickets(true);
+    // Only the first load shows a spinner; a background refresh shouldn't blank the list.
+    if (!hasAutoSelected.current) setLoadingTickets(true);
     try {
       const resp = await supportService.getMyTickets();
       setTickets(resp.data);
+      setTicketsError(null);
       if (!hasAutoSelected.current) {
         hasAutoSelected.current = true;
         if (resp.data.length > 0) setActiveTicketId(resp.data[0].id);
       }
-    } catch (err) {
+    } catch (err: any) {
+      // This was a console.error and nothing else, so a failed fetch looked exactly like
+      // having no conversations at all - with no hint that anything had gone wrong.
       console.error('Failed to load support tickets:', err);
+      setTicketsError(err?.message || 'Could not load your conversations.');
     } finally {
       setLoadingTickets(false);
     }
@@ -68,6 +74,29 @@ export function HelpSupportPage({ onGoToBookings }: HelpSupportPageProps = {}) {
     setActiveTicketId(ticket.id);
     loadTickets();
   };
+
+  /**
+   * Refreshes the list after thread activity, coalescing bursts.
+   *
+   * The list was loaded once on mount and never again, so unread dots, last-message
+   * text and status badges were frozen at whatever they were when the page opened -
+   * including a ticket that support had since resolved. A rapid exchange would otherwise
+   * refetch on every single message, hence the delay.
+   */
+  const refreshTimerRef = useRef<number | null>(null);
+  const scheduleRefresh = () => {
+    if (refreshTimerRef.current) window.clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      loadTickets();
+    }, 1000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) window.clearTimeout(refreshTimerRef.current);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -118,6 +147,19 @@ export function HelpSupportPage({ onGoToBookings }: HelpSupportPageProps = {}) {
           </button>
         </div>
 
+        {ticketsError && (
+          <div className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            <span>{ticketsError}</span>
+            <button
+              type="button"
+              onClick={loadTickets}
+              className="flex-shrink-0 underline hover:no-underline"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {!loadingTickets && tickets.length > 0 && (
           <div className="flex gap-2 overflow-x-auto pb-1 mb-4">
             {tickets.map((ticket) => {
@@ -143,7 +185,12 @@ export function HelpSupportPage({ onGoToBookings }: HelpSupportPageProps = {}) {
         )}
 
         <div className="mb-8">
-          <SupportChat mode="user" ticketId={activeTicketId} onTicketCreated={handleTicketCreated} />
+          <SupportChat
+            mode="user"
+            ticketId={activeTicketId}
+            onTicketCreated={handleTicketCreated}
+            onActivity={scheduleRefresh}
+          />
         </div>
 
         {/* FAQ */}

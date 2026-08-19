@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import pool from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
+import { auditService } from '../services/auditService';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -16,6 +17,7 @@ import {
   verifyUploadedContent,
   handleUpload,
 } from '../services/uploadService';
+import { uploadLimiter } from '../middleware/security';
 
 interface AuthedRequest extends Request {
   userId?: string;
@@ -62,6 +64,10 @@ function getAttachmentMeta(file: any) {
   const relativePath = path.relative(uploadsRoot, absolutePath).replace(/\\/g, '/');
   const mime = String(file.mimetype || '');
 
+  // The video branch is unreachable for new uploads - documentFileFilter permits images
+  // and PDF only. It stays because this endpoint accepted anything at all before that
+  // filter was added, so rows with attachment_type 'video' can exist already, and the
+  // client still needs to know how to render them.
   const attachmentType = mime.startsWith('image/')
     ? 'image'
     : mime.startsWith('video/')
@@ -89,12 +95,64 @@ async function getTicketForAccess(ticketId: string, userId: string) {
   return 'forbidden';
 }
 
+/**
+ * Resolves the ticket and attaches it to the request, refusing before anything else runs.
+ *
+ * This has to sit BEFORE multer in the message-posting chain. It used to run inside the
+ * handler, which meant the attachment was already written to disk by the time anyone
+ * asked whether the sender could see the ticket - and the 403 path returned without
+ * deleting it. Any signed-in user could post a file against a ticket id they had no
+ * access to and leave it in uploads/support/ticket-<id>/ for good. users.ts fixed the
+ * same class of bug in its own upload routes; this one was missed.
+ */
+async function requireTicketAccess(req: any, res: Response, next: any) {
+  const userId = req.userId;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+  const ticket = await getTicketForAccess(req.params.id, userId);
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  if (ticket === 'forbidden') return res.status(403).json({ error: 'Access denied' });
+
+  req.supportTicket = ticket;
+  req.viewerIsAdmin = await isAdmin(userId);
+  return next();
+}
+
 const CATEGORY_LABELS: Record<string, string> = {
   booking: 'Booking',
   payment: 'Payment',
   account: 'Account',
   other: 'Other',
 };
+
+// Both columns are TEXT and express.json accepts 10MB, so without a cap a single
+// message could be megabytes of prose that no support agent could read anyway.
+const MAX_MESSAGE_LENGTH = 5000;
+// A person with a genuine problem does not need six open conversations at once, and
+// nothing else stopped a script opening thousands.
+const MAX_OPEN_TICKETS = 5;
+
+/**
+ * Tells every admin something happened on a ticket.
+ *
+ * Notifications only ever ran in the admin-to-user direction, so a new ticket - or a
+ * reply on an existing one - reached whichever admin happened to have the dashboard
+ * open at that moment, and nobody at all otherwise.
+ */
+async function notifyAdmins(params: { title: string; message: string; ticketId: string }) {
+  const admins = await pool.query(`SELECT id FROM users WHERE role = 'admin'`);
+  await Promise.all(
+    admins.rows.map((admin: any) =>
+      notificationService.create({
+        userId: String(admin.id),
+        type: 'system',
+        title: params.title,
+        message: params.message,
+        data: { action: 'support_message', ticket_id: params.ticketId },
+      })
+    )
+  );
+}
 
 // Create a support ticket (opens the conversation)
 router.post('/tickets', verifyToken, async (req: AuthedRequest, res: Response) => {
@@ -107,6 +165,20 @@ router.post('/tickets', verifyToken, async (req: AuthedRequest, res: Response) =
     }
     if (!message || !message.trim()) {
       return res.status(400).json({ error: 'Message is required' });
+    }
+    if (String(message).trim().length > MAX_MESSAGE_LENGTH) {
+      return res.status(400).json({ error: `Messages must be ${MAX_MESSAGE_LENGTH} characters or fewer` });
+    }
+
+    const openCount = await pool.query(
+      `SELECT COUNT(*) as total FROM support_tickets
+       WHERE user_id::text = $1 AND status IN ('open', 'in_progress')`,
+      [userId]
+    );
+    if (parseInt(openCount.rows[0].total, 10) >= MAX_OPEN_TICKETS) {
+      return res.status(429).json({
+        error: `You already have ${MAX_OPEN_TICKETS} open conversations. Please continue in one of those instead.`,
+      });
     }
 
     let bookingId: string | null = null;
@@ -139,6 +211,23 @@ router.post('/tickets', verifyToken, async (req: AuthedRequest, res: Response) =
        RETURNING *`,
       [ticket.id, userId, trimmedMessage]
     );
+
+    try {
+      await notifyAdmins({
+        title: 'New support ticket',
+        message: trimmedMessage.substring(0, 100),
+        ticketId: String(ticket.id),
+      });
+    } catch (notifError) {
+      // A ticket that was raised but not announced is still better than a 500 for the
+      // person raising it.
+      console.error('Failed to notify admins of new support ticket:', notifError);
+    }
+
+    const io = (req.app as any).get('io');
+    if (io) {
+      io.to('support:admin').emit('support:queue_update', { ticketId: String(ticket.id), reason: 'new_ticket' });
+    }
 
     return res.status(201).json({ data: { ticket, message: messageResult.rows[0] } });
   } catch (error) {
@@ -225,14 +314,21 @@ router.get('/tickets/:id/messages', verifyToken, async (req: AuthedRequest, res:
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     const ticket = await getTicketForAccess(ticketId, userId);
-    if (!ticket) { discardUploads(req); return res.status(404).json({ error: 'Ticket not found' }); }
-    if (ticket === 'forbidden') { discardUploads(req); return res.status(403).json({ error: 'Access denied' }); }
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    if (ticket === 'forbidden') return res.status(403).json({ error: 'Access denied' });
 
-    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    // Paged newest-first, then flipped, so the client can walk backwards through a long
+    // ticket. Without an offset the thread was capped at one page and the original
+    // problem description simply fell off the top of a long conversation.
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
     const msgs = await pool.query(
-      `SELECT * FROM support_messages WHERE ticket_id::text = $1 ORDER BY created_at DESC LIMIT $2`,
-      [ticketId, limit]
+      `SELECT * FROM support_messages WHERE ticket_id::text = $1
+       ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      [ticketId, limit, offset]
     );
+    // A full page back suggests there is more behind it.
+    const hasMore = msgs.rows.length === limit;
     msgs.rows.reverse();
 
     const viewerIsAdmin = await isAdmin(userId);
@@ -252,7 +348,7 @@ router.get('/tickets/:id/messages', verifyToken, async (req: AuthedRequest, res:
       });
     }
 
-    return res.json({ data: { ticket, messages: msgs.rows } });
+    return res.json({ data: { ticket, messages: msgs.rows, hasMore } });
   } catch (error) {
     console.error('Error fetching support thread:', error);
     return res.status(500).json({ error: 'Failed to fetch messages' });
@@ -262,23 +358,29 @@ router.get('/tickets/:id/messages', verifyToken, async (req: AuthedRequest, res:
 // Send a message in a ticket's thread
 router.post('/tickets/:id/messages',
   verifyToken,
+  // Ordered deliberately: access is settled before multer writes anything to disk.
+  requireTicketAccess,
   handleUpload(upload.single('file')),
   verifyUploadedContent,
-  async (req: AuthedRequest, res: Response) => {
+  // After multer, not before: uploadLimiter's skip check needs req.file to tell an
+  // attachment apart from a plain text reply, and it was previously counting every
+  // message - even ones with no file - against the 30-per-hour upload cap.
+  uploadLimiter,
+  async (req: any, res: Response) => {
   try {
     const userId = req.userId;
     const ticketId = req.params.id;
+    const ticket = req.supportTicket;
     const content = String((req.body as any)?.content || '').trim();
     const file = (req as any).file as any;
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
     if (!content && !file) return res.status(400).json({ error: 'Missing content or file' });
+    if (content.length > MAX_MESSAGE_LENGTH) {
+      discardUploads(req);
+      return res.status(400).json({ error: `Messages must be ${MAX_MESSAGE_LENGTH} characters or fewer` });
+    }
 
-    const ticket = await getTicketForAccess(ticketId, userId);
-    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    if (ticket === 'forbidden') return res.status(403).json({ error: 'Access denied' });
-
-    const viewerIsAdmin = await isAdmin(userId);
-    const senderRole = viewerIsAdmin ? 'admin' : 'user';
+    const senderRole = req.viewerIsAdmin ? 'admin' : 'user';
     const { attachmentUrl, attachmentName, attachmentType } = getAttachmentMeta(file);
 
     const insert = await pool.query(
@@ -289,31 +391,65 @@ router.post('/tickets/:id/messages',
     );
     const sent = insert.rows[0];
 
-    const statusUpdate =
-      senderRole === 'admin' && ticket.status === 'open'
-        ? await pool.query(
-            `UPDATE support_tickets SET status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE id::text = $1 RETURNING *`,
-            [ticketId]
-          )
-        : await pool.query(
-            `UPDATE support_tickets SET updated_at = CURRENT_TIMESTAMP WHERE id::text = $1 RETURNING *`,
-            [ticketId]
-          );
+    // 'support.reply' has been a defined audit action since the audit log was written,
+    // but nothing ever called it - every other admin action (verify, reject, delete,
+    // dispute resolve, ticket status change) was in the trail except the actual content
+    // of what an admin said to a user.
+    if (senderRole === 'admin') {
+      // log() swallows its own errors - a logging failure must never block the reply.
+      await auditService.log({
+        userId,
+        action: 'support.reply',
+        entityType: 'support_ticket',
+        entityId: ticketId,
+        newValues: { message_id: sent.id, content: sent.content, has_attachment: Boolean(attachmentUrl) },
+        req,
+      });
+    }
+
+    // An admin replying picks the ticket up. A user replying to a ticket that was marked
+    // resolved reopens it - without this the status stayed 'resolved', and since the
+    // admin queue filters on 'open' by default, the reply was never seen by anyone.
+    let nextStatus: string | null = null;
+    if (senderRole === 'admin' && ticket.status === 'open') nextStatus = 'in_progress';
+    if (senderRole === 'user' && ticket.status === 'resolved') nextStatus = 'open';
+
+    const statusUpdate = nextStatus
+      ? await pool.query(
+          `UPDATE support_tickets SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE id::text = $1 RETURNING *`,
+          [ticketId, nextStatus]
+        )
+      : await pool.query(
+          `UPDATE support_tickets SET updated_at = CURRENT_TIMESTAMP WHERE id::text = $1 RETURNING *`,
+          [ticketId]
+        );
     const updatedTicket = statusUpdate.rows[0];
 
     const io = (req.app as any).get('io');
     if (io) {
       io.to(`support:${ticketId}`).emit('support:message', { ticketId, message: sent, ticketStatus: updatedTicket.status });
+      // Keeps the admin queue's last-message preview and unread badge current for
+      // admins who don't have this ticket open - mirrors the new-ticket broadcast above.
+      io.to('support:admin').emit('support:queue_update', { ticketId, reason: 'message' });
     }
 
+    // Notifications go both ways. Only the admin-to-user direction existed, so a user's
+    // reply reached whoever happened to have the dashboard open and nobody else.
     try {
+      const preview = content ? content.substring(0, 100) : 'Sent an attachment';
       if (senderRole === 'admin') {
         await notificationService.create({
           userId: String(ticket.user_id),
           type: 'system',
           title: 'Support replied to your ticket',
-          message: content ? content.substring(0, 100) : 'Sent an attachment',
+          message: preview,
           data: { action: 'support_message', ticket_id: ticketId },
+        });
+      } else {
+        await notifyAdmins({
+          title: nextStatus === 'open' ? 'Resolved ticket reopened' : 'New reply on a support ticket',
+          message: preview,
+          ticketId,
         });
       }
     } catch (notifError) {
@@ -323,6 +459,8 @@ router.post('/tickets/:id/messages',
     return res.status(201).json({ data: sent });
   } catch (error) {
     console.error('Error sending support message:', error);
+    // Whatever multer wrote is orphaned once the insert fails.
+    discardUploads(req);
     return res.status(500).json({ error: 'Failed to send message' });
   }
 });

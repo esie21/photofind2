@@ -69,6 +69,8 @@ export interface User {
   is_verified?: boolean;
   verification_status?: 'unsubmitted' | 'pending' | 'approved' | 'rejected' | string;
   verification_documents?: Array<{ path: string; original_name: string; uploaded_at: string }> | null;
+  /** False for a Google account that has never set a real password - see routes/auth.ts. */
+  has_password?: boolean;
 }
 
 const authService = {
@@ -123,6 +125,10 @@ const authService = {
 
   async getCurrentUser(): Promise<User> {
     return apiClient.get<User>(API_CONFIG.ENDPOINTS.AUTH.ME);
+  },
+
+  async changePassword(data: { currentPassword?: string; newPassword: string }): Promise<void> {
+    await apiClient.post<{ success: boolean }>(API_CONFIG.ENDPOINTS.AUTH.CHANGE_PASSWORD, data);
   },
 
   setToken(token: string | null) {

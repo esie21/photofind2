@@ -444,9 +444,14 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
 
   // Pricing based on booking type selection
   const isHourlyPricing = bookingType === 'hourly';
+  // Both branches fall back to the flat `price` column, same as the package branch
+  // already did. A service whose specific hourly_rate/package_price came back empty -
+  // a stale row from before the backend wrote those columns correctly, or any other gap
+  // between what's configured and what loaded - should charge whatever price the service
+  // does have, not silently charge nothing for an hour of a provider's time.
   const basePrice = selectedServiceData
     ? (bookingType === 'hourly'
-        ? (selectedServiceData.hourly_rate || 0)
+        ? (selectedServiceData.hourly_rate || selectedServiceData.price || 0)
         : (selectedServiceData.package_price || selectedServiceData.price || 0))
     : 0;
   const packageDurationMinutes = selectedServiceData?.duration_minutes || 0;
@@ -1337,6 +1342,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                   const isToday = todayStr === dateObj.toDateString();
 
                                   const showUnavailable = status === 'booked' || status === 'blocked';
+                                  // The provider's own note for why they blocked the day
+                                  // ("Vacation"), which the calendar endpoint has always
+                                  // returned and this grid never surfaced.
+                                  const blockedReason = status === 'blocked'
+                                    ? String(getDayOverride(day)?.reason || '').trim()
+                                    : '';
 
                                   return (
                                     <button
@@ -1349,7 +1360,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                         ${selectable ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}
                                       `}
                                       title={
-                                        status === 'blocked' ? 'Provider unavailable' :
+                                        status === 'blocked' ? (blockedReason ? `Provider unavailable - ${blockedReason}` : 'Provider unavailable') :
                                         status === 'booked' ? 'Fully booked' :
                                         status === 'past' ? 'Past date' :
                                         dayData?.available_count ? `${dayData.available_count} slot${dayData.available_count !== 1 ? 's' : ''} available` :
@@ -1364,7 +1375,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                             ? 'bg-blue-600 text-white'
                                             : isToday
                                               ? 'border border-blue-600 text-blue-600'
-                                              : 'text-gray-900'
+                                              // A day that is blocked or fully booked reads
+                                              // as unavailable rather than merely dimmed,
+                                              // matching how a taken time slot is styled.
+                                              : showUnavailable
+                                                ? 'text-red-400 line-through'
+                                                : 'text-gray-900'
                                           }
                                           ${!isSelected && selectable ? 'hover:bg-gray-100' : ''}
                                         `}

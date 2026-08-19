@@ -2,16 +2,18 @@ import { useState } from 'react';
 import { Lock, Bell, Shield, FileText } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { ChangePasswordModal } from './ChangePasswordModal';
 
 interface SettingsPageProps {
   onGoToTerms?: () => void;
 }
 
 export function SettingsPage({ onGoToTerms }: SettingsPageProps = {}) {
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const toast = useToast();
   const [emailNotifications, setEmailNotifications] = useState(true);
   const [bookingReminders, setBookingReminders] = useState(true);
+  const [showChangePassword, setShowChangePassword] = useState(false);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -45,7 +47,7 @@ export function SettingsPage({ onGoToTerms }: SettingsPageProps = {}) {
           <div className="bg-white rounded-2xl shadow-sm p-6">
             <h2 className="text-gray-900 mb-4">Security</h2>
             <button
-              onClick={() => toast.info('Coming soon', 'Password changes will be available here soon.')}
+              onClick={() => setShowChangePassword(true)}
               className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-50 transition-colors text-left"
             >
               <span className="w-9 h-9 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center flex-shrink-0">
@@ -53,7 +55,11 @@ export function SettingsPage({ onGoToTerms }: SettingsPageProps = {}) {
               </span>
               <div className="flex-1">
                 <div className="text-sm text-gray-900">Change password</div>
-                <div className="text-xs text-gray-500">Update the password you use to sign in</div>
+                <div className="text-xs text-gray-500">
+                  {user?.has_password === false
+                    ? "You signed in with Google - set a password to also sign in with email"
+                    : 'Update the password you use to sign in'}
+                </div>
               </div>
             </button>
           </div>
@@ -135,6 +141,14 @@ export function SettingsPage({ onGoToTerms }: SettingsPageProps = {}) {
           </div>
         </div>
       </div>
+
+      {showChangePassword && (
+        <ChangePasswordModal
+          hasPassword={user?.has_password !== false}
+          onClose={() => setShowChangePassword(false)}
+          onChanged={() => { refreshUser(); }}
+        />
+      )}
     </div>
   );
 }

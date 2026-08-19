@@ -2,6 +2,7 @@ import { Request, Response, NextFunction, RequestHandler } from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import xss from 'xss';
+import { discardUploads } from '../services/uploadService';
 
 // ==============================================
 // RATE LIMITING CONFIGURATION (3x multiplier for development)
@@ -78,7 +79,14 @@ export const adminLimiter = rateLimit({
   validate: { xForwardedForHeader: false },
 });
 
-// File upload limiter - 30 uploads per hour
+// File upload limiter - 30 uploads per hour.
+//
+// Routes that mix uploads with plain requests on the same endpoint (a message that may
+// or may not carry an attachment) put this after multer, so req.file/req.files is
+// already populated - `skip` then only counts requests that actually uploaded something,
+// instead of throttling every request the route handles. A request multer already wrote
+// a file for that then trips the limit still needs that file cleaned up, since the route
+// handler that normally does it never runs.
 export const uploadLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 30,
@@ -86,6 +94,14 @@ export const uploadLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
+  skip: (req: Request) => {
+    const r = req as any;
+    return !r.file && !(Array.isArray(r.files) && r.files.length > 0);
+  },
+  handler: (req: Request, res: Response, _next: NextFunction, options) => {
+    discardUploads(req);
+    res.status(options.statusCode).json(options.message);
+  },
 });
 
 // ==============================================

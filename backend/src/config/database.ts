@@ -101,6 +101,29 @@ export async function initializeTables() {
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users (google_id) WHERE google_id IS NOT NULL;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP;`);
 
+    // Tracks whether this account has a password its owner actually knows, as opposed to
+    // the random one generated on Google sign-up (see routes/auth.ts). NULL means "no
+    // known password yet" and lets change-password skip asking for a current one; a real
+    // timestamp means one must be verified. Unlike most columns below, NULL here is a
+    // meaningful, permanent steady state for Google-only accounts - so the backfill for
+    // pre-existing rows has to run exactly once, the boot this column is introduced, not
+    // on every boot like the IS-NULL-guarded backfills elsewhere in this file. Re-running
+    // it later would stamp a timestamp onto a genuinely-still-passwordless Google account
+    // created after that first boot and silently break the flow for them.
+    const passwordSetAtExists = await client.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'users' AND column_name = 'password_set_at'
+    `);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_set_at TIMESTAMP;`);
+    if (passwordSetAtExists.rows.length === 0) {
+      // Safest default for every account that already exists: assume it has a real,
+      // known password unless this migration proves otherwise going forward. That never
+      // lets an existing password holder skip re-entering it; the cost is that an
+      // existing Google-only account stays unable to use change-password until it sets
+      // a password via "forgot password" instead - the same limitation it already had.
+      await client.query(`UPDATE users SET password_set_at = created_at WHERE password_set_at IS NULL;`);
+    }
+
     // Create services table (only if not exists)
     const servicesExist = await client.query(`SELECT to_regclass('public.services') as exists`);
     if (!servicesExist.rows[0].exists) {
@@ -216,6 +239,15 @@ export async function initializeTables() {
     // Why a booking was cancelled. 'cancelled' now covers both a person cancelling and a
     // payment deadline passing, and those read very differently to whoever it happened to.
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;`);
+
+    // The minimum this booking was allowed to cost, as computed when it was created
+    // (see config/pricingConfig.ts). Stored rather than re-derived so that
+    // POST /payments/create-intent can re-check the stored total_price before charging
+    // without that check breaking every time a provider edits their rates - comparing
+    // against the service's *current* price would reject perfectly good bookings taken
+    // before a price rise. NULL on rows created before this column existed, and the
+    // check skips those rather than guessing a floor for them.
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS min_price_at_booking DECIMAL(10, 2);`);
     await client.query(
       `CREATE INDEX IF NOT EXISTS idx_bookings_payment_due ON bookings (payment_due_at)
        WHERE payment_due_at IS NOT NULL;`
@@ -269,6 +301,11 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_resolution TEXT;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_resolved_at TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_resolved_by ${refType};`);
+    // The provider's side of the story. A dispute used to be the client's reason set
+    // against the provider's *pre-dispute* completion notes, so the provider had no way
+    // to answer the actual accusation and admins resolved having heard one side.
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_response TEXT;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dispute_response_at TIMESTAMP;`);
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS confirmation_warning_sent_at TIMESTAMP;`);
 
     // Update status column size and CHECK constraint to include new statuses
@@ -394,6 +431,13 @@ export async function initializeTables() {
         `);
       }
     }
+
+    // Photos attached *after* a dispute was raised, by either party, as opposed to the
+    // provider's completion photos. Same table so the evidence reads stay single-query,
+    // but flagged so the admin panel can show the two apart - a provider's "here is the
+    // delivered work" shot and a client's "here is what was wrong" shot are not the same
+    // kind of exhibit. Existing rows default to FALSE, which is correct for them.
+    await client.query(`ALTER TABLE booking_evidence ADD COLUMN IF NOT EXISTS is_dispute_evidence BOOLEAN DEFAULT FALSE;`);
 
     // Booking evidence indexes
     await client.query(`CREATE INDEX IF NOT EXISTS idx_booking_evidence_booking ON booking_evidence (booking_id);`);
@@ -1083,6 +1127,74 @@ export async function initializeTables() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_time_slots_datetime ON time_slots (provider_id, start_datetime);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_time_slots_status ON time_slots (status);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_time_slots_hold_expires ON time_slots (hold_expires_at) WHERE status = 'held';`);
+
+    // Reconcile time slots against the bookings that own them.
+    //
+    // POST /bookings did not mark its slots 'booked' for a long time - it inserted the
+    // booking row and left time_slots untouched. The bookings-table overlap check still
+    // prevented a genuine double-booking, but the slot picker reads time_slots, so a
+    // taken time kept rendering as available: the client's hold simply expired on its
+    // own timer and the slot went back on sale under a booking that still existed. The
+    // route now claims its slots, but that only helps bookings made after it ships -
+    // every booking taken before then is still unlinked, and its time would go on
+    // showing as free right up until someone tried to book it and got a 409.
+    //
+    // Idempotent: once a slot is marked and linked, the status/booking_id guards below
+    // exclude it, so re-running this on every boot is a no-op. Scoped to bookings that
+    // have not finished yet, since the picker only ever renders future slots.
+    //
+    // bookings.provider_id and time_slots.provider_id are NOT the same id space when a
+    // separate providers table exists - the former is providers.id, the latter is
+    // users.id - hence resolving through it. COALESCE covers the schema where bookings
+    // reference users directly and there is nothing to resolve.
+    try {
+      const hasProvidersTable = await client.query(`SELECT to_regclass('public.providers') as exists`);
+      const providerJoin = hasProvidersTable.rows[0].exists
+        ? `LEFT JOIN providers p ON p.id::text = b.provider_id::text`
+        : '';
+      const providerMatch = hasProvidersTable.rows[0].exists
+        ? `COALESCE(p.user_id::text, b.provider_id::text)`
+        : `b.provider_id::text`;
+
+      // DISTINCT ON picks exactly one booking per slot. Historical data can contain two
+      // overlapping non-cancelled bookings for one provider (the creation-time overlap
+      // check was a plain SELECT-then-INSERT with no lock until POST /bookings took an
+      // advisory lock, so two concurrent requests could both pass it). A bare
+      // `UPDATE ... FROM bookings` matches both and lets Postgres pick, so which booking
+      // owns the slot could differ between two runs on identical data. Oldest booking
+      // wins, id breaking any remaining tie, so this is at least deterministic and
+      // favours whoever actually booked first.
+      const reconciled = await client.query(`
+        UPDATE time_slots ts
+        SET status = 'booked',
+            booking_id = chosen.booking_id,
+            held_by = NULL,
+            hold_expires_at = NULL
+        FROM (
+          SELECT DISTINCT ON (s.id) s.id AS slot_id, b.id AS booking_id
+          FROM time_slots s
+          JOIN bookings b
+            ON s.start_datetime >= b.start_date
+           AND s.end_datetime <= b.end_date
+          ${providerJoin}
+          WHERE s.provider_id::text = ${providerMatch}
+            AND b.status NOT IN ('cancelled', 'rejected')
+            AND b.deleted_at IS NULL
+            AND b.start_date IS NOT NULL
+            AND b.end_date IS NOT NULL
+            AND b.end_date > NOW()
+            AND s.status <> 'booked'
+            AND s.booking_id IS NULL
+          ORDER BY s.id, b.created_at ASC, b.id ASC
+        ) chosen
+        WHERE ts.id = chosen.slot_id
+      `);
+      if (reconciled.rowCount) {
+        console.log(`Marked ${reconciled.rowCount} time slot(s) as booked to match existing bookings.`);
+      }
+    } catch (e) {
+      console.log('Time slot reconciliation skipped (non-fatal):', (e as Error).message);
+    }
 
     // ==================== NOTIFICATIONS TABLE ====================
     const notificationsExist = await client.query(`SELECT to_regclass('public.notifications') as exists`);

@@ -3305,3 +3305,234 @@ html {
   max-width: 100%;
   background-color: #000;
 }
+
+/* More utilities the checked-in Tailwind build never emitted. These ones are all asked
+   for by the support chat, where their absence is visible: a shared link rendered
+   without an underline is indistinguishable from the text around it, a long URL breaks
+   out of its bubble, and a tall screenshot fills the whole thread. */
+.underline {
+  text-decoration-line: underline;
+}
+
+.break-words {
+  overflow-wrap: break-word;
+}
+
+.max-h-56 {
+  max-height: 14rem;
+}
+
+.max-w-\[220px\] {
+  max-width: 220px;
+}
+
+.gap-1\.5 {
+  gap: 0.375rem;
+}
+
+.mb-0\.5 {
+  margin-bottom: 0.125rem;
+}
+
+.pb-1 {
+  padding-bottom: 0.25rem;
+}
+
+.pl-1 {
+  padding-left: 0.25rem;
+}
+
+.disabled\:cursor-default:disabled {
+  cursor: default;
+}
+
+.hover\:no-underline:hover {
+  text-decoration-line: none;
+}
+
+/* The Help & Support page disables "Message a provider" when it has no handler to
+   navigate with. Without this the button still lifted on hover while disabled, which
+   reads as clickable. */
+.disabled\:hover\:shadow-sm:disabled:hover {
+  --tw-shadow: 0 1px 3px 0 var(--tw-shadow-color, #0000001a), 0 1px 2px -1px var(--tw-shadow-color, #0000001a);
+  box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+}
+
+/* ============================================================
+   Support chat
+
+   Same reasoning as the modal block above: there is no Tailwind step in this build, so
+   the layout this needs cannot come from sm:/lg: utilities - of the responsive variants
+   only 25 were ever emitted, and none of them are these. Written as real media queries
+   instead.
+
+   The shell was `h-[560px]`, which was never emitted either, so it resolved to nothing:
+   the column had no height for its thread to fill, `flex-1 overflow-y-auto` never had an
+   overflow to scroll, and a long conversation just grew down the page, carrying the
+   composer past the bottom of the viewport.
+   ============================================================ */
+
+.support-chat {
+  display: flex;
+  flex-direction: column;
+  /* Tall enough to hold a conversation, never taller than the viewport around it. dvh
+     excludes mobile browser chrome and shrinks when the keyboard opens; the vh line
+     above it is the fallback for browsers without dvh. */
+  height: 70vh;
+  height: 70dvh;
+  min-height: 20rem;
+}
+
+@media (width >= 40rem) {
+  .support-chat {
+    height: 560px;
+    max-height: 80vh;
+    max-height: 80dvh;
+  }
+}
+
+/* Everything that is not the thread - header, category strip, composer - keeps its
+   natural height. Flex children shrink by default, so on a short viewport (a phone in
+   landscape, or the keyboard open) the composer would otherwise be squeezed along with
+   the thread instead of the thread giving up the space. */
+.support-chat > :not(.support-chat__thread) {
+  flex-shrink: 0;
+}
+
+/* The thread is the only scrolling region. min-height:0 is what actually lets it
+   scroll - a flex item defaults to min-height:auto and so refuses to shrink below its
+   content, which leaves the overflow to spill out of the card instead. */
+.support-chat__thread {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* Reaching the top of the thread should not start scrolling the page behind it. */
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Bubbles were `max-w-sm` - 24rem, or 384px. The thread's content box on a 360px phone
+   is about 328px, so that ceiling was never reached: every bubble ran the full width
+   and a message you sent stopped looking any different from one you received. A
+   percentage keeps the asymmetry on small screens; the fixed ceiling returns above. */
+.support-chat__bubble {
+  max-width: 85%;
+}
+
+@media (width >= 40rem) {
+  .support-chat__bubble {
+    max-width: 24rem;
+  }
+}
+
+/* An image attachment had a height cap (max-h-56) but no width one, so a wide
+   screenshot pushed its own bubble past the edge of the thread. */
+.support-chat__media {
+  max-width: 100%;
+  max-height: 14rem;
+  border-radius: 0.75rem;
+}
+
+.support-chat__media--video {
+  width: 100%;
+  max-width: 100%;
+  max-height: 16rem;
+  border-radius: 0.75rem;
+}
+
+/* Thumbnail for a picked-but-unsent image, so you can check it's the right
+   screenshot before it goes out instead of trusting a bare filename. */
+.support-chat__preview {
+  position: relative;
+  display: inline-block;
+}
+
+.support-chat__preview-thumb {
+  display: block;
+  max-height: 5.5rem;
+  max-width: 100%;
+  border-radius: 0.75rem;
+  border: 1px solid var(--color-gray-200);
+}
+
+.support-chat__preview-remove {
+  position: absolute;
+  top: -0.5rem;
+  right: -0.5rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 9999px;
+  background: var(--color-gray-900);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #fff;
+}
+
+.support-chat__preview-remove:hover {
+  background: var(--color-red-600);
+}
+
+/* Sticky rather than absolutely positioned against the thread: as the last child of
+   a scrolling column, position:sticky with a bottom offset keeps it pinned at the
+   visible bottom edge while there's more content below, then settles into normal flow
+   once you actually reach the end - a pure-CSS "back to the bottom" affordance with no
+   scroll-position math in JS. pointer-events is split so the full-width wrapper never
+   blocks clicks on a message sitting behind it; only the button itself is clickable. */
+.support-chat__jump-to-latest {
+  position: sticky;
+  bottom: 0.5rem;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.support-chat__jump-to-latest button {
+  pointer-events: auto;
+}
+
+/* On a phone the composer should give its pixels to the thread above it. */
+.support-chat__composer {
+  padding: 0.625rem;
+  border-top: 1px solid var(--color-gray-200);
+}
+
+@media (width >= 40rem) {
+  .support-chat__composer {
+    padding: 1rem;
+  }
+}
+
+/* ============================================================
+   Admin support workspace: the ticket queue beside the thread.
+
+   `lg:grid-cols-[360px_1fr]` was never emitted, so this was one column at every width -
+   a 27" monitor got the same stacked layout as a phone.
+   ============================================================ */
+
+.support-workspace {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (width >= 64rem) {
+  .support-workspace {
+    grid-template-columns: 360px 1fr;
+  }
+}
+
+/* Stacked, the queue sits above the thread, so an uncapped list means scrolling past
+   every open ticket to reach the conversation you just picked. */
+.support-workspace__list {
+  max-height: 17rem;
+  overflow-y: auto;
+}
+
+@media (width >= 64rem) {
+  .support-workspace__list {
+    max-height: 40rem;
+  }
+}

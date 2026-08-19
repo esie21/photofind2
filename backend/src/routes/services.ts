@@ -1,8 +1,32 @@
 import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
+import { CATEGORY_OPTIONS } from '../constants/categories';
 
 const router = express.Router();
+
+/**
+ * Rejects a rate that would poison the booking price floor.
+ *
+ * Only `price` was ever checked, while hourly_rate and package_price went into the row
+ * as `value || null`. config/pricingConfig.ts prices an hourly booking off hourly_rate,
+ * so a negative one there produced a negative minimum - a booking that clears
+ * validation at any price at all. Absent means "not set" and stays allowed; present
+ * means it has to be a real, positive amount.
+ */
+function rateError(label: string, value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return `${label} must be greater than zero`;
+  return null;
+}
+
+function validateRates(body: any): string | null {
+  return (
+    rateError('Hourly rate', body?.hourly_rate) ||
+    rateError('Package price', body?.package_price)
+  );
+}
 
 // Helper function to get provider ID from user ID
 async function getProviderIdFromUserId(userId: string): Promise<string> {
@@ -335,7 +359,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   try {
     const userId = req.userId;
-    const { title, description, price, hourly_price, category, images, pricing_type, duration_minutes } = req.body;
+    const { title, description, price, hourly_rate, package_price, category, images, pricing_type, duration_minutes } = req.body;
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -350,6 +374,18 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     // skips price validation entirely and can be booked for any amount.
     if (Number(price) <= 0 || !Number.isFinite(Number(price))) {
       return res.status(400).json({ error: 'Price must be greater than zero' });
+    }
+
+    const rateProblem = validateRates(req.body);
+    if (rateProblem) {
+      return res.status(400).json({ error: rateProblem });
+    }
+
+    // providers.ts's category filter and stats queries match stored values with exact
+    // string equality, so a category outside the picker's own options would silently
+    // make this service unfindable by category rather than erroring anywhere.
+    if (category !== undefined && category !== null && String(category).trim() !== '' && !CATEGORY_OPTIONS.includes(String(category).trim())) {
+      return res.status(400).json({ error: 'Invalid category' });
     }
 
     // Get provider_id from user_id (handles both direct users reference and providers table)
@@ -368,7 +404,13 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     const hasDescription = existingColumns.includes('description');
     const hasPricingType = existingColumns.includes('pricing_type');
     const hasDurationMinutes = existingColumns.includes('duration_minutes');
-    const hasHourlyPrice = existingColumns.includes('hourly_price');
+    // 'hourly_rate' and 'package_price' are what the pricing editor actually sends and
+    // what every read path (toPackage(), the booking flow) reads back. 'hourly_price' is
+    // a legacy column nothing writes to on purpose; matching its name here silently
+    // dropped every hourly rate and package price the moment a service used both pricing
+    // modes at once, since neither had anywhere real to land.
+    const hasHourlyRate = existingColumns.includes('hourly_rate');
+    const hasPackagePrice = existingColumns.includes('package_price');
 
     // Build dynamic INSERT query based on existing columns
     const columns: string[] = ['provider_id', 'title', 'price'];
@@ -413,10 +455,17 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       paramIndex++;
     }
 
-    if (hasHourlyPrice) {
-      columns.push('hourly_price');
+    if (hasHourlyRate) {
+      columns.push('hourly_rate');
       placeholders.push(`$${paramIndex}`);
-      values.push(hourly_price || null);
+      values.push(hourly_rate || null);
+      paramIndex++;
+    }
+
+    if (hasPackagePrice) {
+      columns.push('package_price');
+      placeholders.push(`$${paramIndex}`);
+      values.push(package_price || null);
       paramIndex++;
     }
 
@@ -479,7 +528,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
   try {
     const { id } = req.params;
     const userId = req.userId;
-    const { title, description, price, hourly_price, category, images, pricing_type, duration_minutes } = req.body;
+    const { title, description, price, hourly_rate, package_price, category, images, pricing_type, duration_minutes } = req.body;
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -488,6 +537,17 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     // Same zero-price rule as service creation - see the comment there.
     if (price !== undefined && price !== null && (Number(price) <= 0 || !Number.isFinite(Number(price)))) {
       return res.status(400).json({ error: 'Price must be greater than zero' });
+    }
+
+    // Same category allowlist check as service creation - see the comment there.
+    if (category !== undefined && category !== null && String(category).trim() !== '' && !CATEGORY_OPTIONS.includes(String(category).trim())) {
+      return res.status(400).json({ error: 'Invalid category' });
+    }
+
+    // Same rate check as service creation - an update can set these just as freely.
+    const rateProblem = validateRates(req.body);
+    if (rateProblem) {
+      return res.status(400).json({ error: rateProblem });
     }
 
     // Get provider ID from user ID
@@ -522,7 +582,11 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const hasUpdatedAt = existingColumns.includes('updated_at');
     const hasPricingType = existingColumns.includes('pricing_type');
     const hasDurationMinutes = existingColumns.includes('duration_minutes');
-    const hasHourlyPrice = existingColumns.includes('hourly_price');
+    // Same fix as the create route above: write the columns the pricing editor and the
+    // booking flow actually read ('hourly_rate', 'package_price'), not the unused legacy
+    // 'hourly_price' column.
+    const hasHourlyRate = existingColumns.includes('hourly_rate');
+    const hasPackagePrice = existingColumns.includes('package_price');
 
     // Build dynamic UPDATE query based on existing columns
     const updates: string[] = [];
@@ -571,9 +635,15 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       paramIndex++;
     }
 
-    if (hasHourlyPrice && hourly_price !== undefined) {
-      updates.push(`hourly_price = $${paramIndex}`);
-      values.push(hourly_price);
+    if (hasHourlyRate && hourly_rate !== undefined) {
+      updates.push(`hourly_rate = $${paramIndex}`);
+      values.push(hourly_rate);
+      paramIndex++;
+    }
+
+    if (hasPackagePrice && package_price !== undefined) {
+      updates.push(`package_price = $${paramIndex}`);
+      values.push(package_price);
       paramIndex++;
     }
 

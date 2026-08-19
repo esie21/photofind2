@@ -5,6 +5,7 @@ import multer from 'multer';
 import { Request as ExpressRequest } from 'express';
 import path from 'path';
 import fs from 'fs';
+import { CATEGORY_OPTIONS } from '../constants/categories';
 import {
   UPLOADS_ROOT,
   MAX_FILE_SIZE,
@@ -217,14 +218,30 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
         }
       }
     }
+    // The category filter and stats queries in routes/providers.ts match stored
+    // values with exact string equality, so a category that doesn't match one of
+    // the picker's own options - a typo, a stray value from before the option list
+    // changed - would silently make this provider unfindable by category rather
+    // than erroring anywhere. Empty string/null still means "no category set".
+    if (category !== undefined && category !== null && category.trim() !== '' && !CATEGORY_OPTIONS.includes(category.trim())) {
+      return res.status(400).json({ error: 'Invalid category' });
+    }
     if (years_experience !== undefined && years_experience !== null && years_experience !== '') {
       const years = Number(years_experience);
       if (!Number.isInteger(years) || years < 0 || years > 80) {
         return res.status(400).json({ error: 'Years of experience must be a whole number between 0 and 80' });
       }
     }
-    if (portfolio_images !== undefined && portfolio_images !== null && !Array.isArray(portfolio_images)) {
-      return res.status(400).json({ error: 'portfolio_images must be an array' });
+    if (portfolio_images !== undefined && portfolio_images !== null) {
+      if (!Array.isArray(portfolio_images)) {
+        return res.status(400).json({ error: 'portfolio_images must be an array' });
+      }
+      // The upload endpoint enforces this cap, but a reorder/delete/caption edit goes
+      // through this route with a client-supplied array - nothing here stopped a raw PUT
+      // from setting it to any length regardless of what was actually uploaded.
+      if (portfolio_images.length > MAX_PORTFOLIO_FILES) {
+        return res.status(400).json({ error: `portfolio_images cannot describe more than ${MAX_PORTFOLIO_FILES} images` });
+      }
     }
 
     // Captions and albums arrive as a path -> { caption, album } map. Validate every
@@ -463,7 +480,9 @@ router.post('/:id/upload/profile',
 router.post('/:id/upload/portfolio',
   verifyToken,
   requireSelfOrAdmin,
-  handleUpload(uploadPortfolio.array('images', MAX_PORTFOLIO_FILES)),
+  // MAX_VIDEO_SIZE to match this uploader's own limits.fileSize - the per-type
+  // ceilings (images back down to MAX_FILE_SIZE) are applied by enforceMediaSizeLimits.
+  handleUpload(uploadPortfolio.array('images', MAX_PORTFOLIO_FILES), MAX_VIDEO_SIZE),
   verifyUploadedContent,
   enforceMediaSizeLimits,
   async (req: any, res: Response) => {
@@ -675,30 +694,47 @@ router.delete('/:id/portfolio/:imagePath(*)', verifyToken, async (req: any, res:
       return res.status(403).json({ error: 'Not authorized to update this profile' });
     }
 
-    // Get current portfolio images
-    const result = await pool.query('SELECT portfolio_images FROM users WHERE id = $1', [userId]);
+    // Get current portfolio images and metadata
+    const result = await pool.query('SELECT portfolio_images, portfolio_meta FROM users WHERE id = $1', [userId]);
     const existing: string[] = result.rows[0]?.portfolio_images || [];
+    const existingMeta: PortfolioMeta = result.rows[0]?.portfolio_meta || {};
 
     // Find and remove the image
     const fullPath = `users/${userId}/portfolio/${imagePath}`;
+    const removed = existing.find(img => img === fullPath || img === imagePath);
     const newArr = existing.filter(img => img !== fullPath && img !== imagePath);
 
-    if (newArr.length === existing.length) {
+    if (!removed) {
       return res.status(404).json({ error: 'Image not found in portfolio' });
     }
 
-    // Delete from filesystem
-    try {
-      deleteUploadSafe(resolveInsideRoot(UPLOADS_ROOT, fullPath));
-    } catch {
-      console.warn('Refusing to delete a stored path outside uploads:', fullPath);
+    // Same pruning PUT /:id does for a removed item - without it, a caption/album (and a
+    // video's poster/thumbnail) for this item would sit in portfolio_meta indefinitely
+    // and reattach itself if this path were ever reused.
+    const removedKey = normaliseStoredPath(removed);
+    const removedEntry = existingMeta[removed] || existingMeta[removedKey] || {};
+    const newMeta = { ...existingMeta };
+    delete newMeta[removed];
+    delete newMeta[removedKey];
+
+    // Delete from filesystem - the original, and any derived poster/thumbnail, which are
+    // just as orphaned as the original once the item is gone.
+    for (const p of [fullPath, removedEntry.poster, removedEntry.thumb].filter((v): v is string => !!v)) {
+      try {
+        deleteUploadSafe(resolveInsideRoot(UPLOADS_ROOT, p));
+      } catch {
+        console.warn('Refusing to delete a stored path outside uploads:', p);
+      }
     }
 
     // Update database
-    await pool.query('UPDATE users SET portfolio_images = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newArr, userId]);
+    await pool.query(
+      'UPDATE users SET portfolio_images = $1, portfolio_meta = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
+      [newArr, JSON.stringify(newMeta), userId]
+    );
 
     console.log('Portfolio image deleted:', fullPath);
-    res.json({ success: true, portfolio_images: newArr });
+    res.json({ success: true, portfolio_images: newArr, portfolio_meta: newMeta });
   } catch (err) {
     console.error('Delete portfolio image error', err);
     res.status(500).json({ error: 'Failed to delete portfolio image' });

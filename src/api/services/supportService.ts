@@ -1,4 +1,8 @@
 import { apiClient } from '../client';
+import { API_CONFIG } from '../config';
+
+/** Messages fetched per page. Mirrors the default in routes/support.ts. */
+export const SUPPORT_PAGE_SIZE = 50;
 
 export type SupportCategory = 'booking' | 'payment' | 'account' | 'other';
 export type SupportAttachmentType = 'image' | 'video' | 'file' | null;
@@ -64,11 +68,21 @@ const supportService = {
     return resp.data;
   },
 
-  async getMessages(ticketId: string, limit = 200): Promise<{ ticket: SupportTicket; messages: SupportMessage[] }> {
-    const resp = await apiClient.get<{ data: { ticket: SupportTicket; messages: SupportMessage[] } }>(
-      `/support/tickets/${ticketId}/messages?limit=${limit}`
-    );
-    return resp.data;
+  /**
+   * One page of a ticket's thread, oldest-first within the page.
+   *
+   * `offset` counts backwards from the newest message, so offset = messages already
+   * held fetches the page before them.
+   */
+  async getMessages(
+    ticketId: string,
+    limit = SUPPORT_PAGE_SIZE,
+    offset = 0
+  ): Promise<{ ticket: SupportTicket; messages: SupportMessage[]; hasMore: boolean }> {
+    const resp = await apiClient.get<{
+      data: { ticket: SupportTicket; messages: SupportMessage[]; hasMore?: boolean };
+    }>(`/support/tickets/${ticketId}/messages?limit=${limit}&offset=${offset}`);
+    return { ...resp.data, hasMore: Boolean(resp.data.hasMore) };
   },
 
   async sendMessage(params: { ticketId: string; content?: string; file?: File }): Promise<SupportMessage> {
@@ -79,11 +93,37 @@ const supportService = {
     if (params.file) {
       form.append('file', params.file);
     }
-    const resp = await apiClient.postForm<{ data: SupportMessage }>(
-      `/support/tickets/${params.ticketId}/messages`,
-      form
-    );
-    return resp.data;
+
+    // Goes straight at the backend rather than through apiClient (which resolves against
+    // the relative /api base, i.e. Vercel's rewrite in production) - same as every other
+    // upload flow (userService, bookingService). Vercel caps a proxied body at 4.5MB,
+    // well under the 10MB an attachment is allowed to be, so a message with a real
+    // attachment would fail there even though it passed every other check.
+    const directUrl = `${API_CONFIG.DIRECT_UPLOAD_URL}/support/tickets/${params.ticketId}/messages`;
+    const token = localStorage.getItem('authToken');
+    const response = await fetch(directUrl, {
+      method: 'POST',
+      body: form,
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      credentials: 'include',
+    });
+
+    if (!response.ok) {
+      let errorText = `API Error: ${response.status} ${response.statusText}`;
+      try {
+        const errBody = await response.json();
+        if (errBody?.error) errorText = errBody.error;
+        else if (errBody?.message) errorText = errBody.message;
+      } catch {
+        // ignore JSON parse errors - keep the generic message
+      }
+      throw new Error(errorText);
+    }
+
+    const body = await response.json();
+    return body.data;
   },
 };
 

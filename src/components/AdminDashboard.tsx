@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useModal } from '../hooks/useModal';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
@@ -12,9 +12,49 @@ import adminService, {
 import { Users, PhilippinePeso, TrendingUp, AlertCircle, Search, Filter, Eye, X, CheckCircle, XCircle, Clock, Shield, FileText, Download, MessageSquare } from 'lucide-react';
 import { BookingDisputesPanel } from './BookingDisputesPanel';
 import { SupportChat } from './SupportChat';
-import { getUploadUrl } from '../api/config';
+import { getUploadUrl, API_CONFIG } from '../api/config';
+import { io as createSocket } from 'socket.io-client';
 
 type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit' | 'support';
+
+/**
+ * A user's avatar, falling back to their initial.
+ *
+ * Both admin lists used to render `profile_image` straight into an <img src>. It holds
+ * a path relative to the uploads root ("users/<id>/avatar/x.webp"), so the browser
+ * resolved it against the page origin instead of the upload host and it 404'd - while
+ * accounts whose photo is an absolute Google/Unsplash URL kept working, which is why
+ * only some avatars appeared broken. Every other view in the app already goes through
+ * getUploadUrl.
+ *
+ * A failed load falls back to the same initial a photoless account gets, rather than the
+ * browser's broken-image glyph - a file that has gone missing from disk (the uploads
+ * tree is not in git) should not look different from never having uploaded one.
+ */
+function AdminAvatar({ src, name, className, textClassName }: {
+  src?: string | null;
+  name?: string | null;
+  className: string;
+  textClassName: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  const resolved = src ? getUploadUrl(src) : '';
+
+  return (
+    <div className={`${className} bg-gray-200 flex items-center justify-center overflow-hidden flex-shrink-0`}>
+      {resolved && !failed ? (
+        <img
+          src={resolved}
+          alt=""
+          className="w-full h-full object-cover"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <span className={`text-gray-500 font-medium ${textClassName}`}>{name?.charAt(0) || '?'}</span>
+      )}
+    </div>
+  );
+}
 
 export function AdminDashboard() {
   const { user } = useAuth();
@@ -64,6 +104,10 @@ export function AdminDashboard() {
   const [auditEntityFilter, setAuditEntityFilter] = useState('all');
   const [auditStartDate, setAuditStartDate] = useState('');
   const [auditEndDate, setAuditEndDate] = useState('');
+  // getLogs has accepted a userId filter since it was written; nothing in this tab ever
+  // sent one, so seeing everything one actor did meant paging through the whole table by
+  // eye. Label is kept alongside the id purely for display - the id is what's sent.
+  const [auditUserFilter, setAuditUserFilter] = useState<{ id: string; label: string } | null>(null);
   const [auditOptions, setAuditOptions] = useState<{ actions: string[]; entityTypes: string[] }>({ actions: [], entityTypes: [] });
   const [expandedAuditId, setExpandedAuditId] = useState<string | null>(null);
   const [exportingAudit, setExportingAudit] = useState(false);
@@ -106,7 +150,7 @@ export function AdminDashboard() {
   }, [activeTab, chartPeriod, userSearch, userRoleFilter, userStatusFilter, userPage, verificationPage,
     reviewStatusFilter, reviewPage, disputeStatusFilter, disputePriorityFilter, disputePage, auditPage,
     auditActionFilter, auditEntityFilter, auditStartDate, auditEndDate,
-    supportStatusFilter, supportPage, user]);
+    supportStatusFilter, supportPage, auditUserFilter, user]);
 
   const loadTabData = async () => {
     setLoading(true);
@@ -189,6 +233,7 @@ export function AdminDashboard() {
   // `endDate` is pushed to the end of the chosen day so an inclusive range behaves the
   // way a reader expects.
   const auditFilters = () => ({
+    userId: auditUserFilter?.id || undefined,
     action: auditActionFilter !== 'all' ? auditActionFilter : undefined,
     entityType: auditEntityFilter !== 'all' ? auditEntityFilter : undefined,
     startDate: auditStartDate || undefined,
@@ -214,30 +259,57 @@ export function AdminDashboard() {
     }
   };
 
+  // Hard ceiling on a single export, so a runaway filter (or none at all) on a table
+  // that's been accumulating for years can't page forever. Comfortably above anything
+  // an admin would actually need in one CSV; if it's hit, the export is flagged as
+  // incomplete rather than silently passed off as the full record.
+  const MAX_EXPORT_ROWS = 5000;
+  const AUDIT_EXPORT_PAGE_SIZE = 200; // mirrors auditService.MAX_PAGE_SIZE server-side
+
   const exportAuditCsv = async () => {
     setExportingAudit(true);
     try {
-      // Pull the current filter at the server's maximum page size rather than only the
-      // rows on screen.
-      const resp = await adminService.getAuditLogs({ ...auditFilters(), limit: 200, offset: 0 });
+      // A single page silently dropped everything past the server's 200-row cap - an
+      // export whose entire point is being the complete record was quietly missing rows
+      // whenever a filter matched more than that. Page through every match instead, up
+      // to MAX_EXPORT_ROWS.
+      const filters = auditFilters();
+      const rows: typeof auditLogs = [];
+      let offset = 0;
+      let truncated = false;
+      while (rows.length < MAX_EXPORT_ROWS) {
+        const resp = await adminService.getAuditLogs({ ...filters, limit: AUDIT_EXPORT_PAGE_SIZE, offset });
+        rows.push(...resp.data);
+        offset += AUDIT_EXPORT_PAGE_SIZE;
+        if (offset >= resp.meta.total || resp.data.length === 0) break;
+        if (rows.length >= MAX_EXPORT_ROWS) {
+          truncated = true;
+          break;
+        }
+      }
+
       const escape = (v: any) => {
         const str = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
         return `"${str.replace(/"/g, '""')}"`;
       };
       const header = ['Timestamp', 'User', 'Email', 'Action', 'Entity Type', 'Entity ID', 'IP Address', 'Old Values', 'New Values', 'Metadata'];
-      const rows = resp.data.map(l => [
+      const csvRows = rows.map(l => [
         l.created_at, l.user_name || 'System', l.user_email || '', l.action,
         l.entity_type, l.entity_id || '', l.ip_address || '',
         l.old_values, l.new_values, l.metadata || (l as any).details,
       ].map(escape).join(','));
-      const csv = [header.map(escape).join(','), ...rows].join('\r\n');
+      const csv = [header.map(escape).join(','), ...csvRows].join('\r\n');
 
       const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `audit-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `audit-logs-${new Date().toISOString().slice(0, 10)}${truncated ? '-partial' : ''}.csv`;
       a.click();
       URL.revokeObjectURL(url);
+
+      if (truncated) {
+        setError(`Export stopped at ${MAX_EXPORT_ROWS} rows - narrow the filters (date range, action, or user) to get a complete export of a larger match.`);
+      }
     } catch (err: any) {
       setError(err?.message || 'Failed to export audit logs');
     } finally {
@@ -258,6 +330,43 @@ export function AdminDashboard() {
       return resp.data[0]?.id || null;
     });
   };
+
+  // Held in refs so the socket handler below - registered once for the life of the
+  // admin session - always sees the current tab and filter/page instead of whatever
+  // they were when the connection was opened.
+  const loadSupportTicketsDataRef = useRef(loadSupportTicketsData);
+  loadSupportTicketsDataRef.current = loadSupportTicketsData;
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+
+  // A new ticket, or a reply on one nobody has open, used to sit invisible in the queue
+  // until an admin happened to change the status filter or page - the list was only ever
+  // fetched on those triggers. This keeps it live while the Support tab is open.
+  useEffect(() => {
+    if (user?.role !== 'admin') return undefined;
+    const token = localStorage.getItem('authToken');
+    if (!token) return undefined;
+
+    const socket = createSocket(API_CONFIG.SOCKET_URL, {
+      transports: ['websocket'],
+      auth: { token },
+    });
+
+    let refreshTimer: number | null = null;
+    socket.on('support:queue_update', () => {
+      if (activeTabRef.current !== 'support') return;
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        loadSupportTicketsDataRef.current().catch(() => {});
+      }, 800);
+    });
+
+    return () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      socket.disconnect();
+    };
+  }, [user?.role]);
 
   // Action handlers
   const handleVerifyProvider = async (id: string) => {
@@ -462,20 +571,43 @@ export function AdminDashboard() {
     return (
       <div className="space-y-6">
         {/* Pending Actions Alert */}
-        {(metrics.pendingActions.verifications > 0 || metrics.pendingActions.disputes > 0 || metrics.pendingActions.reviews > 0 || metrics.pendingActions.supportTickets > 0) && (
-          <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-r-xl">
-            <div className="flex items-center">
-              <AlertCircle className="h-5 w-5 text-yellow-400 mr-3" />
-              <div className="text-sm text-yellow-700">
-                <strong>Pending Actions: </strong>
-                {metrics.pendingActions.verifications > 0 && <span className="mr-3">{metrics.pendingActions.verifications} verifications</span>}
-                {metrics.pendingActions.disputes > 0 && <span className="mr-3">{metrics.pendingActions.disputes} disputes</span>}
-                {metrics.pendingActions.reviews > 0 && <span className="mr-3">{metrics.pendingActions.reviews} reviews</span>}
-                {metrics.pendingActions.supportTickets > 0 && <span>{metrics.pendingActions.supportTickets} support tickets</span>}
+        {(() => {
+          // Each count links to the tab that actually clears it. This was plain text, so
+          // the one part of the overview whose entire purpose is "something needs you"
+          // left the admin to notice a number and then go hunting for the right tab.
+          //
+          // 'disputes' here is the count of bookings with dispute_raised, which is the
+          // Booking Disputes panel - not the separate 'disputes' table behind the
+          // Disputes tab. Two different systems, easy to wire to the wrong one.
+          const pending: Array<{ count: number; label: string; tab: TabType }> = [
+            { count: metrics.pendingActions.verifications, label: 'verifications', tab: 'providers' },
+            { count: metrics.pendingActions.disputes, label: 'disputes', tab: 'booking_disputes' },
+            { count: metrics.pendingActions.reviews, label: 'reviews', tab: 'reviews' },
+            { count: metrics.pendingActions.supportTickets, label: 'support tickets', tab: 'support' },
+          ].filter((item) => item.count > 0);
+
+          if (pending.length === 0) return null;
+
+          return (
+            <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-r-xl">
+              <div className="flex items-center flex-wrap gap-y-2">
+                <AlertCircle className="h-5 w-5 text-yellow-400 mr-3 flex-shrink-0" />
+                <div className="text-sm text-yellow-700 flex items-center flex-wrap gap-x-3 gap-y-2">
+                  <strong>Pending Actions:</strong>
+                  {pending.map((item) => (
+                    <button
+                      key={item.tab}
+                      onClick={() => setActiveTab(item.tab)}
+                      className="underline underline-offset-2 hover:text-yellow-900 font-medium"
+                    >
+                      {item.count} {item.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Metrics Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -650,13 +782,12 @@ export function AdminDashboard() {
                 <tr key={u.id} className={`hover:bg-gray-50 ${u.deleted_at ? 'bg-red-50' : ''}`}>
                   <td className="py-4 px-6">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center overflow-hidden">
-                        {u.profile_image ? (
-                          <img src={u.profile_image} alt="" className="w-full h-full object-cover" />
-                        ) : (
-                          <span className="text-gray-500 font-medium">{u.name?.charAt(0) || '?'}</span>
-                        )}
-                      </div>
+                      <AdminAvatar
+                        src={u.profile_image}
+                        name={u.name}
+                        className="w-10 h-10 rounded-full"
+                        textClassName=""
+                      />
                       <div>
                         <p className="text-sm font-medium text-gray-900">{u.name}</p>
                         <p className="text-xs text-gray-500">{u.email}</p>
@@ -748,13 +879,12 @@ export function AdminDashboard() {
           {pendingVerifications.map((provider) => (
             <div key={provider.id} className="bg-white rounded-2xl shadow-sm p-6">
               <div className="flex gap-4">
-                <div className="w-20 h-20 rounded-xl bg-gray-200 flex items-center justify-center overflow-hidden flex-shrink-0">
-                  {provider.profile_image ? (
-                    <img src={provider.profile_image} alt="" className="w-full h-full object-cover" />
-                  ) : (
-                    <span className="text-gray-500 text-2xl font-medium">{provider.name?.charAt(0) || '?'}</span>
-                  )}
-                </div>
+                <AdminAvatar
+                  src={provider.profile_image}
+                  name={provider.name}
+                  className="w-20 h-20 rounded-xl"
+                  textClassName="text-2xl"
+                />
                 <div className="flex-1 min-w-0">
                   <h3 className="text-lg font-medium text-gray-900">{provider.name}</h3>
                   <p className="text-sm text-gray-500">{provider.email}</p>
@@ -1108,7 +1238,7 @@ export function AdminDashboard() {
           <button
             onClick={() => {
               setAuditActionFilter('all'); setAuditEntityFilter('all');
-              setAuditStartDate(''); setAuditEndDate(''); setAuditPage(0);
+              setAuditStartDate(''); setAuditEndDate(''); setAuditUserFilter(null); setAuditPage(0);
             }}
             className="px-4 py-2 border border-gray-200 rounded-lg text-sm hover:bg-gray-50"
           >
@@ -1123,6 +1253,22 @@ export function AdminDashboard() {
             {exportingAudit ? 'Exporting...' : 'Export CSV'}
           </button>
         </div>
+        {auditUserFilter && (
+          <div className="mt-3 flex items-center gap-2">
+            <span className="text-xs text-gray-500">Filtered to actor:</span>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-700">
+              {auditUserFilter.label}
+              <button
+                type="button"
+                onClick={() => { setAuditUserFilter(null); setAuditPage(0); }}
+                aria-label="Clear actor filter"
+                className="hover:text-purple-900"
+              >
+                ×
+              </button>
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
@@ -1153,7 +1299,22 @@ export function AdminDashboard() {
                 >
                   <td className="py-4 px-6 text-sm text-gray-500">{formatDateTime(log.created_at)}</td>
                   <td className="py-4 px-6">
-                    <div className="text-sm font-medium text-gray-900">{log.user_name || 'System'}</div>
+                    {log.user_id ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setAuditUserFilter({ id: log.user_id!, label: log.user_name || log.user_email || log.user_id! });
+                          setAuditPage(0);
+                        }}
+                        title="Filter to this actor"
+                        className="text-sm font-medium text-gray-900 hover:text-purple-700 hover:underline text-left"
+                      >
+                        {log.user_name || 'Unknown'}
+                      </button>
+                    ) : (
+                      <div className="text-sm font-medium text-gray-900">System</div>
+                    )}
                     <div className="text-xs text-gray-500">{log.user_email || '-'}</div>
                   </td>
                   <td className="py-4 px-6">
@@ -1233,10 +1394,18 @@ export function AdminDashboard() {
     resolved: { label: 'Resolved', className: 'bg-green-100 text-green-700' },
   };
 
+  const STATUS_ACTIONS: { status: 'open' | 'in_progress' | 'resolved'; label: string }[] = [
+    { status: 'open', label: 'Mark Open' },
+    { status: 'in_progress', label: 'Mark In Progress' },
+    { status: 'resolved', label: 'Mark Resolved' },
+  ];
+
+  const selectedSupportTicket = supportTickets.find((t) => t.id === selectedSupportTicketId) || null;
+
   const renderSupport = () => (
     <div className="space-y-4">
       {/* Filters */}
-      <div className="bg-white rounded-2xl p-4 shadow-sm flex gap-4">
+      <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row gap-4">
         <select
           value={supportStatusFilter}
           onChange={(e) => { setSupportStatusFilter(e.target.value); setSupportPage(0); }}
@@ -1249,9 +1418,12 @@ export function AdminDashboard() {
         </select>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 items-start">
+      {/* support-workspace carries the two-pane layout: the grid template and the
+          queue's height cap were both arbitrary-value classes that this build never
+          emitted, so this was one stacked column at every width. */}
+      <div className="support-workspace">
         {/* Ticket list */}
-        <div className="bg-white rounded-2xl shadow-sm p-2 space-y-1 max-h-[640px] overflow-y-auto">
+        <div className="support-workspace__list bg-white rounded-2xl shadow-sm p-2 space-y-1">
           {supportTickets.map((ticket) => {
             const badge = SUPPORT_STATUS_BADGE[ticket.status] || SUPPORT_STATUS_BADGE.open;
             const isSelected = ticket.id === selectedSupportTicketId;
@@ -1283,33 +1455,40 @@ export function AdminDashboard() {
         <div className="space-y-3">
           {selectedSupportTicketId && (
             <div className="bg-white rounded-2xl shadow-sm p-3 flex flex-wrap gap-2">
-              <button
-                onClick={() => handleSupportStatusChange(selectedSupportTicketId, 'open')}
-                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-xs font-medium"
-              >
-                Mark Open
-              </button>
-              <button
-                onClick={() => handleSupportStatusChange(selectedSupportTicketId, 'in_progress')}
-                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-xs font-medium"
-              >
-                Mark In Progress
-              </button>
-              <button
-                onClick={() => handleSupportStatusChange(selectedSupportTicketId, 'resolved')}
-                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-xs font-medium"
-              >
-                Mark Resolved
-              </button>
+              {STATUS_ACTIONS.map(({ status, label }) => {
+                // The three buttons used to look identical regardless of the ticket's
+                // actual status, so telling what state a ticket was already in meant
+                // checking the queue list's badge instead of the panel in front of you.
+                const isCurrent = selectedSupportTicket?.status === status;
+                const badge = SUPPORT_STATUS_BADGE[status];
+                return (
+                  <button
+                    key={status}
+                    onClick={() => handleSupportStatusChange(selectedSupportTicketId, status)}
+                    disabled={isCurrent}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:cursor-default ${
+                      isCurrent ? `${badge.className} border-transparent` : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    {isCurrent ? `Currently ${badge.label}` : label}
+                  </button>
+                );
+              })}
             </div>
           )}
-          <SupportChat mode="admin" ticketId={selectedSupportTicketId} className="h-[560px]" />
+          {/* Refresh the queue as the thread moves - a reply changes a ticket's status
+              and its unread count, and the list was otherwise frozen at page load. */}
+          <SupportChat
+            mode="admin"
+            ticketId={selectedSupportTicketId}
+            onActivity={() => { loadSupportTicketsData().catch(() => {}); }}
+          />
         </div>
       </div>
 
       {/* Pagination */}
       {supportTicketsTotal > 0 && (
-        <div className="flex justify-between items-center">
+        <div className="flex flex-col sm:flex-row gap-3 justify-between items-center">
           <p className="text-sm text-gray-500">
             Showing {Math.min(supportPage * ITEMS_PER_PAGE + 1, supportTicketsTotal)} to {Math.min((supportPage + 1) * ITEMS_PER_PAGE, supportTicketsTotal)} of {supportTicketsTotal}
           </p>
