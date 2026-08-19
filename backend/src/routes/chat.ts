@@ -353,7 +353,9 @@ router.get('/history', verifyToken, async (req: AuthedRequest, res: Response) =>
 
 router.post('/send',
   verifyToken,
-  handleUpload(upload.single('file')),
+  // MAX_VIDEO_SIZE to match this uploader's own limits.fileSize - the per-type
+  // ceilings (images back down to MAX_FILE_SIZE) are applied by enforceMediaSizeLimits.
+  handleUpload(upload.single('file'), MAX_VIDEO_SIZE),
   verifyUploadedContent,
   enforceMediaSizeLimits,
   async (req: AuthedRequest, res: Response) => {
@@ -623,7 +625,9 @@ router.get('/direct/:recipientId/history', verifyToken, async (req: AuthedReques
 // Send message in direct chat
 router.post('/direct/:recipientId/send',
   verifyToken,
-  handleUpload(upload.single('file')),
+  // MAX_VIDEO_SIZE to match this uploader's own limits.fileSize - the per-type
+  // ceilings (images back down to MAX_FILE_SIZE) are applied by enforceMediaSizeLimits.
+  handleUpload(upload.single('file'), MAX_VIDEO_SIZE),
   verifyUploadedContent,
   enforceMediaSizeLimits,
   async (req: AuthedRequest, res: Response) => {

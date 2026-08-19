@@ -5,6 +5,7 @@ import multer from 'multer';
 import { Request as ExpressRequest } from 'express';
 import path from 'path';
 import fs from 'fs';
+import { CATEGORY_OPTIONS } from '../constants/categories';
 import {
   UPLOADS_ROOT,
   MAX_FILE_SIZE,
@@ -216,6 +217,14 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
           return res.status(400).json({ error: `${field} must be ${LIMITS[field]} characters or fewer` });
         }
       }
+    }
+    // The category filter and stats queries in routes/providers.ts match stored
+    // values with exact string equality, so a category that doesn't match one of
+    // the picker's own options - a typo, a stray value from before the option list
+    // changed - would silently make this provider unfindable by category rather
+    // than erroring anywhere. Empty string/null still means "no category set".
+    if (category !== undefined && category !== null && category.trim() !== '' && !CATEGORY_OPTIONS.includes(category.trim())) {
+      return res.status(400).json({ error: 'Invalid category' });
     }
     if (years_experience !== undefined && years_experience !== null && years_experience !== '') {
       const years = Number(years_experience);
@@ -471,7 +480,9 @@ router.post('/:id/upload/profile',
 router.post('/:id/upload/portfolio',
   verifyToken,
   requireSelfOrAdmin,
-  handleUpload(uploadPortfolio.array('images', MAX_PORTFOLIO_FILES)),
+  // MAX_VIDEO_SIZE to match this uploader's own limits.fileSize - the per-type
+  // ceilings (images back down to MAX_FILE_SIZE) are applied by enforceMediaSizeLimits.
+  handleUpload(uploadPortfolio.array('images', MAX_PORTFOLIO_FILES), MAX_VIDEO_SIZE),
   verifyUploadedContent,
   enforceMediaSizeLimits,
   async (req: any, res: Response) => {

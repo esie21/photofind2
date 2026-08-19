@@ -29,6 +29,7 @@ import { ChatInterface } from './ChatInterface';
 import { WalletDashboard } from './WalletDashboard';
 import { RescheduleModal } from './RescheduleModal';
 import { CompleteBookingModal } from './CompleteBookingModal';
+import { DisputeResponsePanel } from './DisputeResponsePanel';
 import { BookingDetailsModal } from './BookingDetailsModal';
 
 type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
@@ -264,6 +265,13 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
       }
       if (pkg.enable_package && !(Number(pkg.package_price) > 0)) {
         return `"${label}" needs a package price greater than zero.`;
+      }
+      // A new service used to start pre-filled with 'Photography' and save that way
+      // if the picker was never touched, so a videographer's or makeup artist's first
+      // service silently landed under the wrong category - invisible to them and
+      // unfindable by clients filtering on their actual specialty.
+      if (!pkg.category || !String(pkg.category).trim()) {
+        return `"${label}" needs a category.`;
       }
     }
     return null;
@@ -599,6 +607,8 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           completed_at: b.completed_at,
           cancellation_reason: b.cancellation_reason,
           dispute_reason: b.dispute_reason,
+          dispute_response: b.dispute_response,
+          dispute_response_at: b.dispute_response_at,
           dispute_resolution: b.dispute_resolution,
           dispute_resolved_at: b.dispute_resolved_at,
           provider_completed_at: b.provider_completed_at,
@@ -1436,7 +1446,10 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                     title: pkg.title,
                                     description: pkg.description,
                                     price: primaryPrice || 0,
-                                    category: pkg.category || 'Photography',
+                                    // validatePackages already blocks Save until every
+                                    // package has an explicit category - no more
+                                    // silent 'Photography' fallback here.
+                                    category: pkg.category,
                                     pricing_type: pricingType,
                                     hourly_rate: pkg.enable_hourly ? pkg.hourly_rate : null,
                                     package_price: pkg.enable_package ? pkg.package_price : null,
@@ -2210,7 +2223,10 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                         id: null,
                         title: 'New Service',
                         description: 'Description of service features and benefits...',
-                        category: 'Photography',
+                        // Left unset deliberately - see validatePackages. Pre-filling
+                        // this let a first service save as 'Photography' without the
+                        // picker ever being touched.
+                        category: '',
                         hourly_rate: 500,
                         package_price: 2000,
                         duration_minutes: 240,
@@ -2335,7 +2351,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                         <div className="mt-3">
                           <label className="block text-xs text-gray-500 mb-1">Service Category</label>
                           <select
-                            value={pkg.category || 'Photography'}
+                            value={pkg.category || ''}
                             onChange={(e) => {
                               const updated = [...packages];
                               updated[index].category = e.target.value;
@@ -2343,6 +2359,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                             }}
                             className="w-full sm:w-48 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none bg-white"
                           >
+                            <option value="">Select a category</option>
                             {CATEGORY_OPTIONS.map((cat) => (
                               <option key={cat} value={cat}>{cat}</option>
                             ))}
@@ -2507,7 +2524,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                               id: null,
                               title: 'New Service',
                               description: 'Description of service features and benefits...',
-                              category: 'Photography',
+                              category: '',
                               hourly_rate: 500,
                               package_price: 2000,
                               duration_minutes: 240,
@@ -2812,10 +2829,21 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                           : 'The client has disputed this booking. An admin will review it shortly.'}
                                       </p>
                                       <p className="text-xs text-red-600 mt-2">
-                                        Status: Under Admin Review. You will be notified of the resolution.
+                                        Status: Under Admin Review. Respond below so the admin hears your side.
                                       </p>
                                     </div>
                                   </div>
+                                  {/* The provider previously had no way to answer a
+                                      dispute: completion_notes are written before the
+                                      dispute exists, so nothing they could say ever
+                                      addressed what the client actually alleged. */}
+                                  <DisputeResponsePanel
+                                    bookingId={booking.id}
+                                    role="provider"
+                                    existingResponse={booking.dispute_response}
+                                    existingResponseAt={booking.dispute_response_at}
+                                    onSubmitted={fetchBookings}
+                                  />
                                 </div>
                               )}
                               <button

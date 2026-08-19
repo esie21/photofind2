@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Send, Paperclip, Check, CheckCheck, Loader2 } from 'lucide-react';
+import { Send, Paperclip, Check, CheckCheck, Loader2, X, FileText, ChevronDown, ChevronUp, ArrowDown } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import supportService, {
   SUPPORT_PAGE_SIZE,
@@ -8,8 +8,22 @@ import supportService, {
   SupportMessage,
   SupportTicket,
 } from '../api/services/supportService';
+import bookingService from '../api/services/bookingService';
+import { STATUS_STYLES } from './BookingsPage';
 import { API_CONFIG, getUploadUrl } from '../api/config';
 import { io as createSocket, Socket } from 'socket.io-client';
+
+/** The subset of a booking's fields the admin thread's summary panel needs. The
+ * backend returns these as snake_case (see routes/bookings.ts) - bookingService's
+ * own `Booking` type claims camelCase `startDate`/`endDate` that don't actually come
+ * back over the wire, so this is typed against the real response shape instead. */
+interface AdminBookingSummary {
+  status: string;
+  start_date?: string | null;
+  service_title?: string | null;
+  client_name?: string | null;
+  provider_name?: string | null;
+}
 
 interface SupportChatProps {
   mode: 'user' | 'admin';
@@ -73,6 +87,16 @@ function manilaDayKey(iso: string): string {
   return new Date(iso).toLocaleDateString('en-CA', { timeZone: MANILA });
 }
 
+function bookingDateTime(iso?: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleString('en-US', {
+    weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', timeZone: MANILA,
+  });
+}
+
 function dayLabel(iso: string): string {
   const key = manilaDayKey(iso);
   const today = manilaDayKey(new Date().toISOString());
@@ -93,7 +117,7 @@ function dayLabel(iso: string): string {
 function BotBubble({ text }: { text: string }) {
   return (
     <div className="flex justify-start">
-      <div className="max-w-sm bg-gray-100 text-gray-900 px-4 py-3 rounded-2xl rounded-bl-none text-sm">
+      <div className="support-chat__bubble bg-gray-100 text-gray-900 px-4 py-3 rounded-2xl rounded-bl-none text-sm">
         {text}
       </div>
     </div>
@@ -103,7 +127,7 @@ function BotBubble({ text }: { text: string }) {
 function ChoiceBubble({ text }: { text: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-sm bg-purple-600 text-white px-4 py-3 rounded-2xl rounded-br-none text-sm">
+      <div className="support-chat__bubble bg-purple-600 text-white px-4 py-3 rounded-2xl rounded-br-none text-sm">
         {text}
       </div>
     </div>
@@ -132,6 +156,7 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
   const [sending, setSending] = useState(false);
   const [message, setMessage] = useState('');
   const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingPreviewUrl, setPendingPreviewUrl] = useState<string | null>(null);
   const [isTyping, setIsTyping] = useState(false);
   // Who else is currently in this ticket's room. A boolean flipped to false as soon as
   // ANY participant left, so with two admins present, one leaving marked support offline
@@ -139,6 +164,15 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
   const [presentUserIds, setPresentUserIds] = useState<string[]>([]);
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+
+  // Admin-only: the booking a ticket is about, fetched lazily on first expand so
+  // switching between tickets in the queue doesn't fire a lookup for every one of
+  // them, only the ones an admin actually opens.
+  const [showBookingSummary, setShowBookingSummary] = useState(false);
+  const [bookingSummary, setBookingSummary] = useState<AdminBookingSummary | null>(null);
+  const [loadingBookingSummary, setLoadingBookingSummary] = useState(false);
+  const [bookingSummaryError, setBookingSummaryError] = useState<string | null>(null);
 
   const [intakeStep, setIntakeStep] = useState<IntakeStep>('describe');
   const [intakeCategory, setIntakeCategory] = useState<SupportCategory | null>(null);
@@ -253,13 +287,41 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    isNearBottomRef.current = nearBottom;
+    setShowJumpToLatest(!nearBottom);
+  };
+
+  const jumpToLatest = () => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    isNearBottomRef.current = true;
+    setShowJumpToLatest(false);
   };
 
   useEffect(() => {
-    if (!isNearBottomRef.current) return;
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    if (isNearBottomRef.current) {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+      setShowJumpToLatest(false);
+    } else {
+      // A message that arrived while scrolled up used to leave no trace beyond the
+      // thread quietly growing off-screen - there was no way back to the bottom short
+      // of dragging the scrollbar down by hand.
+      setShowJumpToLatest(true);
+    }
   }, [messages.length, intakeStep]);
+
+  // Object URL for the picked-but-unsent image, so it can be thumbnailed before
+  // sending rather than just named. Revoked on every change so a run of picked files
+  // doesn't leak a blob URL per pick.
+  useEffect(() => {
+    if (!pendingFile || !pendingFile.type.startsWith('image/')) {
+      setPendingPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(pendingFile);
+    setPendingPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [pendingFile]);
 
   useEffect(() => {
     let cancelled = false;
@@ -286,6 +348,10 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
       setHasMoreOlder(false);
       setMessage('');
       setPendingFile(null);
+      setShowJumpToLatest(false);
+      setShowBookingSummary(false);
+      setBookingSummary(null);
+      setBookingSummaryError(null);
       isNearBottomRef.current = true;
       if (mode === 'user') {
         setIntakeStep('category');
@@ -315,6 +381,10 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
     setTicket(null);
     setMessages([]);
     setHasMoreOlder(false);
+    setShowJumpToLatest(false);
+    setShowBookingSummary(false);
+    setBookingSummary(null);
+    setBookingSummaryError(null);
     isNearBottomRef.current = true;
 
     setLoading(true);
@@ -365,6 +435,20 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
     setIntakeBookingId(booking ? booking.id : null);
     setIntakeBookingLabel(booking ? booking.service_title || 'Booking' : 'Not booking-specific');
     setIntakeStep('describe');
+  };
+
+  const toggleBookingSummary = () => {
+    const next = !showBookingSummary;
+    setShowBookingSummary(next);
+    if (next && !bookingSummary && !loadingBookingSummary && ticket?.booking_id) {
+      setLoadingBookingSummary(true);
+      setBookingSummaryError(null);
+      bookingService
+        .getBookingById(ticket.booking_id)
+        .then((b) => setBookingSummary(b as unknown as AdminBookingSummary))
+        .catch((err: any) => setBookingSummaryError(err?.message || 'Could not load this booking.'))
+        .finally(() => setLoadingBookingSummary(false));
+    }
   };
 
   const handleSend = async () => {
@@ -516,7 +600,7 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
         : 'New conversation';
 
   return (
-    <div className={`bg-white rounded-2xl shadow-sm flex flex-col ${className || 'h-[560px]'}`}>
+    <div className={`support-chat bg-white rounded-2xl shadow-sm ${className || ''}`}>
       <div className="flex items-center gap-3 p-4 border-b border-gray-200">
         <span className="w-10 h-10 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center flex-shrink-0 text-sm font-medium">
           {mode === 'admin' ? (ticket?.user_name || '?').charAt(0).toUpperCase() : 'S'}
@@ -532,13 +616,55 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
         )}
       </div>
 
-      {ticketMeta && (
-        <div className="px-4 py-2 border-b border-gray-100 bg-gray-50">
-          <span className="inline-block px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-700">{ticketMeta}</span>
+      {(ticketMeta || (mode === 'admin' && ticket?.booking_id)) && (
+        <div className="border-b border-gray-100 bg-gray-50">
+          <div className="px-4 py-2 flex items-center justify-between gap-2">
+            {ticketMeta ? (
+              <span className="inline-block px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-700">{ticketMeta}</span>
+            ) : <span />}
+            {mode === 'admin' && ticket?.booking_id && (
+              <button
+                type="button"
+                onClick={toggleBookingSummary}
+                className="flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 transition-colors flex-shrink-0"
+              >
+                View booking
+                {showBookingSummary ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </button>
+            )}
+          </div>
+
+          {mode === 'admin' && showBookingSummary && ticket?.booking_id && (
+            <div className="px-4 pb-3 text-xs text-gray-600 space-y-2">
+              {loadingBookingSummary && (
+                <div className="flex items-center gap-2 text-gray-500">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Loading booking…</span>
+                </div>
+              )}
+              {bookingSummaryError && <div className="text-red-600">{bookingSummaryError}</div>}
+              {bookingSummary && (
+                <>
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-900 font-medium">{bookingSummary.service_title || 'Booking'}</span>
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${
+                        (STATUS_STYLES[bookingSummary.status] || STATUS_STYLES.pending).bg
+                      } ${(STATUS_STYLES[bookingSummary.status] || STATUS_STYLES.pending).text}`}
+                    >
+                      {(STATUS_STYLES[bookingSummary.status] || { label: bookingSummary.status }).label}
+                    </span>
+                  </div>
+                  <div>{bookingDateTime(bookingSummary.start_date)}</div>
+                  <div>Client: {bookingSummary.client_name || '—'} · Provider: {bookingSummary.provider_name || '—'}</div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
 
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={scrollRef} onScroll={handleScroll} className="support-chat__thread p-4 space-y-4">
         {hasMoreOlder && !loading && (
           <div className="flex justify-center">
             <button
@@ -638,7 +764,7 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
             <div key={msg.id}>
               {daySeparator}
               <div className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}>
-              <div className="max-w-sm">
+              <div className="support-chat__bubble">
                 <div
                   className={`px-4 py-3 rounded-2xl ${
                     isMine ? 'bg-purple-600 text-white rounded-br-none' : 'bg-gray-100 text-gray-900 rounded-bl-none'
@@ -646,10 +772,10 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
                 >
                   {msg.content && <p className="text-sm whitespace-pre-wrap break-words">{renderContentWithLinks(msg.content)}</p>}
                   {attachmentUrl && msg.attachment_type === 'image' && (
-                    <img src={attachmentUrl} alt={msg.attachment_name || 'attachment'} className="mt-2 max-h-56 rounded-xl" />
+                    <img src={attachmentUrl} alt={msg.attachment_name || 'attachment'} className="support-chat__media mt-2" />
                   )}
                   {attachmentUrl && msg.attachment_type === 'video' && (
-                    <video src={attachmentUrl} controls className="mt-2 max-h-64 rounded-xl w-full" />
+                    <video src={attachmentUrl} controls className="support-chat__media--video mt-2" />
                   )}
                   {attachmentUrl && msg.attachment_type === 'file' && (
                     <a
@@ -683,9 +809,23 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
             </div>
           </div>
         )}
+
+        {showJumpToLatest && (
+          <div className="support-chat__jump-to-latest">
+            <button
+              type="button"
+              onClick={jumpToLatest}
+              aria-label="Jump to latest messages"
+              title="Jump to latest messages"
+              className="p-2 rounded-full bg-purple-600 hover:bg-purple-700 text-white shadow-sm transition-colors"
+            >
+              <ArrowDown className="w-4 h-4" />
+            </button>
+          </div>
+        )}
       </div>
 
-      <div className="p-4 border-t border-gray-200">
+      <div className="support-chat__composer">
         {/* Beside the composer, not inside the thread above it - a long conversation
             scrolled the explanation for a failed send right out of the viewport. */}
         {error && (
@@ -760,11 +900,31 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
               disabled={!user || loading || !canType}
             />
             {pendingFile && (
-              <div className="mt-2 text-xs text-gray-600 flex items-center justify-between gap-2">
-                <span className="truncate">Attached: {pendingFile.name}</span>
-                <button type="button" onClick={() => setPendingFile(null)} className="text-red-600 hover:text-red-700">
-                  Remove
-                </button>
+              <div className="mt-2">
+                {pendingPreviewUrl ? (
+                  <div className="support-chat__preview">
+                    <img src={pendingPreviewUrl} alt={pendingFile.name} className="support-chat__preview-thumb" />
+                    <button
+                      type="button"
+                      onClick={() => setPendingFile(null)}
+                      aria-label="Remove attachment"
+                      title="Remove attachment"
+                      className="support-chat__preview-remove"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="text-xs text-gray-600 flex items-center justify-between gap-2">
+                    <span className="truncate flex items-center gap-2">
+                      <FileText className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                      {pendingFile.name}
+                    </span>
+                    <button type="button" onClick={() => setPendingFile(null)} className="text-red-600 hover:text-red-700 flex-shrink-0">
+                      Remove
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

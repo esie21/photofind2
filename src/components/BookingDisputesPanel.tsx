@@ -29,6 +29,16 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
   useModal(() => setResolutionResult(null), { enabled: !!resolutionResult });
   useModal(() => setSelectedImage(null), { enabled: !!selectedImage, lockScroll: false });
 
+  // Dispute photos grouped by the side that filed them. Anything the server could not
+  // attribute (uploader_role 'other', only reachable if a user id failed to resolve) is
+  // kept in its own group rather than being silently credited to one party.
+  const disputeEvidence = selectedDispute?.dispute_evidence || [];
+  const clientDisputeEvidence = disputeEvidence.filter((e) => e.uploader_role === 'client');
+  const providerDisputeEvidence = disputeEvidence.filter((e) => e.uploader_role === 'provider');
+  const unattributedDisputeEvidence = disputeEvidence.filter(
+    (e) => e.uploader_role !== 'client' && e.uploader_role !== 'provider'
+  );
+
   useEffect(() => {
     loadDisputes();
   }, []);
@@ -86,6 +96,65 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
   const getEvidenceUrl = (fileUrl: string) => {
     // Use centralized URL utility that works in both dev and production
     return getUploadUrl(fileUrl);
+  };
+
+  // Photos filed by one side, as one labelled group. The backend tags every row with
+  // uploader_role and splits completion photos from dispute photos, so a resolution is
+  // no longer decided off a single undifferentiated grid that only the provider could
+  // ever have contributed to.
+  const renderEvidenceGroup = (
+    title: string,
+    items: BookingEvidence[],
+    emptyLabel: string,
+    accent: 'gray' | 'red' | 'blue'
+  ) => {
+    const accentClasses = {
+      gray: 'text-gray-700',
+      red: 'text-red-700',
+      blue: 'text-blue-700',
+    }[accent];
+
+    return (
+      <div>
+        <p className={`text-sm font-medium mb-2 ${accentClasses}`}>
+          {title} ({items.length})
+        </p>
+        {items.length > 0 ? (
+          <div className="grid grid-cols-3 gap-3">
+            {items.map((e) => (
+              <button
+                key={e.id}
+                onClick={() => setSelectedImage(getEvidenceUrl(e.file_url))}
+                className="relative group"
+              >
+                <img
+                  src={getEvidenceUrl(e.file_url)}
+                  alt={e.caption || e.evidence_type}
+                  className="w-full h-32 object-cover rounded-lg bg-gray-100"
+                  onError={(ev) => {
+                    const target = ev.currentTarget;
+                    target.onerror = null;
+                    target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 24 24" fill="none" stroke="%239ca3af" stroke-width="2"%3E%3Crect x="3" y="3" width="18" height="18" rx="2" ry="2"%3E%3C/rect%3E%3Ccircle cx="8.5" cy="8.5" r="1.5"%3E%3C/circle%3E%3Cpolyline points="21,15 16,10 5,21"%3E%3C/polyline%3E%3C/svg%3E';
+                  }}
+                />
+                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 rounded-lg transition-colors" />
+                <span className="absolute bottom-2 left-2 text-xs bg-black/60 text-white px-2 py-0.5 rounded capitalize">
+                  {e.evidence_type}
+                </span>
+                <span className="absolute top-2 left-2 text-[10px] bg-white/90 text-gray-700 px-1.5 py-0.5 rounded">
+                  {formatDate(e.uploaded_at)}
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-6 bg-gray-50 rounded-xl">
+            <Image className="w-7 h-7 text-gray-300 mx-auto mb-1.5" />
+            <p className="text-sm text-gray-500">{emptyLabel}</p>
+          </div>
+        )}
+      </div>
+    );
   };
 
   const formatDate = (dateStr: string) => {
@@ -174,6 +243,15 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                       <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${getStatusColor(dispute.status)}`}>
                         {dispute.status.replace('_', ' ')}
                       </span>
+                      {/* Triage at a glance: a case where only one side has spoken is
+                          usually not the one to resolve first. */}
+                      <span
+                        className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                          dispute.dispute_response ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-700'
+                        }`}
+                      >
+                        {dispute.dispute_response ? 'Provider responded' : 'Awaiting provider'}
+                      </span>
                     </div>
                     <div className="grid grid-cols-2 gap-4 text-sm">
                       <div className="flex items-center gap-2">
@@ -215,14 +293,18 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                   </div>
                 )}
 
-                {/* Evidence Preview */}
-                {dispute.evidence && dispute.evidence.length > 0 && (
+                {/* Evidence Preview - completion photos and anything either side added
+                    after the dispute, so the count on the card matches the modal. */}
+                {(() => {
+                  const allPhotos = [...(dispute.evidence || []), ...(dispute.dispute_evidence || [])];
+                  if (allPhotos.length === 0) return null;
+                  return (
                   <div className="mt-4">
                     <p className="text-sm font-medium text-gray-700 mb-2">
-                      Evidence ({dispute.evidence.length} photos)
+                      Evidence ({allPhotos.length} photos)
                     </p>
                     <div className="flex gap-2 overflow-x-auto pb-2">
-                      {dispute.evidence.slice(0, 4).map((e) => (
+                      {allPhotos.slice(0, 4).map((e) => (
                         <button
                           key={e.id}
                           onClick={() => setSelectedImage(getEvidenceUrl(e.file_url))}
@@ -239,21 +321,22 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                             }}
                           />
                           <span className="absolute bottom-1 left-1 text-[10px] bg-black/60 text-white px-1.5 py-0.5 rounded capitalize">
-                            {e.evidence_type}
+                            {e.is_dispute_evidence ? `${e.uploader_role || 'party'} dispute` : e.evidence_type}
                           </span>
                         </button>
                       ))}
-                      {dispute.evidence.length > 4 && (
+                      {allPhotos.length > 4 && (
                         <button
                           onClick={() => setSelectedDispute(dispute)}
                           className="w-20 h-20 bg-gray-100 rounded-lg flex items-center justify-center text-sm text-gray-500"
                         >
-                          +{dispute.evidence.length - 4} more
+                          +{allPhotos.length - 4} more
                         </button>
                       )}
                     </div>
                   </div>
-                )}
+                  );
+                })()}
 
                 {/* Timestamps */}
                 <div className="mt-4 flex items-center gap-4 text-xs text-gray-500">
@@ -381,6 +464,27 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 <div className="bg-blue-50 rounded-xl p-4">
                   <p className="text-sm font-medium text-blue-800 mb-1">Provider's Completion Notes</p>
                   <p className="text-sm text-blue-700">{selectedDispute.completion_notes}</p>
+                  <p className="text-xs text-blue-500 mt-1">Written when marking the booking complete, before the dispute.</p>
+                </div>
+              )}
+
+              {/* The provider's answer to the dispute itself, as opposed to the
+                  completion notes above, which predate the client's complaint. */}
+              {selectedDispute.dispute_response ? (
+                <div className="bg-blue-50 rounded-xl p-4">
+                  <p className="text-sm font-medium text-blue-800 mb-1">
+                    Provider's Response to the Dispute
+                    {selectedDispute.dispute_response_at && (
+                      <span className="font-normal text-blue-500"> · {formatDate(selectedDispute.dispute_response_at)}</span>
+                    )}
+                  </p>
+                  <p className="text-sm text-blue-700 whitespace-pre-wrap">{selectedDispute.dispute_response}</p>
+                </div>
+              ) : (
+                <div className="bg-amber-100 border border-amber-200 rounded-xl p-4">
+                  <p className="text-sm text-amber-700">
+                    The provider has not responded to this dispute yet. Resolving now decides it on the client's account alone.
+                  </p>
                 </div>
               )}
 
@@ -415,42 +519,33 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 );
               })()}
 
-              {/* All Evidence */}
-              <div>
-                <p className="text-sm font-medium text-gray-700 mb-3">
-                  Evidence Photos ({selectedDispute.evidence?.length || 0})
-                </p>
-                {selectedDispute.evidence && selectedDispute.evidence.length > 0 ? (
-                  <div className="grid grid-cols-3 gap-3">
-                    {selectedDispute.evidence.map((e) => (
-                      <button
-                        key={e.id}
-                        onClick={() => setSelectedImage(getEvidenceUrl(e.file_url))}
-                        className="relative group"
-                      >
-                        <img
-                          src={getEvidenceUrl(e.file_url)}
-                          alt={e.evidence_type}
-                          className="w-full h-32 object-cover rounded-lg bg-gray-100"
-                          onError={(ev) => {
-                            const target = ev.currentTarget;
-                            target.onerror = null;
-                            target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 24 24" fill="none" stroke="%239ca3af" stroke-width="2"%3E%3Crect x="3" y="3" width="18" height="18" rx="2" ry="2"%3E%3C/rect%3E%3Ccircle cx="8.5" cy="8.5" r="1.5"%3E%3C/circle%3E%3Cpolyline points="21,15 16,10 5,21"%3E%3C/polyline%3E%3C/svg%3E';
-                          }}
-                        />
-                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 rounded-lg transition-colors" />
-                        <span className="absolute bottom-2 left-2 text-xs bg-black/60 text-white px-2 py-0.5 rounded capitalize">
-                          {e.evidence_type}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-center py-8 bg-gray-50 rounded-xl">
-                    <Image className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-                    <p className="text-sm text-gray-500">No evidence photos</p>
-                  </div>
+              {/* Evidence, split by who filed it and whether it predates the dispute */}
+              <div className="space-y-4">
+                {renderEvidenceGroup(
+                  "Provider's completion photos",
+                  selectedDispute.evidence || [],
+                  'No completion photos',
+                  'gray'
                 )}
+                {renderEvidenceGroup(
+                  "Client's dispute photos",
+                  clientDisputeEvidence,
+                  'The client attached no photos',
+                  'red'
+                )}
+                {renderEvidenceGroup(
+                  "Provider's dispute photos",
+                  providerDisputeEvidence,
+                  'The provider attached no photos',
+                  'blue'
+                )}
+                {unattributedDisputeEvidence.length > 0 &&
+                  renderEvidenceGroup(
+                    'Unattributed dispute photos',
+                    unattributedDisputeEvidence,
+                    '',
+                    'gray'
+                  )}
               </div>
             </div>
 

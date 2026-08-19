@@ -7,6 +7,7 @@ import { EmptyState } from './EmptyState';
 import { ChatInterface } from './ChatInterface';
 import { RescheduleModal } from './RescheduleModal';
 import { ConfirmCompletionModal } from './ConfirmCompletionModal';
+import { DisputeResponsePanel } from './DisputeResponsePanel';
 import { ReviewForm } from './ReviewForm';
 import { PaymentSummary } from './PaymentSummary';
 import { BookingDetailsModal } from './BookingDetailsModal';
@@ -163,6 +164,8 @@ export function BookingsPage() {
           completed_at: b.completed_at,
           cancellation_reason: b.cancellation_reason,
           dispute_reason: b.dispute_reason,
+          dispute_response: b.dispute_response,
+          dispute_response_at: b.dispute_response_at,
           dispute_resolution: b.dispute_resolution,
           dispute_resolved_at: b.dispute_resolved_at,
           provider_completed_at: b.provider_completed_at,
@@ -563,6 +566,17 @@ export function BookingsPage() {
                                 </p>
                               </div>
                             </div>
+                            {/* The client's case used to end at the reason they typed.
+                                They can now back it with photos while it is still open,
+                                and see the provider's answer instead of waiting for the
+                                verdict to find out what was said. */}
+                            <DisputeResponsePanel
+                              bookingId={booking.id}
+                              role="client"
+                              existingResponse={booking.dispute_response}
+                              existingResponseAt={booking.dispute_response_at}
+                              onSubmitted={() => fetchBookings({ silent: true, resetPage: false })}
+                            />
                           </div>
                         )}
                       </div>

@@ -571,20 +571,43 @@ export function AdminDashboard() {
     return (
       <div className="space-y-6">
         {/* Pending Actions Alert */}
-        {(metrics.pendingActions.verifications > 0 || metrics.pendingActions.disputes > 0 || metrics.pendingActions.reviews > 0 || metrics.pendingActions.supportTickets > 0) && (
-          <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-r-xl">
-            <div className="flex items-center">
-              <AlertCircle className="h-5 w-5 text-yellow-400 mr-3" />
-              <div className="text-sm text-yellow-700">
-                <strong>Pending Actions: </strong>
-                {metrics.pendingActions.verifications > 0 && <span className="mr-3">{metrics.pendingActions.verifications} verifications</span>}
-                {metrics.pendingActions.disputes > 0 && <span className="mr-3">{metrics.pendingActions.disputes} disputes</span>}
-                {metrics.pendingActions.reviews > 0 && <span className="mr-3">{metrics.pendingActions.reviews} reviews</span>}
-                {metrics.pendingActions.supportTickets > 0 && <span>{metrics.pendingActions.supportTickets} support tickets</span>}
+        {(() => {
+          // Each count links to the tab that actually clears it. This was plain text, so
+          // the one part of the overview whose entire purpose is "something needs you"
+          // left the admin to notice a number and then go hunting for the right tab.
+          //
+          // 'disputes' here is the count of bookings with dispute_raised, which is the
+          // Booking Disputes panel - not the separate 'disputes' table behind the
+          // Disputes tab. Two different systems, easy to wire to the wrong one.
+          const pending: Array<{ count: number; label: string; tab: TabType }> = [
+            { count: metrics.pendingActions.verifications, label: 'verifications', tab: 'providers' },
+            { count: metrics.pendingActions.disputes, label: 'disputes', tab: 'booking_disputes' },
+            { count: metrics.pendingActions.reviews, label: 'reviews', tab: 'reviews' },
+            { count: metrics.pendingActions.supportTickets, label: 'support tickets', tab: 'support' },
+          ].filter((item) => item.count > 0);
+
+          if (pending.length === 0) return null;
+
+          return (
+            <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-r-xl">
+              <div className="flex items-center flex-wrap gap-y-2">
+                <AlertCircle className="h-5 w-5 text-yellow-400 mr-3 flex-shrink-0" />
+                <div className="text-sm text-yellow-700 flex items-center flex-wrap gap-x-3 gap-y-2">
+                  <strong>Pending Actions:</strong>
+                  {pending.map((item) => (
+                    <button
+                      key={item.tab}
+                      onClick={() => setActiveTab(item.tab)}
+                      className="underline underline-offset-2 hover:text-yellow-900 font-medium"
+                    >
+                      {item.count} {item.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Metrics Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1371,10 +1394,18 @@ export function AdminDashboard() {
     resolved: { label: 'Resolved', className: 'bg-green-100 text-green-700' },
   };
 
+  const STATUS_ACTIONS: { status: 'open' | 'in_progress' | 'resolved'; label: string }[] = [
+    { status: 'open', label: 'Mark Open' },
+    { status: 'in_progress', label: 'Mark In Progress' },
+    { status: 'resolved', label: 'Mark Resolved' },
+  ];
+
+  const selectedSupportTicket = supportTickets.find((t) => t.id === selectedSupportTicketId) || null;
+
   const renderSupport = () => (
     <div className="space-y-4">
       {/* Filters */}
-      <div className="bg-white rounded-2xl p-4 shadow-sm flex gap-4">
+      <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row gap-4">
         <select
           value={supportStatusFilter}
           onChange={(e) => { setSupportStatusFilter(e.target.value); setSupportPage(0); }}
@@ -1387,9 +1418,12 @@ export function AdminDashboard() {
         </select>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 items-start">
+      {/* support-workspace carries the two-pane layout: the grid template and the
+          queue's height cap were both arbitrary-value classes that this build never
+          emitted, so this was one stacked column at every width. */}
+      <div className="support-workspace">
         {/* Ticket list */}
-        <div className="bg-white rounded-2xl shadow-sm p-2 space-y-1 max-h-[640px] overflow-y-auto">
+        <div className="support-workspace__list bg-white rounded-2xl shadow-sm p-2 space-y-1">
           {supportTickets.map((ticket) => {
             const badge = SUPPORT_STATUS_BADGE[ticket.status] || SUPPORT_STATUS_BADGE.open;
             const isSelected = ticket.id === selectedSupportTicketId;
@@ -1421,24 +1455,25 @@ export function AdminDashboard() {
         <div className="space-y-3">
           {selectedSupportTicketId && (
             <div className="bg-white rounded-2xl shadow-sm p-3 flex flex-wrap gap-2">
-              <button
-                onClick={() => handleSupportStatusChange(selectedSupportTicketId, 'open')}
-                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-xs font-medium"
-              >
-                Mark Open
-              </button>
-              <button
-                onClick={() => handleSupportStatusChange(selectedSupportTicketId, 'in_progress')}
-                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-xs font-medium"
-              >
-                Mark In Progress
-              </button>
-              <button
-                onClick={() => handleSupportStatusChange(selectedSupportTicketId, 'resolved')}
-                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-xs font-medium"
-              >
-                Mark Resolved
-              </button>
+              {STATUS_ACTIONS.map(({ status, label }) => {
+                // The three buttons used to look identical regardless of the ticket's
+                // actual status, so telling what state a ticket was already in meant
+                // checking the queue list's badge instead of the panel in front of you.
+                const isCurrent = selectedSupportTicket?.status === status;
+                const badge = SUPPORT_STATUS_BADGE[status];
+                return (
+                  <button
+                    key={status}
+                    onClick={() => handleSupportStatusChange(selectedSupportTicketId, status)}
+                    disabled={isCurrent}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:cursor-default ${
+                      isCurrent ? `${badge.className} border-transparent` : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    {isCurrent ? `Currently ${badge.label}` : label}
+                  </button>
+                );
+              })}
             </div>
           )}
           {/* Refresh the queue as the thread moves - a reply changes a ticket's status
@@ -1447,14 +1482,13 @@ export function AdminDashboard() {
             mode="admin"
             ticketId={selectedSupportTicketId}
             onActivity={() => { loadSupportTicketsData().catch(() => {}); }}
-            className="h-[560px]"
           />
         </div>
       </div>
 
       {/* Pagination */}
       {supportTicketsTotal > 0 && (
-        <div className="flex justify-between items-center">
+        <div className="flex flex-col sm:flex-row gap-3 justify-between items-center">
           <p className="text-sm text-gray-500">
             Showing {Math.min(supportPage * ITEMS_PER_PAGE + 1, supportTicketsTotal)} to {Math.min((supportPage + 1) * ITEMS_PER_PAGE, supportTicketsTotal)} of {supportTicketsTotal}
           </p>

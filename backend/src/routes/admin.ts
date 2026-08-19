@@ -64,13 +64,26 @@ router.get('/metrics/overview', async (req: Request & { userId?: string }, res: 
         FROM bookings WHERE deleted_at IS NULL
       `, [thisMonth.toISOString()]),
 
+      // Net of refunds. This summed gross_amount alone, so money returned to a client -
+      // a dispute resolved in their favour issues a partial or full refund, recorded in
+      // payments.refunded_amount - was still reported as revenue the platform had earned,
+      // permanently and with nothing on the dashboard to hint at the discrepancy.
+      //
+      // Commission is reduced in proportion to what was refunded rather than by the
+      // refund itself: the platform's cut of a half-refunded booking is half its original
+      // commission, and subtracting the gross refund from the commission total would
+      // drive it negative.
       pool.query(`
         SELECT
-          COALESCE(SUM(gross_amount), 0) as total_revenue,
-          COALESCE(SUM(commission_amount), 0) as total_commission,
-          COALESCE(SUM(gross_amount) FILTER (WHERE paid_at >= $1), 0) as this_month_revenue,
-          COALESCE(SUM(commission_amount) FILTER (WHERE paid_at >= $1), 0) as this_month_commission,
-          COALESCE(SUM(gross_amount) FILTER (WHERE paid_at >= $2 AND paid_at < $3), 0) as last_month_revenue
+          COALESCE(SUM(gross_amount - COALESCE(refunded_amount, 0)), 0) as total_revenue,
+          COALESCE(SUM(
+            commission_amount * (1 - LEAST(COALESCE(refunded_amount, 0) / NULLIF(gross_amount, 0), 1))
+          ), 0) as total_commission,
+          COALESCE(SUM(gross_amount - COALESCE(refunded_amount, 0)) FILTER (WHERE paid_at >= $1), 0) as this_month_revenue,
+          COALESCE(SUM(
+            commission_amount * (1 - LEAST(COALESCE(refunded_amount, 0) / NULLIF(gross_amount, 0), 1))
+          ) FILTER (WHERE paid_at >= $1), 0) as this_month_commission,
+          COALESCE(SUM(gross_amount - COALESCE(refunded_amount, 0)) FILTER (WHERE paid_at >= $2 AND paid_at < $3), 0) as last_month_revenue
         FROM payments WHERE status = 'succeeded'
       `, [thisMonth.toISOString(), lastMonth.toISOString(), thisMonth.toISOString()]),
 

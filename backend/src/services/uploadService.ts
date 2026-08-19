@@ -219,14 +219,20 @@ export function enforceMediaSizeLimits(req: any, res: Response, next: NextFuncti
 /**
  * Wraps a multer middleware so its errors become clean 400s instead of a generic 500,
  * and so nothing half-written survives a failure.
+ *
+ * `maxBytes` must match the `limits.fileSize` of the multer instance being wrapped.
+ * Multer's LIMIT_FILE_SIZE error doesn't carry the limit that produced it, and this
+ * used to name MAX_FILE_SIZE unconditionally - so the uploaders configured for video
+ * (chat attachments and the portfolio, both MAX_VIDEO_SIZE) rejected a 60MB video with
+ * "Maximum size is 10MB", a limit that was not the one being enforced.
  */
-export function handleUpload(mw: any) {
+export function handleUpload(mw: any, maxBytes: number = MAX_FILE_SIZE) {
   return (req: any, res: Response, next: NextFunction) => {
     mw(req, res, (err: any) => {
       if (err) {
         discardUploads(req);
         if (err.code === 'LIMIT_FILE_SIZE') {
-          return res.status(400).json({ error: `File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB` });
+          return res.status(400).json({ error: `File too large. Maximum size is ${Math.round(maxBytes / 1024 / 1024)}MB` });
         }
         if (err.code === 'LIMIT_FILE_COUNT') {
           return res.status(400).json({ error: 'Too many files in one upload' });

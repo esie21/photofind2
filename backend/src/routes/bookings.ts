@@ -4,7 +4,11 @@ import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
 import { paymongoRequest, createRefund } from '../services/paymongoService';
-import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
+import {
+  computeMinimumBookingPrice,
+  isPriceAcceptable,
+  servicePricingColumns,
+} from '../config/pricingConfig';
 import { computePaymentDueAt, PAYMENT_REMINDER_LEAD_HOURS } from '../config/paymentConfig';
 import { releaseEscrow } from '../services/walletService';
 import { auditService } from '../services/auditService';
@@ -103,6 +107,73 @@ const requireBookingPaid = async (req: any, res: Response, next: any) => {
     return res.status(400).json({ error: 'Invalid booking id' });
   }
 };
+
+// Dispute evidence uses the same storage, path safety and type checking as completion
+// evidence, but a tighter per-request cap - this is a rebuttal, not a gallery.
+const disputeEvidenceUpload = multer({
+  storage: evidenceStorage,
+  limits: { fileSize: MAX_FILE_SIZE, files: 5 },
+  fileFilter: imageFileFilter,
+});
+
+// Total dispute photos one party may attach across all their uploads on one booking.
+const MAX_DISPUTE_EVIDENCE_PER_PARTY = 10;
+
+// Either party on a booking that is actually in dispute may add to that dispute. Runs
+// BEFORE multer so a refused request never writes files to disk, and stashes the caller's
+// side and both resolved user ids on the request so handlers don't resolve them twice.
+//
+// Note the ids go through resolveClientUserId/resolveProviderUserId rather than being
+// compared raw: bookings.client_id/provider_id are row ids in the separate clients/
+// providers tables on this deployment, so a raw comparison 403s the real participants.
+const requireDisputeParticipant = async (req: any, res: Response, next: any) => {
+  try {
+    const bookingId = safeSegment(req.params.id);
+    const bookingRes = await pool.query(
+      'SELECT client_id, provider_id, status, dispute_raised FROM bookings WHERE id::text = $1',
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    if (booking.status !== 'disputed' && !booking.dispute_raised) {
+      return res.status(400).json({ error: 'This booking is not under dispute' });
+    }
+
+    const [clientUserId, providerUserId] = await Promise.all([
+      resolveClientUserId(String(booking.client_id)),
+      resolveProviderUserId(String(booking.provider_id)),
+    ]);
+
+    if (clientUserId === String(req.userId)) {
+      req.disputeRole = 'client';
+    } else if (providerUserId === String(req.userId)) {
+      req.disputeRole = 'provider';
+    } else {
+      return res.status(403).json({ error: 'Only the client or provider on this booking can add to its dispute' });
+    }
+
+    req.disputeParties = { clientUserId, providerUserId };
+    return next();
+  } catch {
+    return res.status(400).json({ error: 'Invalid booking id' });
+  }
+};
+
+// Both dispute endpoints below tell every admin that new material landed on a case they
+// are holding, so the queue reflects it without an admin reopening each booking.
+async function notifyAdminsOfDisputeActivity(title: string, message: string, bookingId: string, data: Record<string, any> = {}) {
+  const adminsRes = await pool.query("SELECT id FROM users WHERE role = 'admin' AND deleted_at IS NULL");
+  for (const admin of adminsRes.rows) {
+    await notificationService.create({
+      userId: String(admin.id),
+      type: 'booking_disputed',
+      title,
+      message,
+      data: { booking_id: bookingId, ...data },
+    });
+  }
+}
 
 function parseId(v: any): string | null {
   if (!v) return null;
@@ -547,10 +618,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       SELECT column_name FROM information_schema.columns WHERE table_name = 'services'
     `);
     const serviceColumns = columnCheck.rows.map((r: { column_name: string }) => r.column_name);
-    const pricingCols = ['id', 'price', 'pricing_type', 'duration_minutes'];
-    if (serviceColumns.includes('package_price')) pricingCols.push('package_price');
-    if (serviceColumns.includes('hourly_rate')) pricingCols.push('hourly_rate');
-    if (serviceColumns.includes('hourly_price')) pricingCols.push('hourly_price');
+    const pricingCols = servicePricingColumns(serviceColumns);
 
     const serviceCheck = await pool.query(
       `SELECT ${pricingCols.join(', ')} FROM services WHERE id::text = $1`,
@@ -560,67 +628,27 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       return res.status(404).json({ error: 'Service not found' });
     }
     const service = serviceCheck.rows[0];
-    const servicePrice = parseFloat(service.price) || 0;
-    const packagePrice = parseFloat(service.package_price) || servicePrice;
-    const packageDuration = service.duration_minutes || 60;
-    const platformFeeRate = PLATFORM_COMMISSION_RATE;
 
-    // Validate total_price is not less than expected (with platform fee)
+    // Validate total_price is not less than expected (with platform fee). The rule
+    // itself lives in pricingConfig so POST /payments/create-intent enforces the same
+    // one - it used to carry its own, different comparison against the flat service
+    // price. NOTE: this prices the *submitted* window; the slot check inside the
+    // transaction below is what stops that window being shorter than the time the
+    // booking actually reserves.
     const submittedPrice = parseFloat(total_price) || 0;
-
-    // Hourly pricing scales with how long the booking actually is. This used to check
-    // against a single hour's rate no matter the duration, so an 8-hour booking could
-    // be submitted at 1 hour's price and pass - and create-intent's own check compares
-    // against the same single-hour figure, so it went through there too.
-    if (service.pricing_type === 'hourly') {
-      const startForPrice = new Date(String(start_date));
-      const endForPrice = end_date
-        ? new Date(String(end_date))
-        : new Date(startForPrice.getTime() + packageDuration * 60 * 1000);
-      const durationMinutes = Math.round((endForPrice.getTime() - startForPrice.getTime()) / (1000 * 60));
-      // Was floored to a minimum of 1 hour, which is what an 8-hour booking needed
-      // guarding against - but it also silently doubled the minimum price for any
-      // booking shorter than an hour (a 30-minute slot billed at a full hour's rate),
-      // rejecting a client's own, correctly proportional, price as "Invalid price".
-      // Slot selection already guarantees a positive duration, but a value of exactly
-      // 0 would otherwise let a booking through for free.
-      if (durationMinutes <= 0) {
-        return res.status(400).json({ error: 'Invalid price', detail: 'Booking duration must be greater than zero' });
-      }
-      const hours = durationMinutes / 60;
-      const minPrice = servicePrice * hours * (1 + platformFeeRate);
-      if (submittedPrice < minPrice * 0.99) {
-        return res.status(400).json({
-          error: 'Invalid price',
-          detail: `Price must be at least ₱${minPrice.toFixed(2)}`
-        });
-      }
-    } else {
-      // Package pricing: price scales with duration (e.g. 2 hrs of a 1-hr package = 2×)
-      const startForPrice = new Date(String(start_date));
-      let endForPrice: Date;
-      if (end_date) {
-        endForPrice = new Date(String(end_date));
-      } else {
-        endForPrice = new Date(startForPrice.getTime() + packageDuration * 60 * 1000);
-      }
-      const durationMinutes = Math.round((endForPrice.getTime() - startForPrice.getTime()) / (1000 * 60));
-      const units = Math.max(1, durationMinutes / packageDuration);
-      const expectedServicePrice = packagePrice * units;
-      let minPrice = expectedServicePrice * (1 + platformFeeRate);
-
-      if (service.pricing_type === 'both') {
-        const hourlyRate = parseFloat(service.hourly_rate) || parseFloat(service.hourly_price) || servicePrice;
-        const hourlyExpected = hourlyRate * (durationMinutes / 60) * (1 + platformFeeRate);
-        minPrice = Math.min(minPrice, hourlyExpected);
-      }
-
-      if (submittedPrice < minPrice * 0.99) {
-        return res.status(400).json({
-          error: 'Invalid price',
-          detail: `Price must be at least ₱${minPrice.toFixed(2)}`
-        });
-      }
+    const pricing = computeMinimumBookingPrice(
+      service,
+      new Date(String(start_date)),
+      end_date ? new Date(String(end_date)) : null
+    );
+    if (!pricing.ok) {
+      return res.status(400).json({ error: 'Invalid price', detail: pricing.error });
+    }
+    if (!isPriceAcceptable(submittedPrice, pricing.minPrice)) {
+      return res.status(400).json({
+        error: 'Invalid price',
+        detail: `Price must be at least ₱${pricing.minPrice.toFixed(2)}`
+      });
     }
 
     // Convert user IDs to record IDs if needed (handles providers/clients tables)
@@ -653,6 +681,15 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // Serialise booking creation per provider.
+      //
+      // The overlap check below is a plain SELECT followed by an INSERT, which under
+      // READ COMMITTED sees only rows committed before it ran - so two concurrent
+      // requests for the same provider could both find no conflict and both insert,
+      // leaving two overlapping non-cancelled bookings that the check exists to
+      // prevent. The same lock guards the cancel path further down this file.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [providerIdStr]);
 
       // Check if the provider has blocked this date
       const bookingDate = start.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -689,9 +726,88 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
         return res.status(409).json({ error: 'This time slot conflicts with another booking' });
       }
 
+      // Settle what these slot ids actually are before anything is written.
+      //
+      // The UPDATE further down used to be the only statement that touched these
+      // rows, and it filtered on nothing but the slot id and the provider - no
+      // status, no held_by. So a request naming slots already 'booked' against
+      // someone else's confirmed booking would silently reassign their booking_id to
+      // this new booking, detaching the original booking from its slot and raising no
+      // conflict at all. POST /availability/slots/book has checked exactly this since
+      // it was written (status 'booked' -> 409, held by another user -> 409); this
+      // route never did. FOR UPDATE holds the rows for the rest of the transaction so
+      // a concurrent request can't pass the same checks behind us.
+      const requestedSlotIds = Array.isArray(slot_ids) ? slot_ids.map((id: any) => String(id)) : [];
+      let slotRows: any[] = [];
+
+      if (requestedSlotIds.length > 0) {
+        const slotRes = await client.query(
+          `SELECT id, provider_id, status, held_by, start_datetime, end_datetime
+           FROM time_slots
+           WHERE id::text = ANY($1)
+           FOR UPDATE`,
+          [requestedSlotIds]
+        );
+        slotRows = slotRes.rows;
+
+        if (slotRows.length !== requestedSlotIds.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'One or more selected time slots no longer exist' });
+        }
+
+        for (const slot of slotRows) {
+          // time_slots.provider_id is a user id, unlike bookings.provider_id.
+          if (String(slot.provider_id) !== providerUserIdStr) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'All selected time slots must belong to this provider' });
+          }
+          if (String(slot.status) === 'booked') {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'One of the selected time slots has already been booked',
+              slot_id: slot.id,
+            });
+          }
+          if (String(slot.status) === 'held' && String(slot.held_by) !== clientUserIdStr) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'One of the selected time slots is being held by someone else',
+              slot_id: slot.id,
+            });
+          }
+        }
+
+        // Tie the price to what is actually being reserved.
+        //
+        // The minimum-price check ran against the submitted start_date/end_date, but
+        // what the booking really takes off the calendar is these slots, and nothing
+        // connected the two - so a short (cheap) window could be submitted alongside
+        // slots covering a much longer real block. Only the underpaying direction is
+        // refused: slots covering less time than was paid for costs the client money,
+        // not the provider, and rejecting it would break nothing but their day.
+        const slotStartMs = Math.min(...slotRows.map((s: any) => new Date(s.start_datetime).getTime()));
+        const slotEndMs = Math.max(...slotRows.map((s: any) => new Date(s.end_datetime).getTime()));
+        const BOUNDARY_TOLERANCE_MS = 60 * 1000;
+
+        if (
+          !isNaN(slotStartMs) && !isNaN(slotEndMs) &&
+          (slotStartMs < start.getTime() - BOUNDARY_TOLERANCE_MS ||
+            slotEndMs > end.getTime() + BOUNDARY_TOLERANCE_MS)
+        ) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: 'Invalid price',
+            detail: 'The selected time slots cover more time than the booking window being charged for.',
+          });
+        }
+      }
+
+      // min_price_at_booking records the floor this price was actually judged against,
+      // so create-intent can re-check it before charging without re-deriving it from a
+      // service whose rates may have changed since. See config/pricingConfig.ts.
       const insertQuery = `
-        INSERT INTO bookings (client_id, provider_id, service_id, start_date, end_date, status, booking_mode, accepted_at, total_price)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO bookings (client_id, provider_id, service_id, start_date, end_date, status, booking_mode, accepted_at, total_price, min_price_at_booking)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING *
       `;
 
@@ -705,6 +821,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
         mode,
         acceptedAt,
         total_price,
+        pricing.minPrice,
       ];
 
       const result = await client.query(insertQuery, values);
@@ -719,12 +836,15 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       // expired on its own timer, and the grid would then show the now-booked time as
       // available again - looking free right up until a second client tried to submit
       // and got a 409 that the picker gave them no reason to expect.
-      if (Array.isArray(slot_ids) && slot_ids.length > 0) {
+      //
+      // Every id here has been located, ownership-checked and row-locked above, so
+      // this can no longer overwrite a slot belonging to another booking.
+      if (requestedSlotIds.length > 0) {
         await client.query(
           `UPDATE time_slots
            SET status = 'booked', booking_id = $1, held_by = NULL, hold_expires_at = NULL
            WHERE id::text = ANY($2) AND provider_id::text = $3`,
-          [String(booking.id), slot_ids.map((id: any) => String(id)), providerUserIdStr]
+          [String(booking.id), requestedSlotIds, providerUserIdStr]
         );
       }
 
@@ -1029,11 +1149,14 @@ router.get('/disputed', verifyToken, async (req: Request & { userId?: string }, 
          LEFT JOIN users u2 ON u2.id = p.user_id`
       : `LEFT JOIN users u2 ON u2.id = b.provider_id`;
 
+    // u1.id / u2.id come back explicitly: b.client_id and b.provider_id may be row ids in
+    // the clients/providers tables, so they can't be matched against booking_evidence.
+    // uploaded_by (a users.id) to work out which side filed a given photo.
     const query = `
       SELECT b.*,
              s.title as service_title,
-             u1.name as client_name, u1.email as client_email,
-             u2.name as provider_name, u2.email as provider_email
+             u1.id as client_user_id, u1.name as client_name, u1.email as client_email,
+             u2.id as provider_user_id, u2.name as provider_name, u2.email as provider_email
       FROM bookings b
       LEFT JOIN services s ON s.id::text = b.service_id::text
       ${clientJoin}
@@ -1069,11 +1192,32 @@ router.get('/disputed', verifyToken, async (req: Request & { userId?: string }, 
       evidenceByBooking[bookingId].push(evidence);
     }
 
-    // Attach evidence to bookings
-    const bookingsWithEvidence = rows.map((booking: any) => ({
-      ...booking,
-      evidence: evidenceByBooking[String(booking.id)] || []
-    }));
+    // Attach evidence to bookings, tagged by which side filed it and split into the
+    // provider's completion photos versus material added after the dispute was raised.
+    // An admin judging a case needs to know whose exhibit they are looking at; before
+    // this every photo arrived in one undifferentiated list that only the provider
+    // could ever have contributed to.
+    const bookingsWithEvidence = rows.map((booking: any) => {
+      const clientUserId = booking.client_user_id ? String(booking.client_user_id) : null;
+      const providerUserId = booking.provider_user_id ? String(booking.provider_user_id) : null;
+
+      const tagged = (evidenceByBooking[String(booking.id)] || []).map((e: any) => {
+        const uploadedBy = String(e.uploaded_by);
+        return {
+          ...e,
+          uploader_role:
+            uploadedBy === clientUserId ? 'client'
+            : uploadedBy === providerUserId ? 'provider'
+            : 'other',
+        };
+      });
+
+      return {
+        ...booking,
+        evidence: tagged.filter((e: any) => !e.is_dispute_evidence),
+        dispute_evidence: tagged.filter((e: any) => e.is_dispute_evidence),
+      };
+    });
 
     return res.json({ data: bookingsWithEvidence });
   } catch (error) {
@@ -1182,6 +1326,7 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
 
 router.get('/:id', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   const currentUserId = req.userId;
+  const role = (req as any).role;
   const bookingId = String(req.params.id || '');
   if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
   if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
@@ -1208,7 +1353,10 @@ router.get('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       resolveProviderUserId(String(booking.provider_id)),
     ]);
 
-    if (clientUserId !== String(currentUserId) && providerUserId !== String(currentUserId)) {
+    // Support needs this too: the admin ticket thread links to the booking a
+    // conversation is about, so an admin reading a ticket can see what it's about
+    // without a separate admin-only booking-lookup endpoint.
+    if (clientUserId !== String(currentUserId) && providerUserId !== String(currentUserId) && role !== 'admin') {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -3367,10 +3515,260 @@ router.get('/:id/evidence', verifyToken, async (req: Request & { userId?: string
       [bookingId]
     );
 
-    return res.json({ data: evidenceRes.rows });
+    // Same tagging as GET /disputed, so a participant's view can label the other side's
+    // dispute photos instead of mixing them in with the provider's completion set.
+    const tagged = evidenceRes.rows.map((e: any) => {
+      const uploadedBy = String(e.uploaded_by);
+      return {
+        ...e,
+        uploader_role:
+          uploadedBy === evidenceClientUserId ? 'client'
+          : uploadedBy === evidenceProviderUserId ? 'provider'
+          : 'other',
+      };
+    });
+
+    return res.json({ data: tagged });
   } catch (error) {
     console.error('Error fetching evidence:', error);
     return res.status(500).json({ error: 'Failed to fetch evidence' });
+  }
+});
+
+// ==================== ADD EVIDENCE TO AN OPEN DISPUTE ====================
+// Before this, POST /:id/complete was the only upload path and it is provider-only
+// (requireBookingProvider), so a dispute reached the admin as the provider's photos and
+// notes against a single paragraph of client text. Either party can now attach photos
+// while the dispute is open.
+
+router.post('/:id/dispute-evidence',
+  verifyToken,
+  requireDisputeParticipant,
+  handleUpload(disputeEvidenceUpload.array('evidence', 5)),
+  verifyUploadedContent,
+  async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = String(req.userId);
+  const bookingId = String(req.params.id || '');
+  const files = (req.files as Express.Multer.File[]) || [];
+  const role: 'client' | 'provider' = (req as any).disputeRole;
+  const { clientUserId, providerUserId } = (req as any).disputeParties;
+  const caption = typeof req.body?.caption === 'string' ? req.body.caption.trim().slice(0, 500) : null;
+
+  // discardUploads() rather than a local unlink loop: it checks existsSync first and
+  // warns on a failure it can't recover from. The loop this replaces swallowed every
+  // error silently, so a permissions problem or a race during cleanup left an orphaned
+  // file on disk with nothing in the log to find it by.
+  const discardFiles = () => discardUploads(req);
+
+  if (files.length === 0) {
+    return res.status(400).json({ error: 'Select at least one photo to attach' });
+  }
+
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+
+    // Re-check the dispute is still open under a row lock: the guard above ran before
+    // multer, and an admin can resolve the dispute while a large upload is in flight.
+    const lockRes = await dbClient.query(
+      `SELECT status, dispute_raised FROM bookings WHERE id::text = $1 FOR UPDATE`,
+      [bookingId]
+    );
+    const locked = lockRes.rows[0];
+    if (!locked || (locked.status !== 'disputed' && !locked.dispute_raised)) {
+      await dbClient.query('ROLLBACK');
+      discardFiles();
+      return res.status(409).json({ error: 'This dispute has already been resolved, so no more evidence can be added.' });
+    }
+
+    // Count against this party's own quota only, so one side can't exhaust the other's.
+    const existingRes = await dbClient.query(
+      `SELECT COUNT(*)::int AS count FROM booking_evidence
+       WHERE booking_id::text = $1 AND uploaded_by::text = $2 AND is_dispute_evidence = TRUE`,
+      [bookingId, currentUserId]
+    );
+    const existingCount = existingRes.rows[0]?.count || 0;
+    if (existingCount + files.length > MAX_DISPUTE_EVIDENCE_PER_PARTY) {
+      await dbClient.query('ROLLBACK');
+      discardFiles();
+      return res.status(400).json({
+        error: `You can attach at most ${MAX_DISPUTE_EVIDENCE_PER_PARTY} photos to this dispute (${existingCount} already attached).`,
+      });
+    }
+
+    const inserted: any[] = [];
+    for (const file of files) {
+      const fileUrl = `bookings/${bookingId}/${file.filename}`;
+      const insertRes = await dbClient.query(
+        `INSERT INTO booking_evidence (booking_id, uploaded_by, evidence_type, file_url, caption, is_dispute_evidence)
+         VALUES ($1, $2, 'other', $3, $4, TRUE)
+         RETURNING *`,
+        [bookingId, currentUserId, fileUrl, caption]
+      );
+      inserted.push({ ...insertRes.rows[0], uploader_role: role });
+    }
+
+    await dbClient.query('COMMIT');
+
+    // Everything past the commit is best-effort: the evidence is stored, so a failed
+    // notification must not read back to the uploader as a failed upload.
+    const otherPartyUserId = role === 'client' ? providerUserId : clientUserId;
+    const photoLabel = `${files.length} photo${files.length === 1 ? '' : 's'}`;
+    try {
+      const uploaderRes = await pool.query('SELECT name FROM users WHERE id::text = $1', [currentUserId]);
+      const uploaderName = uploaderRes.rows[0]?.name || (role === 'client' ? 'The client' : 'The provider');
+
+      await notificationService.create({
+        userId: otherPartyUserId,
+        type: 'booking_disputed',
+        title: 'New Dispute Evidence',
+        message: `${uploaderName} attached ${photoLabel} to the dispute on your booking.`,
+        data: { booking_id: bookingId, uploaded_by_role: role },
+      });
+
+      await notifyAdminsOfDisputeActivity(
+        'Dispute Evidence Added',
+        `${uploaderName} (${role}) attached ${photoLabel} to a disputed booking.`,
+        bookingId,
+        { uploaded_by_role: role }
+      );
+    } catch (notifyError) {
+      console.error('Failed to send dispute evidence notifications:', notifyError);
+    }
+
+    try {
+      const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+      if (chatId) {
+        await pool.query(
+          `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+           VALUES ($1, NULL, $2, TRUE)`,
+          [chatId, `The ${role} attached ${photoLabel} to this dispute for the admin to review.`]
+        );
+        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+        const io = (req.app as any).get('io');
+        if (io) {
+          io.to(`booking:${bookingId}`).emit('booking:dispute_evidence_added', {
+            bookingId,
+            uploaded_by_role: role,
+            count: files.length,
+          });
+        }
+      }
+    } catch (chatError) {
+      console.error('Failed to send dispute evidence chat message (non-fatal):', chatError);
+    }
+
+    return res.status(201).json({
+      data: inserted,
+      message: `${photoLabel} attached to the dispute.`,
+    });
+  } catch (error) {
+    try { await dbClient.query('ROLLBACK'); } catch { /* connection may be gone */ }
+    discardFiles();
+    console.error('Error attaching dispute evidence:', error);
+    return res.status(500).json({ error: 'Failed to attach evidence to this dispute' });
+  } finally {
+    dbClient.release();
+  }
+});
+
+// ==================== PROVIDER RESPONDS TO A DISPUTE ====================
+// The provider's only prior "voice" in a dispute was completion_notes, which are written
+// before the dispute exists and so can't answer what the client actually alleged.
+
+router.put('/:id/dispute-response', verifyToken, requireDisputeParticipant, async (req: Request & { userId?: string }, res: Response) => {
+  const bookingId = String(req.params.id || '');
+  const role: 'client' | 'provider' = (req as any).disputeRole;
+  const { clientUserId, providerUserId } = (req as any).disputeParties;
+
+  if (role !== 'provider') {
+    return res.status(403).json({ error: 'Only the provider can respond to a dispute' });
+  }
+
+  const raw = req.body?.response;
+  const response = typeof raw === 'string' ? raw.trim() : '';
+  if (response.length < 10) {
+    return res.status(400).json({ error: 'Please give a detailed response (at least 10 characters)' });
+  }
+  if (response.length > 2000) {
+    return res.status(400).json({ error: 'Response must be 2000 characters or fewer' });
+  }
+
+  try {
+    // The WHERE clause re-asserts the dispute is open, so a response submitted just after
+    // an admin resolved the case updates nothing rather than overwriting a closed record.
+    // The CTE carries the pre-update value out alongside the new row, so the wording
+    // below can say "updated" rather than "responded" without a second racy read.
+    const updateRes = await pool.query(
+      `WITH prev AS (
+         SELECT dispute_response AS previous_response FROM bookings WHERE id::text = $2
+       )
+       UPDATE bookings b
+       SET dispute_response = $1,
+           dispute_response_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       FROM prev
+       WHERE b.id::text = $2 AND (b.status = 'disputed' OR b.dispute_raised = TRUE)
+       RETURNING b.*, prev.previous_response`,
+      [response, bookingId]
+    );
+
+    if (!updateRes.rows[0]) {
+      return res.status(409).json({ error: 'This dispute has already been resolved, so a response can no longer be added.' });
+    }
+
+    const isUpdate = !!updateRes.rows[0].previous_response;
+    const excerpt = `${response.substring(0, 100)}${response.length > 100 ? '...' : ''}`;
+
+    try {
+      const providerRes = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]);
+      const providerName = providerRes.rows[0]?.name || 'The provider';
+
+      await notificationService.create({
+        userId: clientUserId,
+        type: 'booking_disputed',
+        title: 'Provider Responded to Your Dispute',
+        message: `${providerName} responded: ${excerpt}`,
+        data: { booking_id: bookingId, response },
+      });
+
+      await notifyAdminsOfDisputeActivity(
+        'Provider Responded to Dispute',
+        `${providerName} responded to a disputed booking: ${excerpt}`,
+        bookingId,
+        { response }
+      );
+    } catch (notifyError) {
+      console.error('Failed to send dispute response notifications:', notifyError);
+    }
+
+    try {
+      const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+      if (chatId) {
+        await pool.query(
+          `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+           VALUES ($1, NULL, $2, TRUE)`,
+          [chatId, `The provider ${isUpdate ? 'updated their response to' : 'responded to'} this dispute. An admin will review both sides.`]
+        );
+        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+        const io = (req.app as any).get('io');
+        if (io) {
+          io.to(`booking:${bookingId}`).emit('booking:dispute_response', { bookingId, response });
+        }
+      }
+    } catch (chatError) {
+      console.error('Failed to send dispute response chat message (non-fatal):', chatError);
+    }
+
+    return res.json({
+      data: updateRes.rows[0],
+      message: 'Your response has been recorded and the admin has been notified.',
+    });
+  } catch (error) {
+    console.error('Error saving dispute response:', error);
+    return res.status(500).json({ error: 'Failed to save your response' });
   }
 });
 

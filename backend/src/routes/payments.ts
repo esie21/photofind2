@@ -6,6 +6,7 @@ import { notificationService } from '../services/notificationService';
 import { settlePaymentSuccess } from '../services/walletService';
 import { paymongoRequest, PayMongoResponse } from '../services/paymongoService';
 import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
+import { isPriceAcceptable } from '../config/pricingConfig';
 
 const router = express.Router();
 
@@ -88,15 +89,32 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
       });
     }
 
-    // Sanity-check the stored price, not a re-derivation of it: POST /bookings already
-    // validated total_price against the service's real (duration-aware) minimum at
-    // creation time, and this endpoint takes no client-supplied price to re-check against
-    // - booking_id is the only input. Comparing against the flat, unscaled service_price
-    // instead used to reject any booking whose correct price was legitimately less than
-    // one full flat unit, which every hourly booking under an hour is.
+    // Re-check the stored price against the floor it was judged against when the
+    // booking was created.
+    //
+    // This endpoint takes no client-supplied price - booking_id is the only input - so
+    // this is defence in depth against a total_price that reached the row by some route
+    // other than POST /bookings' validation. It deliberately compares against the
+    // stored min_price_at_booking rather than re-deriving a minimum from the service
+    // as it stands now: an earlier version compared against the flat, unscaled
+    // services.price, which rejected every hourly booking legitimately shorter than one
+    // full unit, and any re-derivation would also start rejecting honest bookings the
+    // moment a provider edited their rates. Rows created before that column existed
+    // carry NULL and are covered by the > 0 check alone.
     const bookingPrice = parseFloat(booking.total_price || 0);
     if (bookingPrice <= 0) {
       await dbClient.query('ROLLBACK');
+      return res.status(400).json({ error: 'This booking has no valid price to charge.' });
+    }
+
+    const minAtBooking = booking.min_price_at_booking === null || booking.min_price_at_booking === undefined
+      ? null
+      : parseFloat(booking.min_price_at_booking);
+    if (minAtBooking !== null && !isNaN(minAtBooking) && !isPriceAcceptable(bookingPrice, minAtBooking)) {
+      await dbClient.query('ROLLBACK');
+      console.error(
+        `Refusing payment intent for booking ${booking_id}: stored total_price ${bookingPrice} is below its own recorded minimum ${minAtBooking}`
+      );
       return res.status(400).json({ error: 'This booking has no valid price to charge.' });
     }
 

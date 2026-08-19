@@ -1,8 +1,32 @@
 import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
+import { CATEGORY_OPTIONS } from '../constants/categories';
 
 const router = express.Router();
+
+/**
+ * Rejects a rate that would poison the booking price floor.
+ *
+ * Only `price` was ever checked, while hourly_rate and package_price went into the row
+ * as `value || null`. config/pricingConfig.ts prices an hourly booking off hourly_rate,
+ * so a negative one there produced a negative minimum - a booking that clears
+ * validation at any price at all. Absent means "not set" and stays allowed; present
+ * means it has to be a real, positive amount.
+ */
+function rateError(label: string, value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return `${label} must be greater than zero`;
+  return null;
+}
+
+function validateRates(body: any): string | null {
+  return (
+    rateError('Hourly rate', body?.hourly_rate) ||
+    rateError('Package price', body?.package_price)
+  );
+}
 
 // Helper function to get provider ID from user ID
 async function getProviderIdFromUserId(userId: string): Promise<string> {
@@ -352,6 +376,18 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       return res.status(400).json({ error: 'Price must be greater than zero' });
     }
 
+    const rateProblem = validateRates(req.body);
+    if (rateProblem) {
+      return res.status(400).json({ error: rateProblem });
+    }
+
+    // providers.ts's category filter and stats queries match stored values with exact
+    // string equality, so a category outside the picker's own options would silently
+    // make this service unfindable by category rather than erroring anywhere.
+    if (category !== undefined && category !== null && String(category).trim() !== '' && !CATEGORY_OPTIONS.includes(String(category).trim())) {
+      return res.status(400).json({ error: 'Invalid category' });
+    }
+
     // Get provider_id from user_id (handles both direct users reference and providers table)
     const providerId = await getProviderIdFromUserId(userId);
 
@@ -501,6 +537,17 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     // Same zero-price rule as service creation - see the comment there.
     if (price !== undefined && price !== null && (Number(price) <= 0 || !Number.isFinite(Number(price)))) {
       return res.status(400).json({ error: 'Price must be greater than zero' });
+    }
+
+    // Same category allowlist check as service creation - see the comment there.
+    if (category !== undefined && category !== null && String(category).trim() !== '' && !CATEGORY_OPTIONS.includes(String(category).trim())) {
+      return res.status(400).json({ error: 'Invalid category' });
+    }
+
+    // Same rate check as service creation - an update can set these just as freely.
+    const rateProblem = validateRates(req.body);
+    if (rateProblem) {
+      return res.status(400).json({ error: rateProblem });
     }
 
     // Get provider ID from user ID
