@@ -116,6 +116,7 @@ export const API_CONFIG = {
       DELETE: (id: string) => `/bookings/${id}`,
       COMPLETE: (id: string) => `/bookings/${id}/complete`,
       CONFIRM: (id: string) => `/bookings/${id}/confirm`,
+      CONFIRM_CASH: (id: string) => `/bookings/${id}/confirm-cash`,
       EVIDENCE: (id: string) => `/bookings/${id}/evidence`,
       DISPUTE_EVIDENCE: (id: string) => `/bookings/${id}/dispute-evidence`,
       DISPUTE_RESPONSE: (id: string) => `/bookings/${id}/dispute-response`,

@@ -9,8 +9,9 @@ import {
   isPriceAcceptable,
   servicePricingColumns,
 } from '../config/pricingConfig';
-import { computePaymentDueAt, PAYMENT_REMINDER_LEAD_HOURS } from '../config/paymentConfig';
-import { releaseEscrow } from '../services/walletService';
+import { computePaymentDueAt, PAYMENT_REMINDER_LEAD_HOURS, CASH_CONFIRM_GRACE_MINUTES } from '../config/paymentConfig';
+import { releaseEscrow, settleCashPayment } from '../services/walletService';
+import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
 import { auditService } from '../services/auditService';
 import {
   UPLOADS_ROOT,
@@ -595,7 +596,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
   const clientId = req.userId; // from verifyToken
   // booking_mode is deliberately not read from the body - see the comment where
   // `mode` is set below.
-  const { provider_id, service_id, start_date, end_date, total_price, slot_ids } = req.body;
+  const { provider_id, service_id, start_date, end_date, total_price, slot_ids, payment_method } = req.body;
 
   if (!clientId) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -620,14 +621,36 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     const serviceColumns = columnCheck.rows.map((r: { column_name: string }) => r.column_name);
     const pricingCols = servicePricingColumns(serviceColumns);
 
+    // accepts_cash is read here rather than trusted from the request body. The client
+    // sends which method it wants, but whether cash is on offer at all is the
+    // provider's decision, recorded on the service - without this check anyone could
+    // POST payment_method: 'cash' and force a provider who never opted in to chase
+    // the money themselves and owe commission on it.
+    const hasAcceptsCash = serviceColumns.includes('accepts_cash');
+    const serviceSelectCols = hasAcceptsCash ? [...pricingCols, 'accepts_cash'] : pricingCols;
+
     const serviceCheck = await pool.query(
-      `SELECT ${pricingCols.join(', ')} FROM services WHERE id::text = $1`,
+      `SELECT ${serviceSelectCols.join(', ')} FROM services WHERE id::text = $1`,
       [serviceIdStr]
     );
     if (serviceCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Service not found' });
     }
     const service = serviceCheck.rows[0];
+
+    const requestedMethod = payment_method === undefined || payment_method === null
+      ? 'online'
+      : String(payment_method).trim().toLowerCase();
+
+    if (!['online', 'cash'].includes(requestedMethod)) {
+      return res.status(400).json({ error: 'payment_method must be either "online" or "cash"' });
+    }
+
+    if (requestedMethod === 'cash' && !(hasAcceptsCash && service.accepts_cash === true)) {
+      return res.status(400).json({
+        error: 'This service does not accept cash payment. Please pay online instead.',
+      });
+    }
 
     // Validate total_price is not less than expected (with platform fee). The rule
     // itself lives in pricingConfig so POST /payments/create-intent enforces the same
@@ -806,8 +829,8 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       // so create-intent can re-check it before charging without re-deriving it from a
       // service whose rates may have changed since. See config/pricingConfig.ts.
       const insertQuery = `
-        INSERT INTO bookings (client_id, provider_id, service_id, start_date, end_date, status, booking_mode, accepted_at, total_price, min_price_at_booking)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO bookings (client_id, provider_id, service_id, start_date, end_date, status, booking_mode, accepted_at, total_price, min_price_at_booking, payment_method)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING *
       `;
 
@@ -822,6 +845,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
         acceptedAt,
         total_price,
         pricing.minPrice,
+        requestedMethod,
       ];
 
       const result = await client.query(insertQuery, values);
@@ -1409,7 +1433,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const hasClientsTable = existingTables.includes('clients');
 
     const existingRes = await pool.query(
-      'SELECT id, client_id, provider_id, status, start_date, end_date, dispute_raised, payment_due_at FROM bookings WHERE id::text = $1',
+      'SELECT id, client_id, provider_id, status, start_date, end_date, dispute_raised, payment_due_at, payment_method FROM bookings WHERE id::text = $1',
       [bookingId]
     );
     const existing = existingRes.rows[0];
@@ -1515,7 +1539,12 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
         // Accepting is what opens payment, so it is what starts the clock. Only set on
         // the first accept (COALESCE above), so flipping accepted -> confirmed doesn't
         // hand the client a fresh 24 hours.
-        if (!existing.payment_due_at) {
+        //
+        // A cash booking gets no deadline at all. The clock exists so an unpaid online
+        // booking can't hold a slot indefinitely, but there is nothing for a cash client
+        // to do in the next 24 hours - they pay on the day - so arming it would have
+        // expireUnpaidBookings cancel every cash booking a day after it was accepted.
+        if (!existing.payment_due_at && String(existing.payment_method || 'online') !== 'cash') {
           updates.push(`payment_due_at = $${idx++}`);
           values.push(computePaymentDueAt(new Date(), existing.start_date ? new Date(existing.start_date) : null));
         }
@@ -1995,7 +2024,11 @@ router.put('/:id/reschedule/approve', verifyToken, async (req: Request & { userI
     // original start - keeping it would let a booking expire for non-payment during the
     // very negotiation that moved its date, or leave the "2 hours before the start"
     // cutoff pointing at a time that no longer exists.
-    const stillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid';
+    // Cash bookings never carry a payment deadline (see the accept path), so there is
+    // nothing to restart - and writing one here would arm the expiry sweep against a
+    // booking whose client was never asked to pay in advance.
+    const stillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid'
+      && String(booking.payment_method || 'online') !== 'cash';
     const newDueAt = stillUnpaid
       ? computePaymentDueAt(new Date(), booking.start_date ? new Date(booking.start_date) : null)
       : null;
@@ -2173,7 +2206,9 @@ router.put('/:id/reschedule/reject', verifyToken, async (req: Request & { userId
     // the clock restarts from now, because the client shouldn't lose their slot over days
     // spent negotiating a change that was then declined. Measured against the time being
     // reverted to.
-    const rejectStillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid';
+    // Same cash exemption as the approve path above.
+    const rejectStillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid'
+      && String(booking.payment_method || 'online') !== 'cash';
     const revertedDueAt = rejectStillUnpaid
       ? computePaymentDueAt(
           new Date(),
@@ -2270,6 +2305,7 @@ export async function expireUnpaidBookings() {
        LEFT JOIN services s ON s.id::text = b.service_id::text
        WHERE b.status IN ('accepted', 'confirmed')
          AND COALESCE(b.payment_status, 'unpaid') <> 'paid'
+         AND COALESCE(b.payment_method, 'online') <> 'cash'
          AND b.payment_due_at IS NOT NULL
          AND b.payment_due_at < NOW()`
     );
@@ -2300,6 +2336,7 @@ export async function expireUnpaidBookings() {
            WHERE id::text = $1
              AND status IN ('accepted', 'confirmed')
              AND COALESCE(payment_status, 'unpaid') <> 'paid'
+             AND COALESCE(payment_method, 'online') <> 'cash'
            RETURNING id`,
           [String(booking.id), 'Payment was not received before the deadline']
         );
@@ -2374,6 +2411,7 @@ export async function sendPaymentReminders() {
        LEFT JOIN services s ON s.id::text = b.service_id::text
        WHERE b.status IN ('accepted', 'confirmed')
          AND COALESCE(b.payment_status, 'unpaid') <> 'paid'
+         AND COALESCE(b.payment_method, 'online') <> 'cash'
          AND b.payment_due_at IS NOT NULL
          AND b.payment_due_at > NOW()
          AND b.payment_due_at < NOW() + ($1 || ' hours')::interval
@@ -2545,14 +2583,19 @@ export async function autoConfirmPastCompletions() {
 
         // Get payment record for this booking
         const paymentRes = await txClient.query(
-          `SELECT id, net_provider_amount, status FROM payments
+          `SELECT id, net_provider_amount, status, payment_method_type FROM payments
            WHERE booking_id::text = $1 AND status = 'succeeded'
            ORDER BY created_at DESC LIMIT 1`,
           [String(booking.id)]
         );
         const payment = paymentRes.rows[0];
+        // A cash payment was never escrowed - the provider was handed the money on the
+        // day - so there is nothing here to release. Calling releaseEscrow anyway would
+        // find pending_balance short by the full amount and log a SHORTFALL that reads
+        // like a missing escrow credit rather than a payment that correctly bypassed it.
+        const isCashPayment = String(payment?.payment_method_type || '') === 'cash';
 
-        if (payment && payment.status === 'succeeded') {
+        if (payment && payment.status === 'succeeded' && !isCashPayment) {
           const amount = parseFloat(payment.net_provider_amount);
           const { released } = await releaseEscrow(txClient, providerUserId, amount, {
             bookingId: String(booking.id),
@@ -2566,8 +2609,9 @@ export async function autoConfirmPastCompletions() {
           console.log(`Auto-released payment of ${released} to provider ${providerUserId} for booking ${booking.id}`);
         }
 
-        // Warn if auto-confirmed but payment wasn't released
-        if (!paymentReleased) {
+        // Warn if auto-confirmed but payment wasn't released. Cash is exempt: the
+        // provider has had the money since the shoot, so nothing is owed to them here.
+        if (!paymentReleased && !isCashPayment) {
           console.warn(`WARNING: Booking ${booking.id} auto-confirmed but payment not released. Provider ${providerUserId} may not have received payment.`);
         }
 
@@ -2843,14 +2887,16 @@ export async function autoResolveStaleDisputes() {
         let releasedAmount = 0;
 
         const paymentRes = await txClient.query(
-          `SELECT id, net_provider_amount, status FROM payments
+          `SELECT id, net_provider_amount, status, payment_method_type FROM payments
            WHERE booking_id::text = $1 AND status = 'succeeded'
            ORDER BY created_at DESC LIMIT 1`,
           [String(booking.id)]
         );
         const payment = paymentRes.rows[0];
 
-        if (payment && payment.status === 'succeeded') {
+        // Cash never entered escrow, so there is nothing held to release - see the same
+        // guard in autoConfirmPastCompletions.
+        if (payment && payment.status === 'succeeded' && String(payment.payment_method_type || '') !== 'cash') {
           const amount = parseFloat(payment.net_provider_amount);
           const { released } = await releaseEscrow(txClient, providerUserId, amount, {
             bookingId: String(booking.id),
@@ -3152,6 +3198,274 @@ router.post('/:id/complete',
   }
 });
 
+// ==================== CASH PAYMENT ====================
+
+/**
+ * The provider records that the client handed over the cash.
+ *
+ * This is the cash equivalent of a PayMongo payment succeeding, and it is the only way
+ * a cash booking ever reaches payment_status = 'paid'. The differences from the online
+ * path are all consequences of one fact: the money went straight from the client to the
+ * provider and never touched the platform.
+ *
+ *  - Nothing is credited to the wallet. The provider already holds the full amount.
+ *  - The platform's commission is *debited* from the wallet instead, which is how the
+ *    15% still gets collected on a payment it never handled. See settleCashPayment.
+ *  - There is no escrow, so PUT /:id/confirm's release step has nothing to release for
+ *    these bookings - releaseEscrow is driven by the payments row's net_provider_amount,
+ *    which is why the row written here records net = gross - commission but never moves
+ *    it into pending_balance.
+ *
+ * Only the provider can call it, and only from the booking's start time onwards: an
+ * "already paid" flag set weeks early would let a provider mark a booking paid, keep the
+ * slot, and leave the client with no deadline, no escrow and no evidence either way.
+ */
+router.post('/:id/confirm-cash', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = req.userId;
+  const bookingId = String(req.params.id || '');
+
+  if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
+  if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
+
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+
+    const bookingRes = await dbClient.query(
+      `SELECT b.*, s.title AS service_title
+       FROM bookings b
+       LEFT JOIN services s ON s.id::text = b.service_id::text
+       WHERE b.id::text = $1 AND b.deleted_at IS NULL
+       FOR UPDATE OF b`,
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) {
+      await dbClient.query('ROLLBACK');
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    const providerUserId = await resolveProviderUserId(String(booking.provider_id));
+    const clientUserId = await resolveClientUserId(String(booking.client_id));
+
+    if (String(providerUserId) !== String(currentUserId)) {
+      await dbClient.query('ROLLBACK');
+      // Deliberately not 404: the client can legitimately see this booking, they just
+      // aren't the one who can say the cash arrived. Only the person who would have
+      // received it gets to confirm it.
+      return res.status(403).json({ error: 'Only the provider can confirm a cash payment' });
+    }
+
+    if (String(booking.payment_method || 'online') !== 'cash') {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({ error: 'This booking is set up to be paid online, not in cash.' });
+    }
+
+    const bookingStatus = String(booking.status);
+    if (!['accepted', 'confirmed', 'awaiting_confirmation', 'completed'].includes(bookingStatus)) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({
+        error: bookingStatus === 'pending'
+          ? 'Accept this booking before recording a cash payment for it.'
+          : `Cannot record a cash payment for a ${bookingStatus} booking`,
+      });
+    }
+
+    // Idempotency. cash_confirmed_at is claimed inside the same transaction below, but
+    // answering a repeat submission with a clear 409 rather than a silent no-op tells a
+    // double-tapping provider what actually happened.
+    if (booking.cash_confirmed_at || String(booking.payment_status) === 'paid') {
+      await dbClient.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'This booking is already marked as paid.',
+        already_paid: true,
+        cash_confirmed_at: booking.cash_confirmed_at,
+      });
+    }
+
+    // No confirming a booking that hasn't happened yet - see CASH_CONFIRM_GRACE_MINUTES
+    // for why, and for the frontend copy that has to agree with it.
+    const startsAt = booking.start_date ? new Date(booking.start_date) : null;
+    if (startsAt && !isNaN(startsAt.getTime())) {
+      const earliest = new Date(startsAt.getTime() - CASH_CONFIRM_GRACE_MINUTES * 60 * 1000);
+      if (new Date() < earliest) {
+        await dbClient.query('ROLLBACK');
+        return res.status(400).json({
+          error: 'You can record the cash payment from the start of the booking onwards.',
+          can_confirm_from: earliest.toISOString(),
+        });
+      }
+    }
+
+    const grossAmount = parseFloat(booking.total_price || 0);
+    if (!(grossAmount > 0)) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({ error: 'This booking has no valid price to record.' });
+    }
+
+    const commissionAmount = Math.round(grossAmount * PLATFORM_COMMISSION_RATE * 100) / 100;
+    const netProviderAmount = Math.round((grossAmount - commissionAmount) * 100) / 100;
+
+    // Claim the booking. The WHERE repeats the guards so two concurrent confirmations
+    // can't both get past the read above and charge the commission twice - the loser
+    // matches no row and is turned away.
+    const claimRes = await dbClient.query(
+      `UPDATE bookings
+       SET cash_confirmed_at = CURRENT_TIMESTAMP,
+           cash_confirmed_by = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $1
+         AND cash_confirmed_at IS NULL
+         AND COALESCE(payment_status, 'unpaid') <> 'paid'
+       RETURNING id`,
+      [bookingId, currentUserId]
+    );
+    if (claimRes.rows.length === 0) {
+      await dbClient.query('ROLLBACK');
+      return res.status(409).json({ error: 'This booking is already marked as paid.', already_paid: true });
+    }
+
+    // Write the payments row this booking never had. UPDATE-then-INSERT rather than a
+    // plain INSERT because payments carries UNIQUE (booking_id): a booking that was
+    // started online and switched to cash, or that has a dead intent from an abandoned
+    // attempt, already has a row here and a second INSERT would violate the constraint.
+    const existingPayment = await dbClient.query(
+      `SELECT id, status FROM payments
+       WHERE booking_id::text = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [bookingId]
+    );
+
+    // Belt and braces against the booking-level guards above having missed something:
+    // a succeeded payment already exists, so the money is accounted for and settling it
+    // again would charge the commission twice.
+    if (existingPayment.rows[0] && String(existingPayment.rows[0].status) === 'succeeded') {
+      await dbClient.query('ROLLBACK');
+      return res.status(409).json({ error: 'This booking already has a settled payment.', already_paid: true });
+    }
+
+    let paymentId: string;
+    if (existingPayment.rows[0]) {
+      const updated = await dbClient.query(
+        `UPDATE payments
+         SET status = 'succeeded',
+             payment_method_type = 'cash',
+             gross_amount = $2,
+             commission_rate = $3,
+             commission_amount = $4,
+             net_provider_amount = $5,
+             paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+             failure_reason = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $1
+         RETURNING id`,
+        [String(existingPayment.rows[0].id), grossAmount, PLATFORM_COMMISSION_RATE, commissionAmount, netProviderAmount]
+      );
+      paymentId = String(updated.rows[0].id);
+    } else {
+      const inserted = await dbClient.query(
+        `INSERT INTO payments (
+          booking_id, client_id, provider_id,
+          idempotency_key,
+          gross_amount, commission_rate, commission_amount, net_provider_amount,
+          status, payment_method_type, paid_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'succeeded', 'cash', CURRENT_TIMESTAMP)
+        RETURNING id`,
+        [
+          bookingId,
+          clientUserId,
+          providerUserId,
+          `cash_${bookingId}`,
+          grossAmount,
+          PLATFORM_COMMISSION_RATE,
+          commissionAmount,
+          netProviderAmount,
+        ]
+      );
+      paymentId = String(inserted.rows[0].id);
+    }
+
+    const settlement = await settleCashPayment(dbClient, paymentId);
+
+    // settleCashPayment claims the payment with "status = 'succeeded' AND
+    // wallet_credited_at IS NULL" and does nothing at all if that claim fails - which it
+    // can, for a payment row that was credited once and later moved to 'refunded' by a
+    // dispute, since wallet_credited_at stays set. Committing anyway was silently
+    // destructive: the booking kept cash_confirmed_at, payment_status stayed 'unpaid'
+    // (settleCashPayment returns before setting it), no commission was charged, and the
+    // response still said "paid". The provider could never retry either, because
+    // cash_confirmed_at is exactly what the idempotency guard above checks. Roll the
+    // whole thing back instead and say so.
+    if (!settlement.settled) {
+      await dbClient.query('ROLLBACK');
+      console.error(
+        `Cash settlement for booking ${bookingId} could not claim payment ${paymentId} - ` +
+        `it is not 'succeeded' or was already credited. Nothing was recorded.`
+      );
+      return res.status(409).json({
+        error: 'This booking already has a settled payment on record. Refresh and check before trying again.',
+        already_paid: true,
+      });
+    }
+
+    await dbClient.query('COMMIT');
+
+    // Telling the client is the only check on this whole flow. Nobody but the provider
+    // asserts the cash changed hands, so the client has to hear about it while the
+    // booking is still fresh enough to argue about.
+    try {
+      const providerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]);
+      const providerName = providerInfo.rows[0]?.name || 'Your provider';
+      await notificationService.create({
+        userId: String(clientUserId),
+        type: 'payment_received',
+        title: 'Cash payment recorded',
+        message: `${providerName} marked the ₱${grossAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })} cash payment for "${booking.service_title || 'your booking'}" as received. If that's wrong, open the booking and tell us.`,
+        data: { booking_id: bookingId, amount: grossAmount, payment_method: 'cash' },
+      });
+    } catch (notifError) {
+      console.error('Failed to send cash payment notification:', notifError);
+    }
+
+    try {
+      const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+      if (chatId) {
+        await pool.query(
+          `INSERT INTO chat_messages (chat_id, sender_id, content, is_system) VALUES ($1, NULL, $2, TRUE)`,
+          [chatId, `Cash payment of ₱${grossAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })} was recorded as received.`]
+        );
+      }
+    } catch (chatError) {
+      console.error('Failed to post cash payment system message:', chatError);
+    }
+
+    return res.json({
+      data: {
+        booking_id: bookingId,
+        payment_id: paymentId,
+        payment_status: 'paid',
+        payment_method: 'cash',
+        gross_amount: grossAmount,
+        commission_charged: settlement.commissionCharged,
+        available_balance: settlement.balanceAfter,
+        // Surfaced so the dashboard can say "you now owe X" rather than the provider
+        // discovering it when a payout is refused.
+        outstanding_commission: settlement.balanceAfter < 0
+          ? Math.round(-settlement.balanceAfter * 100) / 100
+          : 0,
+      },
+      message: 'Cash payment recorded.',
+    });
+  } catch (error: any) {
+    try { await dbClient.query('ROLLBACK'); } catch (_e) { /* noop */ }
+    console.error('Error confirming cash payment:', error);
+    return res.status(500).json({ error: 'Failed to record the cash payment', detail: error.message });
+  } finally {
+    dbClient.release();
+  }
+});
+
 // ==================== CLIENT CONFIRM OR DISPUTE COMPLETION ====================
 
 router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
@@ -3279,14 +3593,18 @@ router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string 
 
       // Get payment record for this booking
       const paymentRes = await client.query(
-        `SELECT id, net_provider_amount, status FROM payments
+        `SELECT id, net_provider_amount, status, payment_method_type FROM payments
            WHERE booking_id::text = $1 AND status = 'succeeded'
            ORDER BY created_at DESC LIMIT 1`,
         [bookingId]
       );
       const payment = paymentRes.rows[0];
 
-      if (payment && payment.status === 'succeeded') {
+      // Cash never entered escrow, so there is nothing held to release - see the same
+      // guard in autoConfirmPastCompletions.
+      if (payment && payment.status === 'succeeded' && String(payment.payment_method_type || '') === 'cash') {
+        console.log(`Booking ${bookingId} was paid in cash - no escrow to release.`);
+      } else if (payment && payment.status === 'succeeded') {
         const amount = parseFloat(payment.net_provider_amount);
 
         const { released } = await releaseEscrow(client, providerUserId, amount, {
@@ -3866,7 +4184,8 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
 
     // Get payment info
     const paymentRes = await dbClient.query(
-      `SELECT id, gross_amount, net_provider_amount, status, paymongo_payment_id, paymongo_payment_intent_id
+      `SELECT id, gross_amount, net_provider_amount, commission_amount, status,
+              payment_method_type, paymongo_payment_id, paymongo_payment_intent_id
        FROM payments WHERE booking_id::text = $1`,
       [bookingId]
     );
@@ -3915,8 +4234,90 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
     let releasedAmount = 0;
     let refundedAmount = 0;
     let paymongoRefundResult: { id: string; status: string } | null = null;
+    // Set on a cash dispute where the client is owed money: the platform never held it,
+    // so it cannot send it back. The admin is told the figure to chase instead.
+    let manualRefundRequired = 0;
 
-    if (payment && payment.status === 'succeeded') {
+    // Read from the booking, not only from the payment row. A cash booking that was
+    // disputed before the provider ever confirmed the cash has no payments row at all,
+    // and keying off payment_method_type alone reported it to the admin as an ordinary
+    // online payment - so the "we can't refund this" warning stayed hidden on exactly
+    // the case where the admin most needs it.
+    const isCashPayment = String(booking.payment_method || 'online') === 'cash'
+      || String(payment?.payment_method_type || '') === 'cash';
+
+    if (payment && payment.status === 'succeeded' && isCashPayment) {
+      // Cash disputes cannot be settled by moving money, because the platform never had
+      // any: the client handed it to the provider on the day. Two things still have to
+      // happen, and neither of them is a refund.
+      //
+      //  1. The resolution is recorded and the booking leaves 'disputed' - an admin must
+      //     never be blocked from closing a case just because the money moved offline.
+      //     The old code would have reached createRefund, found no PayMongo payment id,
+      //     thrown, and rolled the whole resolution back.
+      //  2. If the client is owed some or all of it back, the platform gives up its
+      //     commission on that share. Keeping a 15% cut of a shoot that was refunded
+      //     would mean the platform profited from the failure.
+      //
+      // The refund itself is between the two people, and the response says so.
+      manualRefundRequired = clientRefundAmount;
+
+      const commissionCharged = parseFloat(payment.commission_amount || 0) || 0;
+      const commissionToReverse = Math.round(((commissionCharged * refundPct) / 100) * 100) / 100;
+
+      if (commissionToReverse > 0) {
+        const walletRes = await dbClient.query(
+          `SELECT id, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
+          [providerUserId]
+        );
+        let cashWallet = walletRes.rows[0];
+        if (!cashWallet) {
+          const created = await dbClient.query(
+            `INSERT INTO wallets (provider_id, available_balance, pending_balance)
+             VALUES ($1, 0, 0)
+             RETURNING id, available_balance`,
+            [providerUserId]
+          );
+          cashWallet = created.rows[0];
+        }
+
+        const currentAvailable = parseFloat(cashWallet.available_balance) || 0;
+        const newAvailable = Math.round((currentAvailable + commissionToReverse) * 100) / 100;
+
+        await dbClient.query(
+          `UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2`,
+          [newAvailable, String(cashWallet.id)]
+        );
+
+        await dbClient.query(
+          `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
+           VALUES ($1, $2, 'adjustment', $3, $4, $5, $6)`,
+          [
+            String(cashWallet.id),
+            String(payment.id),
+            commissionToReverse,
+            newAvailable,
+            `dispute_cash_commission_reversal_${bookingId}`,
+            `Platform commission reversed (${refundPct}%) after the cash booking #${bookingId} was disputed`,
+          ]
+        );
+      }
+
+      await dbClient.query(
+        `UPDATE payments
+         SET status = $2,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $1`,
+        [String(payment.id), refundPct >= 100 ? 'refunded' : refundPct > 0 ? 'partially_refunded' : 'succeeded']
+      );
+
+      // The provider keeps whatever share of the cash the resolution leaves them, and
+      // they already physically hold it - so from the wallet's point of view nothing was
+      // released, but the booking is genuinely settled.
+      releasedAmount = Math.round((grossAmount - clientRefundAmount) * 100) / 100;
+      paymentReleased = releasedAmount > 0;
+      refundedAmount = clientRefundAmount;
+    } else if (payment && payment.status === 'succeeded') {
       // If the client is owed money back, issue a real PayMongo refund first, before
       // touching any balances. Nothing has been COMMITted yet, so if this throws, the
       // outer catch rolls back the booking status update too - the booking stays
@@ -4188,7 +4589,11 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
           refunded_to_client: refundedAmount,
           refund_percentage: refundPct,
           paymongo_refund_id: paymongoRefundResult?.id || null,
-          refund_status: paymongoRefundResult?.status || null
+          refund_status: paymongoRefundResult?.status || null,
+          payment_method: isCashPayment ? 'cash' : 'online',
+          // Non-zero only for cash: the platform can't send back money it never held,
+          // so this is what the provider has to return to the client directly.
+          manual_refund_required: manualRefundRequired,
         }
       });
   } catch (error: any) {

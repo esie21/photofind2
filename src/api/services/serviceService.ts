@@ -14,6 +14,8 @@ export interface Service {
   hourly_rate?: number;      // Hourly rate (optional)
   package_price?: number;    // Package price (optional)
   duration_minutes?: number;  // Package duration in minutes
+  /** Provider opt-in: the client may pay in cash on the day instead of online. */
+  accepts_cash?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -28,6 +30,7 @@ export interface CreateServiceData {
   hourly_rate?: number;
   package_price?: number;
   duration_minutes?: number;
+  accepts_cash?: boolean;
 }
 
 const serviceService = {

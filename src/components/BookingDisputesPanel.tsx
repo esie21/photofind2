@@ -445,7 +445,9 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                     <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
                       (selectedDispute as any).payment_status === 'paid' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
                     }`}>
-                      {(selectedDispute as any).payment_status === 'paid' ? 'Paid' : 'Payment due'}
+                      {(selectedDispute as any).payment_status === 'paid'
+                        ? ((selectedDispute as any).payment_method === 'cash' ? 'Paid in cash' : 'Paid')
+                        : 'Payment due'}
                     </span>
                   </div>
                 </div>
@@ -622,6 +624,23 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
               </ul>
             </div>
 
+            {/* The refund slider above moves money for online payments. For cash it
+                can't - the platform never held it - so say so before the admin resolves
+                on the assumption that clicking the button sends the client their money. */}
+            {(selectedDispute as any).payment_method === 'cash' && (
+              <div className="cash-notice mt-3">
+                <AlertTriangle className="w-5 h-5 cash-notice__icon" />
+                <div>
+                  <p className="cash-notice__title">This booking was paid in cash</p>
+                  <p className="cash-notice__body">
+                    We never held this money, so no refund can be sent from here. Resolving still records
+                    the outcome and reverses our commission on whatever share you refund, but the client
+                    has to be paid back by the provider directly &mdash; arrange that separately.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Partial Refund Slider (only for client resolution) */}
             {resolvedInFavorOf === 'client' && (
               <div className="mb-4">
@@ -713,6 +732,13 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 {resolutionResult.details.refunded_to_client > 0 && (
                   <p className="text-blue-700">
                     Refunded to client: <span className="font-medium">₱{resolutionResult.details.refunded_to_client.toFixed(2)}</span>
+                  </p>
+                )}
+                {Number((resolutionResult.details as any).manual_refund_required) > 0 && (
+                  <p className="text-amber-700 mt-1">
+                    Cash booking &mdash; the provider must return{' '}
+                    <span className="font-medium">₱{Number((resolutionResult.details as any).manual_refund_required).toFixed(2)}</span>
+                    {' '}to the client directly. Nothing was sent automatically.
                   </p>
                 )}
               </div>

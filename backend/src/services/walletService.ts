@@ -174,3 +174,99 @@ export async function releaseEscrow(
 
   return { released, shortfall, walletId: String(wallet.id) };
 }
+
+// Settles a booking that was paid in cash, on the day, directly to the provider.
+//
+// This is the mirror image of settlePaymentSuccess and the difference is the whole
+// point: with an online payment the platform holds the client's money, takes its
+// commission off the top and credits the provider the net. With cash the provider
+// already has the *gross* in their pocket and the platform has nothing - so instead
+// of crediting anything, this DEBITS the commission the provider now owes.
+//
+// available_balance is allowed to go negative as a result. That negative figure is
+// the debt, and routes/payouts.ts refuses to pay out while it stands, so the balance
+// is worked off by the provider's next online bookings before any money leaves. The
+// alternative - refusing the cash confirmation when the wallet is short - would mean
+// a provider who has done the shoot and taken the money cannot record that fact,
+// which helps nobody and just makes the books wrong.
+//
+// Claims payments.wallet_credited_at with the same atomic single-UPDATE pattern as
+// settlePaymentSuccess, so a double-submitted confirmation charges the commission
+// exactly once. Must be called inside an open transaction.
+export async function settleCashPayment(
+  dbClient: PoolClient,
+  paymentId: string
+): Promise<{ settled: boolean; commissionCharged: number; balanceAfter: number; bookingId?: string; providerId?: string; clientId?: string }> {
+  const claimRes = await dbClient.query(
+    `UPDATE payments
+     SET wallet_credited_at = CURRENT_TIMESTAMP
+     WHERE id::text = $1 AND status = 'succeeded' AND wallet_credited_at IS NULL
+     RETURNING id, booking_id, provider_id, client_id, gross_amount, commission_amount, commission_rate`,
+    [paymentId]
+  );
+  if (!claimRes.rows[0]) {
+    return { settled: false, commissionCharged: 0, balanceAfter: 0 };
+  }
+
+  const payment = claimRes.rows[0];
+  const commission = Math.round((parseFloat(payment.commission_amount) || 0) * 100) / 100;
+  const gross = parseFloat(payment.gross_amount) || 0;
+  const commissionPct = Math.round((parseFloat(payment.commission_rate) || 0) * 100);
+
+  await dbClient.query(
+    `UPDATE bookings SET payment_status = 'paid', updated_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
+    [payment.booking_id]
+  );
+
+  const walletId = await ensureProviderWallet(String(payment.provider_id));
+
+  const walletLockRes = await dbClient.query(
+    `SELECT id, available_balance FROM wallets WHERE id::text = $1 FOR UPDATE`,
+    [walletId]
+  );
+  const currentAvailable = parseFloat(walletLockRes.rows[0].available_balance) || 0;
+  const newAvailable = Math.round((currentAvailable - commission) * 100) / 100;
+
+  await dbClient.query(
+    `UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2`,
+    [newAvailable, walletId]
+  );
+
+  // Negative amount: the ledger reads as money leaving the provider, which is what a
+  // commission on cash they already hold actually is. The wallet page renders the
+  // sign straight from this figure.
+  await dbClient.query(
+    `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
+     VALUES ($1, $2, 'commission_deducted', $3, $4, $5, $6)`,
+    [
+      walletId,
+      payment.id,
+      -commission,
+      newAvailable,
+      `cash_commission_${payment.id}`,
+      `${commissionPct}% platform commission on the ₱${gross.toFixed(2)} cash payment for booking #${payment.booking_id}`
+    ]
+  );
+
+  return {
+    settled: true,
+    commissionCharged: commission,
+    balanceAfter: newAvailable,
+    bookingId: String(payment.booking_id),
+    providerId: String(payment.provider_id),
+    clientId: String(payment.client_id)
+  };
+}
+
+// What the provider owes the platform right now, as a positive number (0 when they
+// are square or in credit). Unpaid cash commission is the only thing that drives
+// available_balance below zero, so the shortfall *is* the debt.
+export async function getOutstandingCommission(providerUserId: string): Promise<number> {
+  const res = await pool.query(
+    'SELECT available_balance FROM wallets WHERE provider_id::text = $1',
+    [providerUserId]
+  );
+  if (!res.rows[0]) return 0;
+  const available = parseFloat(res.rows[0].available_balance) || 0;
+  return available < 0 ? Math.round(-available * 100) / 100 : 0;
+}

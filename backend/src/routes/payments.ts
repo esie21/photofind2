@@ -67,6 +67,19 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
     // closes an existing hole: without a status check a client could pay for a
     // booking that was already cancelled or rejected, putting money into escrow
     // for work nobody is going to do.
+    // A cash booking has no online payment to make. Without this the client could pay
+    // by card here AND hand over cash on the day, and the provider - who has no way of
+    // knowing an online payment landed for a booking marked 'cash' - would be paid
+    // twice for one shoot. Switching method after the fact is deliberately not
+    // supported: it would need the provider's agreement, not just the client's.
+    if (String(booking.payment_method || 'online') === 'cash') {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'This booking is set to be paid in cash on the day, so there is nothing to pay online.',
+        payment_method: 'cash',
+      });
+    }
+
     const bookingStatus = String(booking.status);
     if (!['accepted', 'confirmed'].includes(bookingStatus)) {
       await dbClient.query('ROLLBACK');

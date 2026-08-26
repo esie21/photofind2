@@ -27,6 +27,8 @@ interface BookingDetailsModalProps {
     status: string;
     payment_status?: string;
     payment_due_at?: string | null;
+    payment_method?: string;
+    cash_confirmed_at?: string | null;
     created_at?: string;
     accepted_at?: string | null;
     rejected_at?: string | null;
@@ -185,10 +187,21 @@ export function BookingDetailsModal({ booking, isProvider, onClose }: BookingDet
                   <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
                     booking.payment_status === 'paid' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
                   }`}>
-                    {booking.payment_status === 'paid' ? 'Paid' : 'Payment due'}
+                    {booking.payment_status === 'paid'
+                      ? (booking.payment_method === 'cash' ? 'Paid in cash' : 'Paid')
+                      : booking.payment_method === 'cash' ? 'Cash on the day' : 'Payment due'}
                   </span>
                 )}
               </div>
+              {/* Which way the money moves, spelled out. The badge above can only carry
+                  three words, and "cash" changes what either party is supposed to do. */}
+              {booking.payment_method === 'cash' && (
+                <p className="text-xs text-gray-500 mt-1">
+                  {booking.cash_confirmed_at
+                    ? `Cash recorded as received on ${new Date(booking.cash_confirmed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'Asia/Manila' })}.`
+                    : 'To be paid in cash at the shoot. Not held in escrow, so it can’t be refunded through PhotoFind.'}
+                </p>
+              )}
             </div>
 
             {/* Other party */}

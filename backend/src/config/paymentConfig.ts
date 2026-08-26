@@ -49,3 +49,16 @@ export function computePaymentDueAt(confirmedAt: Date, startDate: Date | null): 
 export function describePaymentWindow(): string {
   return `within ${PAYMENT_WINDOW_HOURS} hours, and at least ${PAYMENT_CUTOFF_BEFORE_START_HOURS} hours before the booking starts`;
 }
+
+// How early, before a booking starts, the provider may record that the cash arrived.
+//
+// The window exists because "paid" is an assertion only the provider can make for cash,
+// and one made weeks ahead would be worthless: it would mark the booking paid, keep the
+// slot, and leave the client with no deadline, no escrow and nothing to point at. A
+// short grace covers the client who pays on arrival, a few minutes early.
+//
+// Mirrored in src/constants/commission.ts for the button's enabled state - keep the two
+// in step, or the provider gets a button that only produces a refusal.
+export const CASH_CONFIRM_GRACE_MINUTES = parseFloat(
+  process.env.CASH_CONFIRM_GRACE_MINUTES || '30'
+);

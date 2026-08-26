@@ -31,6 +31,13 @@ export interface Booking {
   dispute_reason?: string | null;
   dispute_response?: string | null;
   dispute_response_at?: string | null;
+  // Payment
+  /** 'online' pays through PayMongo before the shoot; 'cash' is handed over on the day. */
+  payment_method?: 'online' | 'cash';
+  payment_status?: 'unpaid' | 'pending' | 'paid' | 'failed';
+  payment_due_at?: string | null;
+  /** Set once the provider records that the cash arrived. */
+  cash_confirmed_at?: string | null;
   // Related data
   service_title?: string;
   client_name?: string;
@@ -80,6 +87,23 @@ export interface CreateBookingData {
   total_price: number;
   slot_ids?: string[];
   duration_minutes?: number;
+  /**
+   * Defaults to 'online'. The server re-checks the service's accepts_cash flag, so
+   * asking for 'cash' on a service that hasn't opted in is refused there rather than
+   * being taken on trust from here.
+   */
+  payment_method?: 'online' | 'cash';
+}
+
+export interface CashConfirmationResult {
+  booking_id: string;
+  payment_id: string;
+  payment_status: 'paid';
+  payment_method: 'cash';
+  gross_amount: number;
+  commission_charged: number;
+  available_balance: number;
+  outstanding_commission: number;
 }
 
 /**
@@ -143,6 +167,21 @@ const bookingService = {
 
   async updateBooking(id: string, data: Partial<Booking>): Promise<Booking> {
     const resp = await apiClient.put<{ data: Booking }>(API_CONFIG.ENDPOINTS.BOOKINGS.UPDATE(id), data);
+    return resp.data;
+  },
+
+  /**
+   * Provider-only: record that the client paid in cash on the day.
+   *
+   * This is what marks a cash booking paid - there is no online payment to settle. It
+   * also charges the platform commission to the provider's wallet, because the platform
+   * never handled the money it is owed a cut of.
+   */
+  async confirmCashPayment(id: string): Promise<CashConfirmationResult> {
+    const resp = await apiClient.post<{ data: CashConfirmationResult; message: string }>(
+      (API_CONFIG.ENDPOINTS.BOOKINGS as any).CONFIRM_CASH(id),
+      {}
+    );
     return resp.data;
   },
 

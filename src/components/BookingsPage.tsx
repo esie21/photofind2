@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Calendar, Clock, PhilippinePeso, MessageSquare, RefreshCw, AlertCircle, Star, Info } from 'lucide-react';
+import { Calendar, Clock, PhilippinePeso, MessageSquare, RefreshCw, AlertCircle, Star, Info, Check } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { ImageWithFallback } from './figma/ImageWithFallback';
@@ -13,6 +13,7 @@ import { PaymentSummary } from './PaymentSummary';
 import { BookingDetailsModal } from './BookingDetailsModal';
 import { useModal } from '../hooks/useModal';
 import bookingService from '../api/services/bookingService';
+import { CASH_CONFIRM_GRACE_MS, PLATFORM_COMMISSION_PERCENT } from '../constants/payment';
 import reviewService from '../api/services/reviewService';
 
 const ITEMS_PER_PAGE = 8;
@@ -35,13 +36,43 @@ const RESCHEDULABLE_STATUSES = ['pending', 'accepted', 'confirmed'];
 // is what actually enforces the rule - payment_status is 'unpaid' before an intent
 // exists and 'pending' once one does, so only 'paid' means the money actually landed.
 const PAYABLE_STATUSES = ['accepted', 'confirmed'];
-function isPayable(booking: { status: string; payment_status?: string; payment_due_at?: string | null }) {
+
+// Where a cash booking's payment state is worth showing. Wider than PAYABLE_STATUSES
+// because cash is settled after the shoot, not before it - and 'disputed' is on the list
+// deliberately: whether the cash was ever handed over is usually the substance of the
+// argument, so hiding it there removes the one fact both sides are reasoning about.
+const CASH_VISIBLE_STATUSES = ['accepted', 'confirmed', 'awaiting_confirmation', 'completed', 'disputed'];
+function isPayable(booking: { status: string; payment_status?: string; payment_due_at?: string | null; payment_method?: string }) {
   if (!PAYABLE_STATUSES.includes(booking.status) || booking.payment_status === 'paid') return false;
+  // Cash bookings have nothing to pay here - POST /payments/create-intent refuses them
+  // outright - so offering the button would only produce a refusal the client can't act on.
+  if (booking.payment_method === 'cash') return false;
   // The deadline closes payment on the server (create-intent and attach-method both check
   // it), so the button has to disappear at the same moment or it just leads to a refusal.
   // The sweep that cancels the booking runs every 10 minutes, so there is a window where
   // the booking still looks accepted but can no longer be paid.
   if (booking.payment_due_at && new Date(booking.payment_due_at).getTime() < Date.now()) return false;
+  return true;
+}
+
+// Whether the provider can record the cash for this booking right now. Mirrors the
+// server's guards in POST /bookings/:id/confirm-cash so the button isn't offered where
+// the call would only be refused: cash bookings, not already settled, and not before
+// the shoot (with the same grace for a client paying on arrival).
+function canConfirmCash(booking: {
+  status: string;
+  payment_method?: string;
+  payment_status?: string;
+  cash_confirmed_at?: string | null;
+  start_date?: string | null;
+}) {
+  if (booking.payment_method !== 'cash') return false;
+  if (booking.payment_status === 'paid' || booking.cash_confirmed_at) return false;
+  if (!['accepted', 'confirmed', 'awaiting_confirmation', 'completed'].includes(booking.status)) return false;
+  if (booking.start_date) {
+    const startsAt = new Date(booking.start_date).getTime();
+    if (!isNaN(startsAt) && Date.now() < startsAt - CASH_CONFIRM_GRACE_MS) return false;
+  }
   return true;
 }
 
@@ -110,6 +141,8 @@ export function BookingsPage() {
   // a charge that already went through but hasn't been reflected in their booking list
   // yet. Mirrors the same check PaymentSummary uses for its own Cancel button.
   const [paymentCloseable, setPaymentCloseable] = useState(true);
+  const [confirmingCashFor, setConfirmingCashFor] = useState<string | null>(null);
+  const [cashConfirmBooking, setCashConfirmBooking] = useState<any>(null);
 
   // `silent` skips the full-page spinner, for refreshes that happen behind an open modal
   // or behind a button's own pending state. `resetPage` is off for those too - a refresh
@@ -157,6 +190,8 @@ export function BookingsPage() {
           status: b.status,
           payment_status: b.payment_status,
           payment_due_at: b.payment_due_at,
+          payment_method: b.payment_method || 'online',
+          cash_confirmed_at: b.cash_confirmed_at,
           created_at: b.created_at,
           accepted_at: b.accepted_at,
           rejected_at: b.rejected_at,
@@ -229,10 +264,56 @@ export function BookingsPage() {
     }
   };
 
+  // Recording cash charges the provider the platform's commission and can't be undone,
+  // so it goes through a confirmation step. Deliberately not window.confirm: nothing else
+  // in the app uses it, it can't be styled, and it blocks the whole tab - a native grey
+  // box is the wrong thing to meet on the one action here that moves money.
+  const confirmCash = async () => {
+    const booking = cashConfirmBooking;
+    if (!booking) return;
+
+    setConfirmingCashFor(String(booking.id));
+    try {
+      const result = await bookingService.confirmCashPayment(String(booking.id));
+      setCashConfirmBooking(null);
+      toast.success(
+        'Cash recorded',
+        result.outstanding_commission > 0
+          ? `Marked as paid. You owe ₱${result.outstanding_commission.toLocaleString('en-PH', { minimumFractionDigits: 2 })} in commission, which comes off your next online payments.`
+          : `Marked as paid. ₱${result.commission_charged.toLocaleString('en-PH', { minimumFractionDigits: 2 })} commission was taken from your wallet.`
+      );
+      await fetchBookings({ silent: true, resetPage: false });
+    } catch (err: any) {
+      toast.error('Could not record the payment', err?.message || 'Please try again.');
+      // Close it either way. The modal holds a snapshot taken when it opened, so leaving
+      // it up after a failure offers "Yes, I received it" against stale data - and the
+      // most likely failure is that the booking was already settled elsewhere, where
+      // pressing it again can only 409. The refreshed list below is the honest view: if
+      // it's still unpaid the button is still there to try again.
+      setCashConfirmBooking(null);
+      await fetchBookings({ silent: true, resetPage: false });
+    } finally {
+      setConfirmingCashFor(null);
+    }
+  };
+
   const cancelPayment = () => {
     setPayingBooking(null);
     fetchBookings({ resetPage: false });
   };
+
+  const { overlayProps: cashOverlayProps, cardProps: cashCardProps } = useModal(
+    () => setCashConfirmBooking(null),
+    {
+      enabled: !!cashConfirmBooking,
+      // Not while the request is in flight. The commission is charged server-side the
+      // moment this succeeds, so dismissing mid-call would leave the provider unsure
+      // whether it landed - the same reason the payment modal locks itself.
+      closeOnEscape: !confirmingCashFor,
+      closeOnBackdrop: !confirmingCashFor,
+      label: 'Confirm cash payment received',
+    }
+  );
 
   const { overlayProps: paymentOverlayProps } = useModal(cancelPayment, {
     enabled: !!payingBooking,
@@ -421,6 +502,53 @@ export function BookingsPage() {
                           </p>
                         )}
 
+                        {/* Cash bookings have no deadline and no Pay button, so without
+                            this the card says nothing at all about how the money moves -
+                            which is the one thing both sides need to remember on the day. */}
+                        {booking.payment_method === 'cash' && CASH_VISIBLE_STATUSES.includes(booking.status) && (
+                          booking.payment_status === 'paid' ? (
+                            <div className="cash-notice cash-notice--settled mt-3">
+                              <Check className="w-5 h-5 cash-notice__icon" />
+                              <div>
+                                <p className="cash-notice__title">Paid in cash</p>
+                                <p className="cash-notice__body">
+                                  {isProvider
+                                    ? 'You recorded this cash payment as received.'
+                                    : `${booking.otherParty.name} recorded your cash payment. If that's wrong, message them or contact support.`}
+                                </p>
+                              </div>
+                            </div>
+                          ) : canConfirmCash(booking) && isProvider ? (
+                            <div className="cash-confirm mt-3">
+                              <p className="cash-confirm__text">
+                                Did {booking.otherParty.name} hand over the &#8369;{booking.price.toLocaleString('en-PH', { minimumFractionDigits: 2 })} in cash?
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => setCashConfirmBooking(booking)}
+                                disabled={confirmingCashFor === String(booking.id)}
+                                className="cash-confirm__button"
+                              >
+                                {confirmingCashFor === String(booking.id) ? 'Recording...' : 'Yes, cash received'}
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="cash-notice mt-3">
+                              <PhilippinePeso className="w-5 h-5 cash-notice__icon" />
+                              <div>
+                                <p className="cash-notice__title">Paying &#8369;{booking.price.toLocaleString('en-PH', { minimumFractionDigits: 2 })} in cash on the day</p>
+                                <p className="cash-notice__body">
+                                  {booking.status === 'disputed'
+                                    ? `No cash payment was recorded for this booking. That can't be changed while the dispute is open – support will settle it as part of the outcome.`
+                                    : isProvider
+                                      ? `Collect the cash at the shoot, then mark it received here. You can do that from the booking's start time.`
+                                      : `Nothing to pay online. Bring the cash to the shoot and ${booking.otherParty.name} will mark it received. Cash payments aren't held in escrow, so we can't refund them for you.`}
+                                </p>
+                              </div>
+                            </div>
+                          )
+                        )}
+
                         {/* Says why, so an expiry doesn't read as the other party walking
                             away - 'cancelled' now covers both. */}
                         {booking.status === 'cancelled' && booking.cancellation_reason && (
@@ -437,7 +565,9 @@ export function BookingsPage() {
                                 ? 'bg-green-100 text-green-700'
                                 : 'bg-amber-100 text-amber-700'
                             }`}>
-                              {booking.payment_status === 'paid' ? 'Paid' : 'Payment due'}
+                              {booking.payment_status === 'paid'
+                                ? (booking.payment_method === 'cash' ? 'Paid in cash' : 'Paid')
+                                : booking.payment_method === 'cash' ? 'Cash on the day' : 'Payment due'}
                             </span>
                           )}
                           <div className="flex items-center gap-4">
@@ -689,6 +819,50 @@ export function BookingsPage() {
           }}
           onSuccess={handleReviewSuccess}
         />
+      )}
+
+      {cashConfirmBooking && (
+        <div className="modal-overlay" {...cashOverlayProps}>
+          <div className="modal-card modal-card--md modal-card--plain p-6" {...cashCardProps}>
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">Confirm cash received</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              You&apos;re about to record that {cashConfirmBooking.otherParty.name} paid you{' '}
+              <span className="font-semibold text-gray-900">
+                &#8369;{Number(cashConfirmBooking.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+              </span>{' '}
+              in cash for &ldquo;{cashConfirmBooking.service}&rdquo;.
+            </p>
+            <div className="cash-notice mb-4">
+              <AlertCircle className="w-5 h-5 cash-notice__icon" />
+              <div>
+                <p className="cash-notice__body">
+                  This marks the booking paid and takes the {PLATFORM_COMMISSION_PERCENT}% platform
+                  commission from your wallet balance &mdash; you already hold the cash, so there&apos;s
+                  nothing for us to deduct it from. {cashConfirmBooking.otherParty.name} is told straight
+                  away, and this can&apos;t be undone.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setCashConfirmBooking(null)}
+                disabled={!!confirmingCashFor}
+                className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmCash}
+                disabled={!!confirmingCashFor}
+                className="flex-1 px-4 py-2.5 bg-green-600 text-white rounded-xl hover:bg-green-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {confirmingCashFor ? 'Recording...' : 'Yes, I received it'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Payment moved here from BookingFlow: the client is only asked to pay once

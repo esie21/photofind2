@@ -171,6 +171,11 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS package_price DECIMAL(10, 2);`);
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS hourly_rate DECIMAL(10, 2);`);
     await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS hourly_price DECIMAL(10, 2);`);
+    // Whether this service may be paid for in cash on the day instead of online.
+    // Opt-in per service, and deliberately defaulted FALSE: cash means the platform
+    // never holds the money, so there is no escrow protecting the client and no
+    // refund route if the shoot goes wrong. A provider has to choose that.
+    await client.query(`ALTER TABLE services ADD COLUMN IF NOT EXISTS accepts_cash BOOLEAN DEFAULT FALSE;`);
     // Backfill pricing columns from legacy price field
     await client.query(`
       UPDATE services SET package_price = price
@@ -248,6 +253,24 @@ export async function initializeTables() {
     // before a price rise. NULL on rows created before this column existed, and the
     // check skips those rather than guessing a floor for them.
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS min_price_at_booking DECIMAL(10, 2);`);
+
+    // How this booking is meant to be paid: 'online' (PayMongo, the default and the
+    // only option before this) or 'cash' (client hands the money to the provider on
+    // the day). The distinction has to live on the booking rather than being looked
+    // up from the service, because a provider can turn services.accepts_cash off at
+    // any time and that must not retroactively change how an existing booking is paid.
+    //
+    // A cash booking gets NO payment_due_at - the 24-hour online payment clock and the
+    // sweep that acts on it would otherwise cancel every cash booking before its own
+    // date. See expireUnpaidBookings in routes/bookings.ts.
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) DEFAULT 'online';`);
+    // Set when the provider says the cash arrived. Doubles as the idempotency guard on
+    // POST /bookings/:id/confirm-cash - the commission can only be charged once.
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cash_confirmed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cash_confirmed_by ${refType};`);
+    // Rows created before payment_method existed are all online bookings; leaving them
+    // NULL would make every `payment_method = 'online'` filter silently skip them.
+    await client.query(`UPDATE bookings SET payment_method = 'online' WHERE payment_method IS NULL;`);
     await client.query(
       `CREATE INDEX IF NOT EXISTS idx_bookings_payment_due ON bookings (payment_due_at)
        WHERE payment_due_at IS NOT NULL;`
@@ -269,7 +292,12 @@ export async function initializeTables() {
              )
          WHERE payment_due_at IS NULL
            AND status IN ('accepted', 'confirmed')
-           AND COALESCE(payment_status, 'unpaid') <> 'paid'`
+           AND COALESCE(payment_status, 'unpaid') <> 'paid'
+           -- Cash bookings are supposed to have no deadline: the client pays on the
+           -- day, so there is nothing they could do in the next 24 hours. Without this
+           -- exclusion every restart would re-arm a deadline on them and the next
+           -- sweep would cancel a booking that was never late for anything.
+           AND COALESCE(payment_method, 'online') <> 'cash'`
       );
       if (backfilled.rowCount) {
         console.log(`Set a payment deadline on ${backfilled.rowCount} already-accepted unpaid booking(s).`);

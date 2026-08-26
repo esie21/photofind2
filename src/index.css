@@ -3695,3 +3695,202 @@ html {
     max-height: 40rem;
   }
 }
+
+/* ============================================================
+   Cash payment ("pay on the day")
+
+   All hand-written, because index.css is a prebuilt snapshot of the classes the app
+   used at the time it was generated - there is no Tailwind build step here, so a new
+   utility class invented in JSX renders as nothing at all. Anything new gets real CSS.
+
+   Amber is spelled out rather than referenced: the palette block at the top of this
+   file has red/green/purple/pink/gray but no --color-amber-*, and cash is exactly the
+   "proceed, but know what you're giving up" case that wants it.
+   ============================================================ */
+
+.pay-method {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+
+/* Side by side once there's room for both labels to stay on one line. Below that the
+   options stack, because a squeezed two-up turns "Pay online (card, GCash…)" into three
+   wrapped lines and the two choices stop being scannable. */
+@media (width >= 34rem) {
+  .pay-method {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.pay-method__option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 1rem;
+  text-align: left;
+  background-color: var(--color-white);
+  border: 2px solid var(--color-gray-200);
+  border-radius: 0.875rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.pay-method__option:hover {
+  border-color: var(--color-purple-300);
+}
+
+.pay-method__option:focus-visible {
+  outline: 2px solid var(--color-purple-600);
+  outline-offset: 2px;
+}
+
+.pay-method__option[aria-pressed='true'] {
+  border-color: var(--color-purple-600);
+  background-color: var(--color-purple-50);
+}
+
+.pay-method__option:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.pay-method__icon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.625rem;
+  background-color: var(--color-gray-100);
+  color: var(--color-gray-600);
+}
+
+.pay-method__option[aria-pressed='true'] .pay-method__icon {
+  background-color: var(--color-purple-100);
+  color: var(--color-purple-700);
+}
+
+.pay-method__label {
+  display: block;
+  font-weight: 600;
+  color: var(--color-gray-900);
+}
+
+.pay-method__hint {
+  display: block;
+  margin-top: 0.125rem;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  color: var(--color-gray-600);
+}
+
+/* The trade-off, stated where the choice is made rather than buried in terms. Cash
+   means no escrow and no card chargeback, and a client who finds that out afterwards
+   has already lost the protection they didn't know they were declining. */
+.cash-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1rem;
+  border-radius: 0.75rem;
+  border: 1px solid oklch(0.879 0.085 76.1);
+  background-color: oklch(0.987 0.022 95.3);
+  color: oklch(0.414 0.086 62.6);
+}
+
+.cash-notice__icon {
+  flex-shrink: 0;
+  margin-top: 0.125rem;
+}
+
+.cash-notice__title {
+  margin-bottom: 0.25rem;
+  font-weight: 600;
+}
+
+.cash-notice__body {
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.cash-notice--settled {
+  border-color: var(--color-green-200);
+  background-color: var(--color-green-50);
+  color: var(--color-green-800);
+}
+
+/* Provider-side: the button that says the money arrived. Deliberately not styled as a
+   quiet secondary action - it moves real money on the books (it charges the provider
+   the platform's commission), so it should look like a decision. */
+.cash-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem 1rem;
+  border-radius: 0.75rem;
+  border: 1px solid oklch(0.879 0.085 76.1);
+  background-color: oklch(0.987 0.022 95.3);
+}
+
+.cash-confirm__text {
+  flex: 1 1 12rem;
+  min-width: 0;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  color: oklch(0.414 0.086 62.6);
+}
+
+.cash-confirm__button {
+  flex-shrink: 0;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-white);
+  background-color: var(--color-green-600);
+  border: none;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.cash-confirm__button:hover:not(:disabled) {
+  background-color: var(--color-green-700);
+}
+
+.cash-confirm__button:focus-visible {
+  outline: 2px solid var(--color-green-700);
+  outline-offset: 2px;
+}
+
+.cash-confirm__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Wallet: unpaid commission on cash bookings, which is the only thing that can push
+   available_balance below zero. Shown as a banner because it silently blocks payouts,
+   and a provider hitting that refusal with no explanation on the page has no way to
+   work out what to do about it. */
+.commission-owed {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  padding: 1rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--color-red-100);
+  background-color: var(--color-red-50);
+  color: var(--color-red-700);
+}
+
+.commission-owed__amount {
+  font-weight: 700;
+}
+
+.commission-owed__body {
+  font-size: 0.875rem;
+  line-height: 1.45;
+}

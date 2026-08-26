@@ -359,7 +359,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   try {
     const userId = req.userId;
-    const { title, description, price, hourly_rate, package_price, category, images, pricing_type, duration_minutes } = req.body;
+    const { title, description, price, hourly_rate, package_price, category, images, pricing_type, duration_minutes, accepts_cash } = req.body;
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -411,6 +411,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     // modes at once, since neither had anywhere real to land.
     const hasHourlyRate = existingColumns.includes('hourly_rate');
     const hasPackagePrice = existingColumns.includes('package_price');
+    const hasAcceptsCash = existingColumns.includes('accepts_cash');
 
     // Build dynamic INSERT query based on existing columns
     const columns: string[] = ['provider_id', 'title', 'price'];
@@ -466,6 +467,16 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       columns.push('package_price');
       placeholders.push(`$${paramIndex}`);
       values.push(package_price || null);
+      paramIndex++;
+    }
+
+    // Whether this service can be paid for in cash on the day. Off unless the provider
+    // explicitly turns it on - a service that silently accepted cash would strip the
+    // client of escrow protection without either party choosing that.
+    if (hasAcceptsCash) {
+      columns.push('accepts_cash');
+      placeholders.push(`$${paramIndex}`);
+      values.push(accepts_cash === true);
       paramIndex++;
     }
 
@@ -528,7 +539,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
   try {
     const { id } = req.params;
     const userId = req.userId;
-    const { title, description, price, hourly_rate, package_price, category, images, pricing_type, duration_minutes } = req.body;
+    const { title, description, price, hourly_rate, package_price, category, images, pricing_type, duration_minutes, accepts_cash } = req.body;
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -587,6 +598,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     // 'hourly_price' column.
     const hasHourlyRate = existingColumns.includes('hourly_rate');
     const hasPackagePrice = existingColumns.includes('package_price');
+    const hasAcceptsCash = existingColumns.includes('accepts_cash');
 
     // Build dynamic UPDATE query based on existing columns
     const updates: string[] = [];
@@ -644,6 +656,14 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     if (hasPackagePrice && package_price !== undefined) {
       updates.push(`package_price = $${paramIndex}`);
       values.push(package_price);
+      paramIndex++;
+    }
+
+    // Turning this off only affects bookings made from now on: an existing booking
+    // carries its own payment_method, so a client who was promised cash keeps it.
+    if (hasAcceptsCash && accepts_cash !== undefined) {
+      updates.push(`accepts_cash = $${paramIndex}`);
+      values.push(accepts_cash === true);
       paramIndex++;
     }
 

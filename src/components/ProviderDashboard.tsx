@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Upload, Calendar, PhilippinePeso, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle, ShieldCheck, FileText, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import { CATEGORY_OPTIONS } from '../constants/categories';
+import { PLATFORM_COMMISSION_PERCENT } from '../constants/payment';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { PortfolioThumbnail, PortfolioPlayer } from './PortfolioMedia';
 import { useModal } from '../hooks/useModal';
@@ -49,6 +50,7 @@ const toPackage = (s: any) => ({
   hourly_rate: s.hourly_rate || (s.pricing_type === 'hourly' ? parseFloat(s.price) : null),
   package_price: s.package_price || (s.pricing_type === 'package' ? parseFloat(s.price) : null),
   duration_minutes: s.duration_minutes || null,
+  accepts_cash: s.accepts_cash === true,
   // Enable flags for UI
   enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly' || s.pricing_type === 'both'),
   enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
@@ -600,6 +602,8 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           service_category: b.service_category,
           service_duration_minutes: b.service_duration_minutes,
           payment_due_at: b.payment_due_at,
+          payment_method: b.payment_method || 'online',
+          cash_confirmed_at: b.cash_confirmed_at,
           created_at: b.created_at,
           accepted_at: b.accepted_at,
           rejected_at: b.rejected_at,
@@ -975,6 +979,16 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                           </div>
                           <div className="text-right">
                             <div className="text-purple-600">₱{booking.amount}</div>
+                            {/* Whether this one is cash is a material fact *before*
+                                accepting, not after: the provider collects it themselves
+                                and is billed the commission out of their wallet. Nothing
+                                on this card said so, and this is the page they accept from. */}
+                            {booking.payment_method === 'cash' && (
+                              <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded-full">
+                                <PhilippinePeso className="w-3 h-3" />
+                                {booking.payment_status === 'paid' ? 'Cash received' : 'Cash on the day'}
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600 mb-3">
@@ -1429,10 +1443,14 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                             try {
                               await Promise.all(
                                 packages.map(async (pkg) => {
-                                  // Determine pricing type based on enabled options
-                                  const pricingType = pkg.enable_hourly && pkg.enable_package ? 'both'
-                                    : pkg.enable_hourly ? 'hourly'
-                                      : 'package';
+                                  // Determine pricing type based on enabled options.
+                                  // Annotated rather than inferred: without it TS widens
+                                  // the ternary to `string`, which doesn't satisfy the
+                                  // union on CreateServiceData.pricing_type.
+                                  const pricingType: 'package' | 'hourly' | 'both' =
+                                    pkg.enable_hourly && pkg.enable_package ? 'both'
+                                      : pkg.enable_hourly ? 'hourly'
+                                        : 'package';
 
                                   // Use package_price as primary price for backward compatibility
                                   const primaryPrice = pkg.enable_package ? pkg.package_price : pkg.hourly_rate;
@@ -1454,6 +1472,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                     hourly_rate: pkg.enable_hourly ? pkg.hourly_rate : null,
                                     package_price: pkg.enable_package ? pkg.package_price : null,
                                     duration_minutes: pkg.enable_package ? (pkg.duration_minutes || null) : null,
+                                    accepts_cash: pkg.accepts_cash === true,
                                   };
 
                                   if (pkg.id) {
@@ -2484,6 +2503,33 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                               <p className="text-xs text-green-600 mt-2">Fixed price for the entire package duration</p>
                             </div>
                           )}
+
+                          {/* Cash is a per-service choice, not an account-wide one: a
+                              provider may happily take cash for a ₱2,000 portrait shoot
+                              and want a wedding paid up front. */}
+                          <div className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                            <label className="flex items-start gap-3 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={pkg.accepts_cash === true}
+                                onChange={(e) => {
+                                  const updated = [...packages];
+                                  updated[index].accepts_cash = e.target.checked;
+                                  setPackages(updated);
+                                }}
+                                className="mt-0.5 w-4 h-4"
+                              />
+                              <span className="text-sm">
+                                <span className="block font-medium text-gray-900">Accept cash on the day</span>
+                                <span className="block text-xs text-gray-600 mt-0.5">
+                                  Clients can choose to pay you in cash at the shoot instead of online. You mark it
+                                  received afterwards, and the {PLATFORM_COMMISSION_PERCENT}% platform commission is taken from your
+                                  wallet balance instead of the payment. Cash bookings aren&apos;t held in escrow, so
+                                  neither side is protected if the shoot goes wrong.
+                                </span>
+                              </span>
+                            </label>
+                          </div>
                         </div>
                       ) : (
                         <div className="mt-2 flex flex-wrap gap-2">
@@ -2507,6 +2553,12 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                 </span>
                               )}
                             </>
+                          )}
+                          {pkg.accepts_cash && (
+                            <span className="inline-flex items-center px-2 py-1 text-xs bg-amber-100 text-amber-700 rounded-full">
+                              <PhilippinePeso className="w-3 h-3 mr-1" />
+                              Cash accepted
+                            </span>
                           )}
                         </div>
                       )}

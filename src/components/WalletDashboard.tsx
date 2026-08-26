@@ -110,6 +110,8 @@ export function WalletDashboard() {
         return <ArrowUpRight className="w-5 h-5 text-red-600" />;
       case 'payout_cancelled':
         return <XCircle className="w-5 h-5 text-gray-600" />;
+      case 'commission_deducted':
+        return <ArrowUpRight className="w-5 h-5 text-red-600" />;
       default:
         return <Clock className="w-5 h-5 text-gray-600" />;
     }
@@ -121,6 +123,7 @@ export function WalletDashboard() {
         return 'text-green-600';
       case 'payout_requested':
       case 'payout_completed':
+      case 'commission_deducted':
         return 'text-red-600';
       default:
         return 'text-gray-600';
@@ -165,11 +168,18 @@ export function WalletDashboard() {
   const pendingPayoutsCount = Number(wallet?.pending_payouts_count) || 0;
   const atPayoutLimit = pendingPayoutsCount >= maxConcurrentPayouts;
   const belowMinimum = availableBalance < minimumPayout;
-  const payoutBlockedReason = atPayoutLimit
-    ? `You have ${pendingPayoutsCount} payout requests in progress, the most allowed at once. Cancel a pending request or wait for one to be processed.`
-    : belowMinimum
-      ? `You need at least ${php(minimumPayout)} available to request a payout. You have ${php(availableBalance)}.`
-      : null;
+  // Unpaid commission on cash bookings is the only thing that drives the balance below
+  // zero (settleCashPayment debits it, because the platform never touched that money).
+  // It silently blocks payouts, so it has to be said on the page rather than only in the
+  // refusal a provider gets after filling in the payout form.
+  const outstandingCommission = availableBalance < 0 ? Math.round(-availableBalance * 100) / 100 : 0;
+  const payoutBlockedReason = outstandingCommission > 0
+    ? `Payouts resume once your balance is back above zero.`
+    : atPayoutLimit
+      ? `You have ${pendingPayoutsCount} payout requests in progress, the most allowed at once. Cancel a pending request or wait for one to be processed.`
+      : belowMinimum
+        ? `You need at least ${php(minimumPayout)} available to request a payout. You have ${php(availableBalance)}.`
+        : null;
 
   if (loading) {
     return (
@@ -207,6 +217,21 @@ export function WalletDashboard() {
           <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      {outstandingCommission > 0 && (
+        <div className="commission-owed">
+          <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <div className="commission-owed__body">
+            <p className="commission-owed__amount">You owe {php(outstandingCommission)} in platform commission</p>
+            <p>
+              That&apos;s our cut of the bookings you were paid for in cash. Because the money went
+              straight to you, we take the commission from your wallet instead &mdash; so your balance
+              is negative until it&apos;s cleared. Your next online payments pay it off automatically,
+              and payouts resume as soon as the balance is back above zero.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Balance Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
