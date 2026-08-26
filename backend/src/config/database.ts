@@ -89,6 +89,20 @@ export async function initializeTables() {
     // deliberately separate from portfolio_images, which stays the single source of
     // truth for what exists and in what order. Rows with no metadata just have '{}'.
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_meta JSONB DEFAULT '{}'::jsonb;`);
+    // Per-project metadata, keyed by the album name that portfolio_meta[].album holds:
+    //   { "Reyes Wedding": { description, category, location, done_on, cover, order } }
+    //
+    // A second sidecar rather than a portfolio_projects table, for the same reason
+    // portfolio_meta is one: portfolio_images stays the single source of truth for what
+    // exists and in what order, and everything else hangs off it and is pruned against
+    // it. A table would need the file-lifecycle logic in routes/users.ts rewritten to
+    // keep rows and files in step.
+    //
+    // Keyed by name, so renaming a project rewrites both this and every member image's
+    // meta.album in one save - handled server-side in PUT /users/:id. An album with no
+    // entry here still renders: it just has no context line and falls back to its first
+    // image as the cover.
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_albums JSONB DEFAULT '{}'::jsonb;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS years_experience INTEGER DEFAULT 0;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);`);

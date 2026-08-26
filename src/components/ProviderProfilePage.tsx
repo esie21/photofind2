@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Star, MapPin, Clock, ArrowLeft, MessageSquare, Camera, Briefcase, X, ShieldCheck, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { PortfolioThumbnail, PortfolioPlayer } from './PortfolioMedia';
@@ -9,7 +9,13 @@ import reviewService, { Review, ReviewStats } from '../api/services/reviewServic
 import serviceService from '../api/services/serviceService';
 import { useAuth } from '../context/AuthContext';
 import { getUploadUrl, getStoredPath, API_CONFIG } from '../api/config';
-import type { PortfolioMeta } from '../api/services/authService';
+import type { PortfolioAlbums, PortfolioMeta } from '../api/services/authService';
+import {
+  groupPortfolio,
+  describeProjectContext,
+  describeProjectSize,
+  type PortfolioProject,
+} from '../utils/portfolio';
 
 const API_URL = API_CONFIG.BASE_URL;
 
@@ -32,6 +38,8 @@ interface ProviderData {
   portfolio_images: string[];
   /** Caption and album for each portfolio image, keyed by its stored path. */
   portfolio_meta: PortfolioMeta;
+  /** Title, context and cover for each project, keyed by album name. */
+  portfolio_albums: PortfolioAlbums;
   location: string;
   category: string;
   /** Headline the provider writes for themselves, e.g. "Wedding Photographer". */
@@ -68,11 +76,17 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMoreReviews, setIsLoadingMoreReviews] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The lightbox tracks the *position* in the portfolio rather than a bare URL, so it
-  // can step to the next and previous image instead of being a dead end.
+  // Which project's full set is open, by index into the filtered list. A client browses
+  // projects, so this is the outer level of navigation - the arrows step between whole
+  // jobs, not between loose frames.
+  const [openProject, setOpenProject] = useState<number | null>(null);
+  // Position within the open project, when the client has clicked through to one item.
+  // null means the set is showing as a grid rather than one item full-size.
   const [selectedImage, setSelectedImage] = useState<number | null>(null);
-  // null means "All work"; otherwise the album the client is filtering by.
-  const [activeAlbum, setActiveAlbum] = useState<string | null>(null);
+  // null means "All work"; otherwise the category the client is filtering by. Note this
+  // is a category, not an album name: projects are the unit now, and filtering by one
+  // project would just be opening it.
+  const [activeCategory, setActiveAlbum] = useState<string | null>(null);
 
   // Every fetch is tagged with the id it was started for. Without this, opening
   // provider A, going back and opening provider B could render A's data whenever A's
@@ -89,6 +103,8 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
     portfolio_images: Array.isArray(raw.portfolio_images) ? raw.portfolio_images : [],
     portfolio_meta:
       raw.portfolio_meta && typeof raw.portfolio_meta === 'object' ? raw.portfolio_meta : {},
+    portfolio_albums:
+      raw.portfolio_albums && typeof raw.portfolio_albums === 'object' ? raw.portfolio_albums : {},
     location: raw.location || '',
     category: raw.category || '',
     title: raw.title || '',
@@ -180,6 +196,7 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
     setReviews([]);
     setReviewStats({ totalReviews: 0, averageRating: '0.0' });
     setActiveTab('about');
+    setOpenProject(null);
     setSelectedImage(null);
     setActiveAlbum(null);
     fetchProviderData();
@@ -210,58 +227,148 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
   const providerMeta: PortfolioMeta = provider?.portfolio_meta ?? {};
   const metaFor = (image: string) => providerMeta[getStoredPath(image)] || {};
 
-  // Album names in the order they first appear in the portfolio, so the provider's own
-  // arrangement decides which filter comes first rather than the alphabet.
-  const albums: string[] = [];
-  for (const image of allPortfolioImages) {
-    const album = (metaFor(image).album || '').trim();
-    if (album && !albums.includes(album)) albums.push(album);
-  }
+  // The join lives in utils/portfolio so the provider's editor renders exactly the same
+  // grouping the client sees - the two used to derive it separately and disagree.
+  const allProjects = useMemo(
+    () => groupPortfolio(allPortfolioImages, providerMeta, provider?.portfolio_albums),
+    [allPortfolioImages, providerMeta, provider?.portfolio_albums]
+  );
 
-  const portfolioImages = activeAlbum
-    ? allPortfolioImages.filter((image) => (metaFor(image).album || '').trim() === activeAlbum)
-    : allPortfolioImages;
+  // Categories the provider has actually used, in grid order. A client filtering by
+  // "Videography" is asking whether this person does that kind of work at all, which is
+  // the versatility question a portfolio has to answer.
+  const categories = useMemo(() => {
+    const seen: string[] = [];
+    for (const project of allProjects) {
+      if (project.category && !seen.includes(project.category)) seen.push(project.category);
+    }
+    return seen;
+  }, [allProjects]);
+
+  const projects = useMemo(
+    () => (activeCategory ? allProjects.filter((p) => p.category === activeCategory) : allProjects),
+    [allProjects, activeCategory]
+  );
+
+  // The two or three strongest testimonials, to sit under the work.
+  //
+  // Only reviews that actually say something: a bare 5-star with no comment is already
+  // counted in the rating badge at the top of the page and adds nothing as a pull quote.
+  // Sorted by rating then recency, because this is the highlight reel - the Reviews tab
+  // is where the complete, unfiltered list lives.
+  const topReviews = useMemo(
+    () =>
+      reviews
+        .filter((review) => (review.comment || '').trim().length > 0)
+        .sort((a, b) =>
+          b.rating !== a.rating
+            ? b.rating - a.rating
+            : new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        )
+        .slice(0, 3),
+    [reviews]
+  );
+
+  // Nobody has grouped anything yet - projects only just became a thing - so for a
+  // provider whose work is entirely un-albumed the grid would be a single card labelled
+  // "Other work", hiding a portfolio that used to be visible in full. Show the set itself
+  // in that case. There is no project structure to present, so presenting one is a lie
+  // that also costs the client a click.
+  const onlyUngrouped = allProjects.length === 1 && allProjects[0].isUngrouped;
+
+  const activeProject: PortfolioProject | null =
+    openProject !== null && openProject >= 0 && openProject < projects.length
+      ? projects[openProject]
+      : null;
 
   // The cover strip is a still. A video leading the portfolio contributes its poster
   // frame; without one, the first actual photo stands in rather than leaving a raw video
   // path in an <img> to fail loading.
   const coverImage = (() => {
-    const first = allPortfolioImages[0];
+    // The leading project's chosen cover, not simply the first file uploaded - a provider
+    // who picked a cover for their best project meant it to be the first thing seen.
+    const first = allProjects[0]?.cover || allPortfolioImages[0];
     if (!first) return '';
     if (!isVideoPath(first)) return first;
     return metaFor(first).poster || allPortfolioImages.find((img) => !isVideoPath(img)) || '';
   })();
 
+  const projectOpen = activeProject !== null;
   const lightboxOpen =
-    selectedImage !== null && selectedImage >= 0 && selectedImage < portfolioImages.length;
+    projectOpen && selectedImage !== null &&
+    selectedImage >= 0 && selectedImage < activeProject!.items.length;
 
   // Everything else in the app closes on Escape and freezes the page behind it; this
   // viewer did neither, so on a phone the profile scrolled away underneath the photo.
-  const { overlayProps, cardProps } = useModal(() => setSelectedImage(null), {
-    enabled: lightboxOpen,
-    label: 'Portfolio image viewer',
+  // Escape steps back one level - out of the item, then out of the project - rather than
+  // dumping the client all the way to the grid from a full-size frame.
+  /**
+   * Escape, the close button and a backdrop click all step back one level - out of the
+   * item, then out of the project - rather than dumping the client to the grid from a
+   * full-size frame.
+   *
+   * Except when nothing is grouped, where the grid *is* the set: the client opened an
+   * item directly and never saw a project sheet, so surfacing one on the way out would
+   * show them a screen they never asked for.
+   */
+  const closeViewerLevel = useCallback(() => {
+    if (selectedImage !== null && !onlyUngrouped) {
+      setSelectedImage(null);
+      return;
+    }
+    setOpenProject(null);
+    setSelectedImage(null);
+  }, [selectedImage, onlyUngrouped]);
+
+  const { overlayProps, cardProps } = useModal(closeViewerLevel, {
+    enabled: projectOpen,
+    label: 'Portfolio project viewer',
   });
 
   const stepImage = useCallback(
     (delta: number) => {
       setSelectedImage((current) => {
-        if (current === null || portfolioImages.length === 0) return current;
+        const total = activeProject?.items.length ?? 0;
+        if (current === null || total === 0) return current;
         // Wrap around, so the arrows never dead-end at either end of the set.
-        return (current + delta + portfolioImages.length) % portfolioImages.length;
+        return (current + delta + total) % total;
       });
     },
-    [portfolioImages.length]
+    [activeProject]
+  );
+
+  const stepProject = useCallback(
+    (delta: number) => {
+      setOpenProject((current) => {
+        if (current === null || projects.length === 0) return current;
+        return (current + delta + projects.length) % projects.length;
+      });
+      // A new project means a new set; landing on item 4 of the next job because that is
+      // where you left the last one would be meaningless.
+      setSelectedImage(null);
+    },
+    [projects.length]
   );
 
   useEffect(() => {
-    if (!lightboxOpen) return;
+    if (!projectOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowRight') stepImage(1);
-      if (e.key === 'ArrowLeft') stepImage(-1);
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      const delta = e.key === 'ArrowRight' ? 1 : -1;
+      // Inside an item the arrows walk the set; at the set level they walk between jobs.
+      if (selectedImage !== null) stepImage(delta);
+      else stepProject(delta);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [lightboxOpen, stepImage]);
+  }, [projectOpen, selectedImage, stepImage, stepProject]);
+
+  // A filter change can leave openProject pointing past the end of a shorter list, which
+  // would render an empty modal over the grid.
+  useEffect(() => {
+    setOpenProject(null);
+    setSelectedImage(null);
+  }, [activeCategory]);
 
   const handleBookService = (service?: Service) => {
     if (provider) {
@@ -493,76 +600,140 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
             {/* Portfolio Tab */}
             {activeTab === 'portfolio' && (
               <div>
-                {allPortfolioImages.length > 0 ? (
+                {allProjects.length > 0 ? (
                   <>
-                    {/* Only worth showing once the provider has actually grouped their
-                        work - a lone "All" chip would be pure decoration. */}
-                    {albums.length > 0 && (
+                    {/* Only worth showing once there is more than one category to choose
+                        between - a lone chip is pure decoration. */}
+                    {categories.length > 1 && (
                       <div className="portfolio-albums">
                         <button
                           type="button"
-                          onClick={() => { setActiveAlbum(null); setSelectedImage(null); }}
-                          className={`portfolio-album-chip ${activeAlbum === null ? 'portfolio-album-chip--active' : ''}`}
+                          onClick={() => setActiveAlbum(null)}
+                          className={`portfolio-album-chip ${activeCategory === null ? 'portfolio-album-chip--active' : ''}`}
                         >
-                          All work ({allPortfolioImages.length})
+                          All work ({allProjects.length})
                         </button>
-                        {albums.map((album) => {
-                          const count = allPortfolioImages.filter(
-                            (image) => (metaFor(image).album || '').trim() === album
-                          ).length;
+                        {categories.map((category) => {
+                          const count = allProjects.filter((p) => p.category === category).length;
                           return (
                             <button
-                              key={album}
+                              key={category}
                               type="button"
-                              onClick={() => { setActiveAlbum(album); setSelectedImage(null); }}
-                              className={`portfolio-album-chip ${activeAlbum === album ? 'portfolio-album-chip--active' : ''}`}
+                              onClick={() => setActiveAlbum(category)}
+                              className={`portfolio-album-chip ${activeCategory === category ? 'portfolio-album-chip--active' : ''}`}
                             >
-                              {album} ({count})
+                              {category} ({count})
                             </button>
                           );
                         })}
                       </div>
                     )}
 
-                    {/* Columns rather than a square grid: a fixed 1:1 tile centre-cropped
-                        every portrait and every panorama in a photographer's portfolio. */}
-                    <div className="portfolio-masonry">
-                      {portfolioImages.map((image, index) => {
-                        const meta = metaFor(image);
-                        const isVideo = isVideoPath(image);
-                        return (
+                    {onlyUngrouped ? (
+                      <div className="pf-project-set">
+                        {allProjects[0].items.map((item, index) => (
                           <button
-                            key={getStoredPath(image)}
+                            key={item}
                             type="button"
-                            className="portfolio-masonry-item"
-                            onClick={() => setSelectedImage(index)}
+                            className="pf-project-frame"
+                            onClick={() => { setOpenProject(0); setSelectedImage(index); }}
                             aria-label={
-                              meta.caption
-                                ? `${isVideo ? 'Play' : 'View'} "${meta.caption}"`
-                                : `${isVideo ? 'Play video' : 'View image'} ${index + 1} of ${portfolioImages.length}`
+                              metaFor(item).caption ||
+                              `Open item ${index + 1} of ${allProjects[0].count}`
                             }
                           >
-                            {/* Thumbnails are the provider's originals at full
-                                resolution - up to 24 of them - so off-screen items
-                                aren't fetched, and video shows a poster frame rather
-                                than downloading the clip. */}
                             <PortfolioThumbnail
-                              path={image}
-                              meta={meta}
-                              alt={meta.caption || `${provider.name}'s work, item ${index + 1}`}
+                              path={item}
+                              meta={metaFor(item)}
+                              alt={metaFor(item).caption || `${provider.name}'s work, item ${index + 1}`}
                             />
-                            {meta.caption && (
-                              <span className="portfolio-masonry-caption">{meta.caption}</span>
-                            )}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                    /* Cards, not a wall of frames. A client is deciding whether this
+                       person can deliver a whole job at a consistent standard, and a
+                       set of nine from one wedding answers that where nine unrelated
+                       frames don't. */
+                    <div className="pf-projects">
+                      {projects.map((project, index) => {
+                        const context = describeProjectContext(project);
+                        return (
+                          <button
+                            key={project.name}
+                            type="button"
+                            className="pf-project-card"
+                            onClick={() => { setOpenProject(index); setSelectedImage(null); }}
+                            aria-label={`Open project "${project.name}", ${describeProjectSize(project.count)}`}
+                          >
+                            <span className="pf-project-cover">
+                              <PortfolioThumbnail
+                                path={project.cover}
+                                meta={metaFor(project.cover)}
+                                alt={`Cover of ${project.name}`}
+                              />
+                            </span>
+                            <span className="pf-project-body">
+                              <span className="pf-project-title">{project.name}</span>
+                              {/* Location and date do more for credibility than any
+                                  amount of bio copy - they say the work is real and
+                                  recent. Rendered only when set, and the row keeps its
+                                  height either way so the grid stays even. */}
+                              {/* Always rendered, empty when there is nothing to say: the
+                                  min-height in CSS is what keeps cards level, and an empty
+                                  element reserves it without a screen reader announcing a
+                                  blank line the way a padded non-breaking space would. */}
+                              <span className="pf-project-context">{context}</span>
+                              <span className="pf-project-meta">
+                                {project.category && (
+                                  <span className="pf-project-tag">{project.category}</span>
+                                )}
+                                <span className="pf-project-count">{describeProjectSize(project.count)}</span>
+                              </span>
+                            </span>
                           </button>
                         );
                       })}
                     </div>
+                    )}
+
+                    {/* Social proof sits with the work rather than only on its own tab -
+                        it is what tips a decision once the work has been judged. */}
+                    {topReviews.length > 0 && (
+                      <div className="pf-testimonials">
+                        <h3 className="pf-testimonials__heading">What clients said</h3>
+                        <div className="pf-testimonial-list">
+                          {topReviews.map((review) => (
+                            <blockquote key={review.id} className="pf-testimonial">
+                              <div className="pf-testimonial__stars" aria-label={`${review.rating} out of 5`}>
+                                {[1, 2, 3, 4, 5].map((n) => (
+                                  <Star
+                                    key={n}
+                                    className={`w-3.5 h-3.5 ${n <= review.rating ? 'fill-yellow-400 text-yellow-400' : 'text-gray-300'}`}
+                                  />
+                                ))}
+                              </div>
+                              <p className="pf-testimonial__body">{review.comment}</p>
+                              <footer className="pf-testimonial__author">
+                                {review.reviewer_name || 'A client'}
+                              </footer>
+                            </blockquote>
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('reviews')}
+                          className="pf-testimonials__more"
+                        >
+                          Read all {reviewStats.totalReviews} reviews
+                        </button>
+                      </div>
+                    )}
                   </>
                 ) : (
                   <div className="text-center py-12">
                     <Camera className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                    <p className="text-gray-500">No portfolio images yet</p>
+                    <p className="text-gray-500">No work published yet</p>
                   </div>
                 )}
               </div>
@@ -728,57 +899,112 @@ export function ProviderProfilePage({ providerId, onStartBooking, onBack }: Prov
         </div>
       </div>
 
-      {/* Lightbox for Portfolio Images */}
-      {lightboxOpen && (
+      {/* Project viewer.
+          Two levels, because a client browses at two levels: the whole set of a job, and
+          then one item from it. Opening a card shows the *complete* set - never a
+          truncated teaser - because seeing a job delivered end to end at one standard is
+          the thing that answers "can they repeat this". */}
+      {projectOpen && activeProject && (
         <div className="modal-lightbox" {...overlayProps}>
           <button
-            onClick={() => setSelectedImage(null)}
+            onClick={closeViewerLevel}
             className="modal-lightbox-close w-10 h-10 rounded-full flex items-center justify-center"
-            aria-label="Close image viewer"
+            aria-label={
+              selectedImage !== null && !onlyUngrouped ? 'Back to the project' : 'Close viewer'
+            }
           >
             <X className="w-6 h-6 text-white" />
           </button>
 
-          {portfolioImages.length > 1 && (
+          {/* At the set level the arrows move between jobs; inside an item they move
+              through that job's frames. Same controls, and the label says which. */}
+          {(selectedImage !== null ? activeProject.items.length > 1 : projects.length > 1) && (
             <>
               <button
-                onClick={(e) => { e.stopPropagation(); stepImage(-1); }}
+                onClick={(e) => { e.stopPropagation(); selectedImage !== null ? stepImage(-1) : stepProject(-1); }}
                 className="modal-lightbox-nav modal-lightbox-nav--prev"
-                aria-label="Previous image"
+                aria-label={selectedImage !== null ? 'Previous item' : 'Previous project'}
               >
                 <ChevronLeft className="w-6 h-6" />
               </button>
               <button
-                onClick={(e) => { e.stopPropagation(); stepImage(1); }}
+                onClick={(e) => { e.stopPropagation(); selectedImage !== null ? stepImage(1) : stepProject(1); }}
                 className="modal-lightbox-nav modal-lightbox-nav--next"
-                aria-label="Next image"
+                aria-label={selectedImage !== null ? 'Next item' : 'Next project'}
               >
                 <ChevronRight className="w-6 h-6" />
               </button>
               <span className="modal-lightbox-counter">
-                {selectedImage! + 1} / {portfolioImages.length}
+                {selectedImage !== null
+                  ? `${selectedImage + 1} / ${activeProject.items.length}`
+                  : `${openProject! + 1} / ${projects.length}`}
               </span>
             </>
           )}
 
-          {/* The dialog role belongs on this wrapper, not on the <img> - overriding an
+          {/* The dialog role belongs on this wrapper, not on the media - overriding an
               image's own role would leave a screen reader with no image at all. */}
-          <div {...cardProps} className="portfolio-viewer">
-            <PortfolioPlayer
-              path={portfolioImages[selectedImage!]}
-              meta={metaFor(portfolioImages[selectedImage!])}
-              alt={
-                metaFor(portfolioImages[selectedImage!]).caption ||
-                `${provider.name}'s work, item ${selectedImage! + 1} of ${portfolioImages.length}`
-              }
-            />
-            {(metaFor(portfolioImages[selectedImage!]).caption ||
-              metaFor(portfolioImages[selectedImage!]).album) && (
-              <div className="portfolio-lightbox-caption">
-                {metaFor(portfolioImages[selectedImage!]).caption}
-                {metaFor(portfolioImages[selectedImage!]).album && (
-                  <span>{metaFor(portfolioImages[selectedImage!]).album}</span>
+          {/* The width cap on this wrapper is for the sheet, which is a reading layout.
+              A single item full-size is not - capping it at 64rem shrank a panorama to a
+              third of a wide screen - so the modifier drops the cap and the scrolling. */}
+          <div
+            {...cardProps}
+            className={`pf-project-view ${selectedImage !== null ? 'pf-project-view--item' : ''}`}
+          >
+            {selectedImage !== null ? (
+              <div className="portfolio-viewer">
+                <PortfolioPlayer
+                  path={activeProject.items[selectedImage]}
+                  meta={metaFor(activeProject.items[selectedImage])}
+                  alt={
+                    metaFor(activeProject.items[selectedImage]).caption ||
+                    `${activeProject.name}, item ${selectedImage + 1} of ${activeProject.items.length}`
+                  }
+                />
+                {metaFor(activeProject.items[selectedImage]).caption && (
+                  <div className="portfolio-lightbox-caption">
+                    {metaFor(activeProject.items[selectedImage]).caption}
+                  </div>
                 )}
+              </div>
+            ) : (
+              <div className="pf-project-sheet">
+                <header className="pf-project-sheet__header">
+                  <h2 className="pf-project-sheet__title">{activeProject.name}</h2>
+                  {describeProjectContext(activeProject) && (
+                    <p className="pf-project-sheet__context">{describeProjectContext(activeProject)}</p>
+                  )}
+                  <p className="pf-project-sheet__meta">
+                    {activeProject.category && (
+                      <span className="pf-project-tag">{activeProject.category}</span>
+                    )}
+                    <span>{describeProjectSize(activeProject.count)}</span>
+                  </p>
+                  {activeProject.description && (
+                    <p className="pf-project-sheet__description">{activeProject.description}</p>
+                  )}
+                </header>
+
+                <div className="pf-project-set">
+                  {activeProject.items.map((item, index) => (
+                    <button
+                      key={item}
+                      type="button"
+                      className="pf-project-frame"
+                      onClick={() => setSelectedImage(index)}
+                      aria-label={
+                        metaFor(item).caption ||
+                        `Open item ${index + 1} of ${activeProject.items.length}`
+                      }
+                    >
+                      <PortfolioThumbnail
+                        path={item}
+                        meta={metaFor(item)}
+                        alt={metaFor(item).caption || `${activeProject.name}, item ${index + 1}`}
+                      />
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
           </div>

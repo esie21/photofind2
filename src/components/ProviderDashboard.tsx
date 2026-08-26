@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { Upload, Calendar, PhilippinePeso, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle, ShieldCheck, FileText, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Upload, Calendar, PhilippinePeso, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle, ShieldCheck, FileText, X, ChevronLeft, ChevronRight, ChevronUp, ChevronDown } from 'lucide-react';
 import { CATEGORY_OPTIONS } from '../constants/categories';
 import { PLATFORM_COMMISSION_PERCENT } from '../constants/payment';
 import { ImageWithFallback } from './figma/ImageWithFallback';
@@ -16,7 +16,8 @@ import bookingService from '../api/services/bookingService';
 import availabilityService from '../api/services/availabilityService';
 import reviewService, { Review, ReviewStats } from '../api/services/reviewService';
 import { getUploadUrl, getStoredPath } from '../api/config';
-import type { PortfolioMeta } from '../api/services/authService';
+import type { PortfolioAlbumMeta, PortfolioAlbums, PortfolioMeta } from '../api/services/authService';
+import { groupPortfolio, describeProjectSize, type PortfolioProject } from '../utils/portfolio';
 import {
   IMAGE_MIME_TYPES,
   MEDIA_MIME_TYPES,
@@ -55,6 +56,18 @@ const toPackage = (s: any) => ({
   enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly' || s.pricing_type === 'both'),
   enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
 });
+
+/** Working copy of one project's details while its row is open for editing. */
+interface ProjectDraft {
+  name: string;
+  description: string;
+  category: string;
+  location: string;
+  /** ISO date (YYYY-MM-DD), or '' when not dated. */
+  doneOn: string;
+  /** Stored path of the chosen cover, or '' to fall back to the first item. */
+  cover: string;
+}
 
 interface ClientTrust {
   completed_count: number;
@@ -144,6 +157,11 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   // Caption/album being edited in the image detail dialog.
   const [detailDraft, setDetailDraft] = useState<{ caption: string; album: string }>({ caption: '', album: '' });
+  // Which project's details are open for editing, by album name, plus the working copy.
+  const [editingProject, setEditingProject] = useState<string | null>(null);
+  const [projectDraft, setProjectDraft] = useState<ProjectDraft>({
+    name: '', description: '', category: '', location: '', doneOn: '', cover: '',
+  });
   const [packages, setPackages] = useState<any[]>([]);
   const [isLoadingPackages, setIsLoadingPackages] = useState(false);
   const [packagesError, setPackagesError] = useState<string | null>(null);
@@ -189,6 +207,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
     profile_image: u?.profile_image ?? '',
     portfolio_images: (u?.portfolio_images || []) as string[],
     portfolio_meta: (u?.portfolio_meta || {}) as PortfolioMeta,
+    portfolio_albums: (u?.portfolio_albums || {}) as PortfolioAlbums,
   });
 
   // These mirror the server's own rules (uploadService.MAX_FILE_SIZE, MAX_VIDEO_SIZE,
@@ -305,7 +324,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
    * photo's caption from lingering in the column.
    */
   const persistPortfolio = async (
-    next: { images?: string[]; meta?: PortfolioMeta },
+    next: { images?: string[]; meta?: PortfolioMeta; albums?: PortfolioAlbums },
     success: { title: string; body: string }
   ) => {
     if (!user || portfolioBusy) return false;
@@ -320,6 +339,19 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
       if (keys.has(getStoredPath(path))) meta[getStoredPath(path)] = value;
     }
 
+    // Same again for project metadata: a project whose last image just went is gone, and
+    // holding its description locally would have it flicker back into the panel until the
+    // next refresh. The server prunes identically - this only keeps the form honest in
+    // the meantime.
+    const sourceAlbums: PortfolioAlbums = next.albums ?? (formState.portfolio_albums || {});
+    const liveAlbums = new Set(
+      Object.values(meta).map((entry) => (entry.album || '').trim()).filter(Boolean)
+    );
+    const albums: PortfolioAlbums = {};
+    for (const [name, value] of Object.entries(sourceAlbums)) {
+      if (liveAlbums.has(name)) albums[name] = value;
+    }
+
     setPortfolioBusy(true);
     try {
       // The PUT returns the full updated row, so the signed-in user is refreshed from
@@ -328,11 +360,13 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
       const updated = await userService.updateUser(user.id, {
         portfolio_images: images,
         portfolio_meta: meta,
+        portfolio_albums: albums,
       });
       setFormState((s: any) => ({
         ...s,
         portfolio_images: (updated.portfolio_images || images) as string[],
         portfolio_meta: (updated.portfolio_meta || meta) as PortfolioMeta,
+        portfolio_albums: (updated.portfolio_albums || albums) as PortfolioAlbums,
       }));
       applyUser(updated);
       toast.success(success.title, success.body);
@@ -454,6 +488,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
         ...s,
         portfolio_images: (fresh.portfolio_images || []) as string[],
         portfolio_meta: (fresh.portfolio_meta || {}) as PortfolioMeta,
+        portfolio_albums: (fresh.portfolio_albums || {}) as PortfolioAlbums,
       }));
       toast.success(
         'Added to your portfolio',
@@ -825,6 +860,94 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
       ).sort((a, b) => a.localeCompare(b)),
     [portfolioMeta]
   );
+
+  const portfolioAlbums: PortfolioAlbums = formState.portfolio_albums || {};
+
+  // The same join the public grid uses, so what the provider arranges here is literally
+  // what a client sees - the two used to derive grouping separately and disagree about
+  // covers and un-grouped work.
+  const projects: PortfolioProject[] = useMemo(
+    () => groupPortfolio(portfolioImages, portfolioMeta, portfolioAlbums),
+    [portfolioImages, portfolioMeta, portfolioAlbums]
+  );
+
+  /**
+   * Saves one project's details.
+   *
+   * Renaming is the interesting case. The album name *is* the project's identity - it is
+   * the key in portfolio_albums and the value in every member image's meta.album - so a
+   * rename has to move both halves in a single write, or the details would detach from
+   * their images and the project would split into two: an empty one under the new name
+   * and a bare one under the old.
+   */
+  const saveProject = async (original: string, draft: ProjectDraft) => {
+    const name = draft.name.trim();
+    if (!name) {
+      toast.error('Name required', 'Give this project a name so clients know what it is.');
+      return;
+    }
+    if (name !== original && projects.some((p) => p.name === name)) {
+      toast.error('Name already used', `You already have a project called "${name}".`);
+      return;
+    }
+
+    const nextMeta: PortfolioMeta = {};
+    for (const [path, entry] of Object.entries(portfolioMeta)) {
+      nextMeta[path] =
+        (entry.album || '').trim() === original ? { ...entry, album: name } : entry;
+    }
+
+    const nextAlbums: PortfolioAlbums = {};
+    for (const [key, value] of Object.entries(portfolioAlbums)) {
+      if (key !== original) nextAlbums[key] = value;
+    }
+    const entry: PortfolioAlbumMeta = {
+      ...(draft.description.trim() ? { description: draft.description.trim() } : {}),
+      ...(draft.category ? { category: draft.category } : {}),
+      ...(draft.location.trim() ? { location: draft.location.trim() } : {}),
+      ...(draft.doneOn ? { done_on: draft.doneOn } : {}),
+      ...(draft.cover ? { cover: draft.cover } : {}),
+      ...(portfolioAlbums[original]?.order !== undefined
+        ? { order: portfolioAlbums[original].order }
+        : {}),
+    };
+    nextAlbums[name] = entry;
+
+    const ok = await persistPortfolio(
+      { meta: nextMeta, albums: nextAlbums },
+      { title: 'Project saved', body: `"${name}" is up to date on your profile.` }
+    );
+    if (ok) setEditingProject(null);
+  };
+
+  /**
+   * Moves a project up or down the public grid.
+   *
+   * Writes an explicit `order` on every project, not just the two being swapped. Order is
+   * optional in the data - projects without one fall back to the position of their first
+   * image - so setting it on a pair alone would rank those two against a fallback the
+   * provider can't see, and the result would look arbitrary.
+   */
+  const moveProject = async (from: number, to: number) => {
+    // Bounds are checked against the orderable list only. `projects` includes the
+    // un-grouped bucket, which has no entry to order and is pinned last regardless, so
+    // measuring against its length would admit an index one past the real end.
+    const ordered = projects.filter((p) => !p.isUngrouped).map((p) => p.name);
+    if (from < 0 || to < 0 || from >= ordered.length || to >= ordered.length) return;
+
+    const [moved] = ordered.splice(from, 1);
+    ordered.splice(to, 0, moved);
+
+    const nextAlbums: PortfolioAlbums = { ...portfolioAlbums };
+    ordered.forEach((name, index) => {
+      nextAlbums[name] = { ...(nextAlbums[name] || {}), order: index };
+    });
+
+    await persistPortfolio(
+      { albums: nextAlbums },
+      { title: 'Order saved', body: 'Your projects are in the new order.' }
+    );
+  };
 
   /** Moves an image within the working order. */
   const moveImage = (from: number, to: number) => {
@@ -2023,6 +2146,210 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Projects.
+                  The grid below is where files live; this is where they become a body of
+                  work a client can judge. Only rendered once something is grouped -
+                  before that the panel would be an empty box asking for work that has to
+                  be done in the grid first. */}
+              {projects.some((project) => !project.isUngrouped) && (
+                <div className="pf-editor-projects">
+                  <div className="pf-editor-projects__head">
+                    <h3 className="pf-editor-projects__title">Projects</h3>
+                    <p className="pf-editor-projects__hint">
+                      Clients browse your work one job at a time. A name, where and when it happened,
+                      and a line about the brief do more than extra photos.
+                    </p>
+                  </div>
+
+                  {projects.filter((project) => !project.isUngrouped).map((project, index, list) => {
+                    const isEditing = editingProject === project.name;
+                    const info = portfolioAlbums[project.name] || {};
+                    return (
+                      <div key={project.name} className="pf-editor-project">
+                        {isEditing ? (
+                          <div className="pf-editor-project__form">
+                            <label className="pf-field">
+                              <span className="pf-field__label">Project name</span>
+                              <input
+                                type="text"
+                                maxLength={60}
+                                value={projectDraft.name}
+                                onChange={(e) => setProjectDraft((d) => ({ ...d, name: e.target.value }))}
+                                className="pf-field__input"
+                              />
+                            </label>
+
+                            <label className="pf-field">
+                              <span className="pf-field__label">
+                                What was the job?
+                                <span className="pf-field__count">{projectDraft.description.length}/600</span>
+                              </span>
+                              <textarea
+                                rows={3}
+                                maxLength={600}
+                                value={projectDraft.description}
+                                onChange={(e) => setProjectDraft((d) => ({ ...d, description: e.target.value }))}
+                                placeholder={
+                                  ['Design', 'Event Organizer'].includes(formState.category)
+                                    ? 'What did the client need, what did you deliver, how did it turn out?'
+                                    : 'The occasion, the setting, anything that made this one memorable.'
+                                }
+                                className="pf-field__input pf-field__input--area"
+                              />
+                            </label>
+
+                            <div className="pf-field-row">
+                              <label className="pf-field">
+                                <span className="pf-field__label">Category</span>
+                                <select
+                                  value={projectDraft.category}
+                                  onChange={(e) => setProjectDraft((d) => ({ ...d, category: e.target.value }))}
+                                  className="pf-field__input"
+                                >
+                                  <option value="">No category</option>
+                                  {CATEGORY_OPTIONS.map((option) => (
+                                    <option key={option} value={option}>{option}</option>
+                                  ))}
+                                </select>
+                              </label>
+
+                              <label className="pf-field">
+                                <span className="pf-field__label">Where</span>
+                                <input
+                                  type="text"
+                                  maxLength={120}
+                                  value={projectDraft.location}
+                                  onChange={(e) => setProjectDraft((d) => ({ ...d, location: e.target.value }))}
+                                  placeholder="Tagaytay"
+                                  className="pf-field__input"
+                                />
+                              </label>
+
+                              <label className="pf-field">
+                                <span className="pf-field__label">When</span>
+                                <input
+                                  type="date"
+                                  value={projectDraft.doneOn}
+                                  // Today in the provider's own timezone. The server allows
+                                  // anything up to the end of today in UTC, so this is the
+                                  // stricter of the two and never offers a date the save
+                                  // would then refuse.
+                                  max={new Date().toLocaleDateString('en-CA')}
+                                  onChange={(e) => setProjectDraft((d) => ({ ...d, doneOn: e.target.value }))}
+                                  className="pf-field__input"
+                                />
+                              </label>
+                            </div>
+
+                            <div className="pf-field">
+                              <span className="pf-field__label">Cover</span>
+                              <div className="pf-cover-picker">
+                                {project.items.map((item) => (
+                                  <button
+                                    key={item}
+                                    type="button"
+                                    onClick={() => setProjectDraft((d) => ({ ...d, cover: item }))}
+                                    aria-pressed={(projectDraft.cover || project.items[0]) === item}
+                                    aria-label="Use as cover"
+                                    className="pf-cover-option"
+                                  >
+                                    <PortfolioThumbnail path={item} meta={metaFor(item)} alt="" />
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="pf-editor-project__actions">
+                              <button
+                                type="button"
+                                onClick={() => setEditingProject(null)}
+                                disabled={portfolioBusy}
+                                className="px-3 py-1.5 border border-gray-200 text-sm rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => saveProject(project.name, projectDraft)}
+                                disabled={portfolioBusy}
+                                className="px-3 py-1.5 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                              >
+                                {portfolioBusy ? 'Saving...' : 'Save project'}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="pf-editor-project__row">
+                            <span className="pf-editor-project__thumb">
+                              <PortfolioThumbnail path={project.cover} meta={metaFor(project.cover)} alt="" />
+                            </span>
+                            <div className="pf-editor-project__text">
+                              <p className="pf-editor-project__name">{project.name}</p>
+                              <p className="pf-editor-project__sub">
+                                {[info.category, info.location, describeProjectSize(project.count)]
+                                  .filter(Boolean)
+                                  .join(' · ')}
+                              </p>
+                              {/* The research is blunt about this: a thin set doesn't prove
+                                  you can deliver a whole job. Said once, quietly - it is a
+                                  nudge, not an error. */}
+                              {project.count < 5 && (
+                                <p className="pf-editor-project__nudge">
+                                  Only {project.count} item{project.count === 1 ? '' : 's'} &mdash; a few more
+                                  would show a client you can carry a whole job.
+                                </p>
+                              )}
+                              {!info.description && (
+                                <p className="pf-editor-project__nudge">No description yet.</p>
+                              )}
+                            </div>
+                            {editMode && (
+                              <div className="pf-editor-project__buttons">
+                                <button
+                                  type="button"
+                                  onClick={() => moveProject(index, index - 1)}
+                                  disabled={index === 0 || portfolioBusy}
+                                  aria-label={`Move ${project.name} up`}
+                                  className="pf-icon-button"
+                                >
+                                  <ChevronUp className="w-4 h-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => moveProject(index, index + 1)}
+                                  disabled={index === list.length - 1 || portfolioBusy}
+                                  aria-label={`Move ${project.name} down`}
+                                  className="pf-icon-button"
+                                >
+                                  <ChevronDown className="w-4 h-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setProjectDraft({
+                                      name: project.name,
+                                      description: info.description || '',
+                                      category: info.category || '',
+                                      location: info.location || '',
+                                      doneOn: info.done_on || '',
+                                      cover: info.cover || '',
+                                    });
+                                    setEditingProject(project.name);
+                                  }}
+                                  className="px-3 py-1.5 border border-gray-200 text-sm rounded-lg hover:bg-gray-50"
+                                >
+                                  Edit
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 

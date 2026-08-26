@@ -3219,64 +3219,6 @@ html {
   color: #fff;
 }
 
-/* --- Public gallery ------------------------------------------------------- */
-
-/* Photographers' work is not square. A fixed 1:1 grid centre-cropped every
-   portrait and every panorama; columns keep each image's real proportions. */
-.portfolio-masonry {
-  columns: 2;
-  column-gap: 1rem;
-}
-
-@media (width >= 40rem) {
-  .portfolio-masonry {
-    columns: 3;
-  }
-}
-
-.portfolio-masonry-item {
-  display: block;
-  width: 100%;
-  margin-bottom: 1rem;
-  border-radius: 0.75rem;
-  overflow: hidden;
-  /* Without this a photo can be split across two columns. */
-  break-inside: avoid;
-  position: relative;
-  background-color: #f3f4f6;
-}
-
-.portfolio-masonry-item img,
-.portfolio-masonry-item video {
-  display: block;
-  width: 100%;
-  height: auto;
-  transition: opacity 0.15s ease;
-}
-
-.portfolio-masonry-item:hover img,
-.portfolio-masonry-item:hover video {
-  opacity: 0.9;
-}
-
-.portfolio-masonry-item:focus-visible {
-  outline: 2px solid #9333ea;
-  outline-offset: 2px;
-}
-
-.portfolio-masonry-caption {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 1.5rem 0.75rem 0.5rem;
-  background-image: linear-gradient(to top, rgba(0, 0, 0, 0.75), transparent);
-  color: #fff;
-  font-size: 0.8125rem;
-  line-height: 1.25rem;
-  pointer-events: none;
-}
-
 /* --- Lightbox extras ------------------------------------------------------ */
 
 /* .modal-lightbox-close is styled above; these are the pieces the portfolio
@@ -3893,4 +3835,564 @@ html {
 .commission-owed__body {
   font-size: 0.875rem;
   line-height: 1.45;
+}
+
+/* ============================================================
+   Portfolio projects
+
+   The public portfolio shows grouped projects rather than a wall of frames, because a
+   client is asking "can this person deliver a whole job at one standard" and a set from
+   a single job answers that where unrelated frames don't.
+
+   Hand-written, like everything else added since: index.css is a prebuilt snapshot and
+   there is no Tailwind step, so an invented utility class renders as nothing.
+   ============================================================ */
+
+:root {
+  /* One scale shared by the grid, the sheet and the set, so a change to the card radius
+     doesn't leave the modal's frames rounded differently. */
+  --pf-radius: 0.875rem;
+  --pf-radius-sm: 0.5rem;
+  --pf-border: 1px solid var(--color-gray-200);
+  --pf-gap: 1.25rem;
+}
+
+.pf-projects {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--pf-gap);
+  /* Left-aligned at its natural width rather than stretched. A provider with two
+     projects should look like a provider with two projects, not like a broken grid with
+     two enormous cards in it. */
+  justify-content: start;
+}
+
+@media (width >= 40rem) {
+  .pf-projects {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (width >= 64rem) {
+  .pf-projects {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.pf-project-card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  background-color: var(--color-white);
+  border: var(--pf-border);
+  border-radius: var(--pf-radius);
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.pf-project-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--color-purple-200);
+  box-shadow: 0 12px 24px -12px rgb(0 0 0 / 18%);
+}
+
+.pf-project-card:focus-visible {
+  outline: 2px solid var(--color-purple-600);
+  outline-offset: 2px;
+}
+
+/* Every cover the same shape. A ragged grid of native aspect ratios reads as a contact
+   sheet; a consistent one reads as a body of work. 4:3 because it flatters both a
+   landscape frame and a cropped portrait without gutting either. */
+.pf-project-cover {
+  position: relative;
+  display: block;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  background-color: var(--color-gray-100);
+}
+
+.pf-project-cover img,
+.pf-project-cover video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.35s ease;
+}
+
+.pf-project-card:hover .pf-project-cover img,
+.pf-project-card:hover .pf-project-cover video {
+  transform: scale(1.04);
+}
+
+.pf-project-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.875rem 1rem 1rem;
+}
+
+/* Clamped to two lines with the height reserved either way, so a one-word project and a
+   long one produce cards of identical height and the grid stays on its baseline. */
+.pf-project-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 2.75rem;
+  font-weight: 600;
+  line-height: 1.375;
+  color: var(--color-gray-900);
+}
+
+/* Location and date. The most load-bearing line on the card for credibility - it says
+   the work is real and recent - and it holds its height when empty so cards stay level. */
+.pf-project-context {
+  /* Reserved whether or not this project has a location or date, so a card that has one
+     and a card that doesn't still line up. Held in CSS rather than by rendering a
+     non-breaking space, which reads to a screen reader as an empty line of content. */
+  min-height: 1.0625rem;
+  font-size: 0.8125rem;
+  line-height: 1.3;
+  color: var(--color-gray-500);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pf-project-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.375rem;
+}
+
+.pf-project-tag {
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-purple-700);
+  background-color: var(--color-purple-50);
+  border-radius: 999px;
+}
+
+.pf-project-count {
+  font-size: 0.75rem;
+  color: var(--color-gray-500);
+}
+
+/* ---- Project viewer ---------------------------------------------------------- */
+
+.pf-project-view {
+  width: min(64rem, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.pf-project-sheet {
+  padding: 1.5rem;
+  background-color: var(--color-white);
+  border-radius: var(--pf-radius);
+}
+
+.pf-project-sheet__header {
+  margin-bottom: 1.25rem;
+}
+
+.pf-project-sheet__title {
+  font-size: 1.375rem;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--color-gray-900);
+}
+
+.pf-project-sheet__context {
+  margin-top: 0.25rem;
+  font-size: 0.875rem;
+  color: var(--color-gray-500);
+}
+
+.pf-project-sheet__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin-top: 0.625rem;
+  font-size: 0.8125rem;
+  color: var(--color-gray-500);
+}
+
+.pf-project-sheet__description {
+  margin-top: 0.875rem;
+  max-width: 46rem;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--color-gray-700);
+  white-space: pre-line;
+}
+
+/* The complete set, never truncated - see the comment on the viewer in
+   ProviderProfilePage. Smaller tiles than the card grid because these are frames within
+   one job, not separate jobs competing for attention. */
+.pf-project-set {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.625rem;
+}
+
+@media (width >= 40rem) {
+  .pf-project-set {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (width >= 64rem) {
+  .pf-project-set {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.pf-project-frame {
+  position: relative;
+  display: block;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  background-color: var(--color-gray-100);
+  border-radius: var(--pf-radius-sm);
+  cursor: pointer;
+}
+
+.pf-project-frame img,
+.pf-project-frame video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.3s ease;
+}
+
+.pf-project-frame:hover img,
+.pf-project-frame:hover video {
+  transform: scale(1.05);
+}
+
+.pf-project-frame:focus-visible {
+  outline: 2px solid var(--color-purple-400);
+  outline-offset: 2px;
+}
+
+/* ---- Testimonials under the work --------------------------------------------- */
+
+.pf-testimonials {
+  margin-top: 2.5rem;
+  padding-top: 1.75rem;
+  border-top: var(--pf-border);
+}
+
+.pf-testimonials__heading {
+  margin-bottom: 1rem;
+  font-weight: 600;
+  color: var(--color-gray-900);
+}
+
+.pf-testimonial-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+@media (width >= 48rem) {
+  .pf-testimonial-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.pf-testimonial {
+  padding: 1rem;
+  background-color: var(--color-gray-50);
+  border-radius: var(--pf-radius-sm);
+}
+
+.pf-testimonial__stars {
+  display: flex;
+  gap: 0.125rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Four lines is enough to carry a voice. The full text is one click away on the Reviews
+   tab, and uncapped quotes would make the three cards wildly different heights. */
+.pf-testimonial__body {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--color-gray-700);
+}
+
+.pf-testimonial__author {
+  margin-top: 0.625rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-gray-500);
+}
+
+.pf-testimonials__more {
+  margin-top: 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-purple-600);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.pf-testimonials__more:hover {
+  color: var(--color-purple-700);
+  text-decoration: underline;
+}
+
+/* ---- Provider's project editor ----------------------------------------------- */
+
+.pf-editor-projects {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background-color: var(--color-gray-50);
+  border: var(--pf-border);
+  border-radius: var(--pf-radius);
+}
+
+.pf-editor-projects__head {
+  margin-bottom: 0.875rem;
+}
+
+.pf-editor-projects__title {
+  font-weight: 600;
+  color: var(--color-gray-900);
+}
+
+.pf-editor-projects__hint {
+  margin-top: 0.25rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--color-gray-500);
+}
+
+.pf-editor-project {
+  padding: 0.75rem 0;
+  border-top: var(--pf-border);
+}
+
+.pf-editor-project:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.pf-editor-project__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.pf-editor-project__thumb {
+  position: relative;
+  flex-shrink: 0;
+  display: block;
+  width: 3.5rem;
+  height: 3.5rem;
+  overflow: hidden;
+  background-color: var(--color-gray-100);
+  border-radius: var(--pf-radius-sm);
+}
+
+.pf-editor-project__thumb img,
+.pf-editor-project__thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.pf-editor-project__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pf-editor-project__name {
+  font-weight: 500;
+  color: var(--color-gray-900);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-editor-project__sub {
+  font-size: 0.8125rem;
+  color: var(--color-gray-500);
+}
+
+.pf-editor-project__nudge {
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: oklch(0.55 0.1 62.6);
+}
+
+.pf-editor-project__buttons {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-shrink: 0;
+}
+
+/* Stacks under the text on a phone, where three controls plus a thumbnail leave the
+   project name about eight characters of room. */
+@media (width < 30rem) {
+  .pf-editor-project__row {
+    flex-wrap: wrap;
+  }
+
+  .pf-editor-project__buttons {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+.pf-icon-button {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  color: var(--color-gray-600);
+  background-color: var(--color-white);
+  border: var(--pf-border);
+  border-radius: var(--pf-radius-sm);
+  cursor: pointer;
+}
+
+.pf-icon-button:hover:not(:disabled) {
+  background-color: var(--color-gray-50);
+  color: var(--color-gray-900);
+}
+
+.pf-icon-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pf-editor-project__form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.pf-editor-project__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.pf-field {
+  display: block;
+}
+
+.pf-field__label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-gray-700);
+}
+
+.pf-field__count {
+  font-size: 0.6875rem;
+  font-weight: 400;
+  color: var(--color-gray-400);
+}
+
+.pf-field__input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  color: var(--color-gray-900);
+  background-color: var(--color-white);
+  border: 1px solid var(--color-gray-300);
+  border-radius: var(--pf-radius-sm);
+}
+
+.pf-field__input:focus {
+  outline: none;
+  border-color: var(--color-purple-500);
+  box-shadow: 0 0 0 2px var(--color-purple-100);
+}
+
+.pf-field__input--area {
+  resize: vertical;
+  min-height: 4.5rem;
+  line-height: 1.5;
+}
+
+/* Three fields side by side where there is room, stacked where there isn't. The date
+   input has a hard minimum width in most browsers, so a naive 3-column grid overflows
+   the panel on a phone rather than shrinking. */
+.pf-field-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+
+@media (width >= 40rem) {
+  .pf-field-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.pf-cover-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.pf-cover-option {
+  position: relative;
+  display: block;
+  width: 3.25rem;
+  height: 3.25rem;
+  overflow: hidden;
+  background-color: var(--color-gray-100);
+  border: 2px solid transparent;
+  border-radius: var(--pf-radius-sm);
+  cursor: pointer;
+}
+
+.pf-cover-option img,
+.pf-cover-option video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.pf-cover-option[aria-pressed='true'] {
+  border-color: var(--color-purple-600);
+}
+
+.pf-cover-option:focus-visible {
+  outline: 2px solid var(--color-purple-600);
+  outline-offset: 2px;
+}
+
+/* One item at full size is not a reading layout: it wants the viewport, not the sheet's
+   measure. Without this the viewer inherited the 64rem cap meant for the description and
+   a wide frame rendered at a third of the screen. */
+.pf-project-view--item {
+  width: auto;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: visible;
 }

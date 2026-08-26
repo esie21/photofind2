@@ -55,11 +55,34 @@ interface PortfolioEntry {
 
 type PortfolioMeta = Record<string, PortfolioEntry>;
 
+const MAX_PROJECTS = 20;
+const MAX_PROJECT_DESCRIPTION = 600;
+const MAX_PROJECT_LOCATION = 120;
+
+/**
+ * Per-project metadata, keyed by album name. See users.portfolio_albums.
+ *
+ * Everything here is the provider's to edit, unlike PortfolioEntry, which is half
+ * file-derived. `cover` is a stored path that must be a member of this album;
+ * `order` positions the project on the public grid.
+ */
+interface PortfolioAlbum {
+  description?: string;
+  category?: string;
+  location?: string;
+  /** ISO date (YYYY-MM-DD) the work was done. */
+  done_on?: string;
+  cover?: string;
+  order?: number;
+}
+
+type PortfolioAlbums = Record<string, PortfolioAlbum>;
+
 // Every SELECT that returns a user to the owner or an admin. Kept in one place because
 // there are five of them, and a column added to only four is how a field ends up
 // mysteriously undefined on exactly one screen.
 const USER_COLUMNS =
-  'id, email, name, role, profile_image, portfolio_images, portfolio_meta, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents';
+  'id, email, name, role, profile_image, portfolio_images, portfolio_meta, portfolio_albums, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents';
 
 // Stored image paths are relative to the uploads root ("users/<id>/avatar/x.png").
 // Clients that post back a *display* URL instead ("/uploads/users/...") used to have it
@@ -190,7 +213,7 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
-    const { name, bio, years_experience, location, category, title, profile_image, portfolio_images, portfolio_meta } = req.body;
+    const { name, bio, years_experience, location, category, title, profile_image, portfolio_images, portfolio_meta, portfolio_albums } = req.body;
 
     // Validate before touching the database. Without this, values that simply don't fit
     // the column (a name over 100 chars, a location over 255, a years_experience outside
@@ -278,20 +301,105 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
       }
     }
 
+    // Project metadata arrives as an album name -> { description, category, ... } map.
+    // Validated entry by entry for the same reason portfolio_meta is: it lands in a JSONB
+    // column that both the dashboard and the public profile render straight out.
+    let incomingAlbums: PortfolioAlbums | undefined;
+    if (portfolio_albums !== undefined && portfolio_albums !== null) {
+      if (typeof portfolio_albums !== 'object' || Array.isArray(portfolio_albums)) {
+        return res.status(400).json({ error: 'portfolio_albums must be an object' });
+      }
+      const albumEntries = Object.entries(portfolio_albums as Record<string, any>);
+      if (albumEntries.length > MAX_PROJECTS) {
+        return res.status(400).json({ error: `You can describe at most ${MAX_PROJECTS} projects` });
+      }
+      incomingAlbums = {};
+      for (const [rawName, value] of albumEntries) {
+        const name = String(rawName ?? '').trim();
+        if (!name) continue;
+        if (name.length > MAX_ALBUM_LENGTH) {
+          return res.status(400).json({ error: `Project names must be ${MAX_ALBUM_LENGTH} characters or fewer` });
+        }
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return res.status(400).json({ error: 'Each portfolio_albums entry must be an object' });
+        }
+
+        const description = value.description == null ? '' : String(value.description).trim();
+        if (description.length > MAX_PROJECT_DESCRIPTION) {
+          return res.status(400).json({ error: `Project descriptions must be ${MAX_PROJECT_DESCRIPTION} characters or fewer` });
+        }
+
+        const location = value.location == null ? '' : String(value.location).trim();
+        if (location.length > MAX_PROJECT_LOCATION) {
+          return res.status(400).json({ error: `Project locations must be ${MAX_PROJECT_LOCATION} characters or fewer` });
+        }
+
+        // Same allowlist as the profile's own category, and for the same reason: the
+        // public grid filters on exact string equality, so a value outside the picker
+        // would make the project unfilterable rather than erroring anywhere visible.
+        const category = value.category == null ? '' : String(value.category).trim();
+        if (category && !CATEGORY_OPTIONS.includes(category)) {
+          return res.status(400).json({ error: 'Invalid project category' });
+        }
+
+        // A date is a credibility signal, so it has to be a real one. A future date on
+        // finished work is either a typo or a claim about work that hasn't happened.
+        let doneOn = '';
+        if (value.done_on != null && String(value.done_on).trim() !== '') {
+          doneOn = String(value.done_on).trim();
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(doneOn)) {
+            return res.status(400).json({ error: 'Project dates must look like YYYY-MM-DD' });
+          }
+          const parsed = new Date(`${doneOn}T00:00:00Z`);
+          if (isNaN(parsed.getTime())) {
+            return res.status(400).json({ error: 'That project date is not a real date' });
+          }
+          // One full day of slack, not "end of today in UTC".
+          //
+          // done_on is a plain calendar date with no timezone, and the date picker offers
+          // the provider's *local* today. Anywhere ahead of UTC that is a day ahead of the
+          // UTC date for part of every day - in Manila (UTC+8) between midnight and 8am,
+          // local today is tomorrow in UTC - so an end-of-UTC-today ceiling rejected a
+          // date the picker had just offered, with "cannot be in the future" for a job
+          // finished yesterday. The furthest-ahead zone is UTC+14, so 24 hours covers
+          // every one of them and still blocks a date genuinely days out.
+          if (parsed.getTime() > Date.now() + 24 * 60 * 60 * 1000) {
+            return res.status(400).json({ error: 'A project date cannot be in the future' });
+          }
+        }
+
+        const order = Number.isFinite(Number(value.order)) ? Math.trunc(Number(value.order)) : undefined;
+        const cover = value.cover == null ? '' : normaliseStoredPath(value.cover);
+
+        const entry: PortfolioAlbum = {
+          ...(description ? { description } : {}),
+          ...(category ? { category } : {}),
+          ...(location ? { location } : {}),
+          ...(doneOn ? { done_on: doneOn } : {}),
+          ...(cover ? { cover } : {}),
+          ...(order !== undefined ? { order } : {}),
+        };
+        // An entry with nothing in it is noise - the album still renders from its images.
+        if (Object.keys(entry).length > 0) incomingAlbums[name] = entry;
+      }
+    }
+
     // Read the current portfolio up front. It is needed for knowing which files are
     // about to become orphans, for keeping metadata in step with the items that still
     // exist, and for carrying poster frames through - all before the UPDATE is built.
     let droppedImages: string[] = [];
     let droppedPosters: string[] = [];
     let metaToWrite: PortfolioMeta | undefined;
+    let albumsToWrite: PortfolioAlbums | undefined;
 
-    if (Array.isArray(portfolio_images) || incomingMeta !== undefined) {
+    if (Array.isArray(portfolio_images) || incomingMeta !== undefined || incomingAlbums !== undefined) {
       const before = await pool.query(
-        'SELECT portfolio_images, portfolio_meta FROM users WHERE id = $1',
+        'SELECT portfolio_images, portfolio_meta, portfolio_albums FROM users WHERE id = $1',
         [userId]
       );
       const previousImages: string[] = before.rows[0]?.portfolio_images || [];
       const previousMeta: PortfolioMeta = before.rows[0]?.portfolio_meta || {};
+      const previousAlbums: PortfolioAlbums = before.rows[0]?.portfolio_albums || {};
 
       // Whether the client sent metadata or not, what gets stored is pruned to the items
       // that remain. Otherwise a caption for a deleted photo would sit in the column
@@ -321,6 +429,39 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
           ...(held.width && held.height ? { width: held.width, height: held.height } : {}),
         };
         if (Object.keys(entry).length > 0) metaToWrite[path] = entry;
+      }
+
+      // Prune projects against the images that actually survived, the same way metadata
+      // above is pruned against portfolio_images. Two separate things can go stale here:
+      //
+      //  - A project whose last image was deleted. Left alone it would sit in the column
+      //    forever and spring back into the grid, empty, if that album name were reused.
+      //  - A cover pointing at an image that was deleted or moved to another project.
+      //    The grid would render a broken tile, so it falls back to "no cover set" and
+      //    the helper picks the project's first image instead.
+      //
+      // Computed from metaToWrite, not from the incoming metadata, because that is the
+      // arrangement actually about to be stored.
+      {
+        const albumSource: PortfolioAlbums = incomingAlbums ?? previousAlbums;
+        const membersByAlbum = new Map<string, Set<string>>();
+        for (const [path, entry] of Object.entries(metaToWrite)) {
+          const album = (entry.album || '').trim();
+          if (!album) continue;
+          if (!membersByAlbum.has(album)) membersByAlbum.set(album, new Set());
+          membersByAlbum.get(album)!.add(path);
+        }
+
+        albumsToWrite = {};
+        for (const [name, entry] of Object.entries(albumSource)) {
+          const members = membersByAlbum.get(name);
+          if (!members || members.size === 0) continue;
+
+          const cover = entry.cover ? normaliseStoredPath(entry.cover) : '';
+          const { cover: _discarded, ...rest } = entry;
+          const kept: PortfolioAlbum = cover && members.has(cover) ? { ...rest, cover } : rest;
+          if (Object.keys(kept).length > 0) albumsToWrite[name] = kept;
+        }
       }
 
       if (Array.isArray(portfolio_images)) {
@@ -373,6 +514,10 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
     if (metaToWrite !== undefined) {
       updates.push(`portfolio_meta = $${idx++}`);
       values.push(JSON.stringify(metaToWrite));
+    }
+    if (albumsToWrite !== undefined) {
+      updates.push(`portfolio_albums = $${idx++}`);
+      values.push(JSON.stringify(albumsToWrite));
     }
     if (category !== undefined) {
       updates.push(`category = $${idx++}`);
