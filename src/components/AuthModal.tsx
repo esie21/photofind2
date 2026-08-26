@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useModal } from '../hooks/useModal';
 import { X, Mail, Loader, AlertCircle, Eye, EyeOff, ArrowLeft, Check, Camera, User } from 'lucide-react';
 import { GoogleLogin, CredentialResponse } from '@react-oauth/google';
@@ -96,6 +96,13 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [showTermsPreview, setShowTermsPreview] = useState(false);
 
+  // Google renders its button into an iframe that it sizes in fixed pixels from the
+  // `width` we hand it, so CSS can't make it fluid: the hard-coded 360 it used to get
+  // was wider than the form column on any phone and pushed the sheet sideways. Measure
+  // the slot instead and clamp to the 200-400px Google itself accepts.
+  const googleSlotRef = useRef<HTMLDivElement | null>(null);
+  const [googleButtonWidth, setGoogleButtonWidth] = useState(320);
+
   // The terms preview registers separately so Escape closes it without also closing
   // the sign-up form underneath, and so the page stays locked while either is open.
   const { overlayProps, cardProps } = useModal(onClose, {
@@ -122,6 +129,27 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
     setGoogleProfile(null);
     setAgreedToTerms(false);
   }, [mode]);
+
+  useEffect(() => {
+    const slot = googleSlotRef.current;
+    if (!slot) return;
+
+    const measure = () => {
+      const next = Math.round(Math.min(400, Math.max(200, slot.clientWidth)));
+      setGoogleButtonWidth(prev => (prev === next ? prev : next));
+    };
+
+    measure();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure);
+      return () => window.removeEventListener('resize', measure);
+    }
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(slot);
+    return () => observer.disconnect();
+  }, [authStep, googleClientId]);
 
   const passwordStrength = getPasswordStrength(password);
 
@@ -318,27 +346,35 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
   return (
     <div className="modal-overlay" {...overlayProps}>
       <div className="modal-card modal-card--md" {...cardProps}>
-        <div className="modal-header bg-white border-b border-gray-200 p-6 flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="modal-header auth-modal-header bg-white border-b border-gray-200 flex items-center justify-between">
+          <div className="flex items-center gap-2 min-w-0">
             {authStep === 'role' && (
               <button
                 onClick={handleBackToForm}
-                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                className="auth-modal-icon-btn p-2 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
                 title="Go back"
+                aria-label="Go back"
               >
                 <ArrowLeft className="w-5 h-5 text-gray-500" />
               </button>
             )}
-            <h2 className="text-gray-900">
+            <h2 className="auth-modal-title text-gray-900">
               {mode === 'login' ? 'Welcome Back' : authStep === 'role' ? 'Choose Your Role' : 'Create Your Account'}
             </h2>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
+          <button
+            onClick={onClose}
+            className="auth-modal-icon-btn p-2 hover:bg-gray-100 rounded-lg flex-shrink-0"
+            aria-label="Close"
+          >
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 
-        <div className="p-6">
+        {/* .modal-body, not a bare padded div: .modal-card is `overflow: hidden` with a
+            max-height, so without it the tail of the sign-up form - Continue included -
+            was clipped off a short viewport with no way to scroll to it. */}
+        <div className="modal-body auth-modal-body">
           {authStep === 'method' ? (
             <>
               <p className="text-gray-600 mb-6">
@@ -493,7 +529,7 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
                         {fieldErrors.password}
                       </p>
                     )}
-                    <div className="mt-2 space-y-1">
+                    <div className="mt-2 auth-password-reqs">
                       <p className={`text-xs flex items-center gap-1 ${password.length >= 8 ? 'text-green-600' : 'text-gray-500'}`}>
                         {password.length >= 8 ? <Check className="w-3 h-3" /> : <span className="w-3 h-3 rounded-full border border-gray-300 inline-block" />}
                         At least 8 characters
@@ -594,13 +630,13 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
               {/* Social Options */}
               <div className="space-y-3">
                 {googleClientId ? (
-                  <div className="flex justify-center">
+                  <div ref={googleSlotRef} className="auth-google-slot">
                     <GoogleLogin
                       onSuccess={handleGoogleSuccess}
                       onError={() => setError('Google sign-in was cancelled or failed')}
                       theme="outline"
                       size="large"
-                      width={360}
+                      width={googleButtonWidth}
                       text={mode === 'login' ? 'signin_with' : 'signup_with'}
                       shape="rectangular"
                     />
@@ -673,17 +709,17 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
                 <button
                   onClick={() => handleRoleSelect('client')}
                   disabled={loading || !agreedToTerms}
-                  className={`w-full p-6 border-2 rounded-2xl transition-all text-left disabled:opacity-50 ${
+                  className={`w-full auth-role-card border-2 rounded-2xl transition-all text-left disabled:opacity-50 ${
                     selectedRole === 'client'
                       ? 'border-purple-500 bg-purple-50'
                       : 'border-gray-200 hover:border-purple-500 hover:bg-purple-50'
                   }`}
                 >
-                  <div className="flex items-start gap-4">
-                    <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center flex-shrink-0">
+                  <div className="flex items-start auth-role-card-media">
+                    <div className="auth-role-icon bg-purple-100 rounded-xl flex items-center justify-center flex-shrink-0">
                       <User className="w-6 h-6 text-purple-600" />
                     </div>
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                       <h3 className="text-gray-900 mb-1 font-medium">I'm a Client</h3>
                       <p className="text-sm text-gray-600">
                         Looking to hire creative professionals for my projects
@@ -698,17 +734,17 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
                 <button
                   onClick={() => handleRoleSelect('provider')}
                   disabled={loading || !agreedToTerms}
-                  className={`w-full p-6 border-2 rounded-2xl transition-all text-left disabled:opacity-50 ${
+                  className={`w-full auth-role-card border-2 rounded-2xl transition-all text-left disabled:opacity-50 ${
                     selectedRole === 'provider'
                       ? 'border-pink-500 bg-pink-50'
                       : 'border-gray-200 hover:border-pink-500 hover:bg-pink-50'
                   }`}
                 >
-                  <div className="flex items-start gap-4">
-                    <div className="w-12 h-12 bg-pink-100 rounded-xl flex items-center justify-center flex-shrink-0">
+                  <div className="flex items-start auth-role-card-media">
+                    <div className="auth-role-icon bg-pink-100 rounded-xl flex items-center justify-center flex-shrink-0">
                       <Camera className="w-6 h-6 text-pink-600" />
                     </div>
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                       <h3 className="text-gray-900 mb-1 font-medium">I'm a Service Provider</h3>
                       <p className="text-sm text-gray-600">
                         I want to offer my creative services and grow my business

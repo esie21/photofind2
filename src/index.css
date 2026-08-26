@@ -2465,20 +2465,46 @@ html {
   }
 }
 
+/* Below 40rem .profile-chip-name is hidden, which left the chip a lopsided pill: 6px
+   of padding to the left of the avatar and 14px of empty grey to the right of nothing,
+   and a 44px-tall target only 52px wide. Square it into a proper button with the avatar
+   centred; the horizontal padding comes back with the name. */
 .profile-chip {
   background-color: #ebebeb;
-  padding: 6px 14px 6px 6px;
+  padding: 6px;
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
 }
 
+/* The name is `whitespace-nowrap` with nothing bounding it, inside a fixed h-16 header
+   whose two halves have no min-width: 0. A long display name therefore grew the chip
+   until it pushed the nav out of the row rather than truncating. Cap and ellipsise it,
+   at a width that opens up once the viewport can afford it. */
 .profile-chip-name {
   display: none;
   font-weight: 600;
   color: #1f2937;
+  min-width: 0;
+  max-width: 8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @media (width >= 40rem) {
+  .profile-chip {
+    padding: 6px 14px 6px 6px;
+    min-width: 0;
+  }
+
   .profile-chip-name {
-    display: inline;
+    display: block;
+  }
+}
+
+@media (width >= 64rem) {
+  .profile-chip-name {
+    max-width: 12rem;
   }
 }
 
@@ -2831,6 +2857,139 @@ html {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ============================================================
+   Auth modal (sign in / create account)
+
+   The sign-up form is the tallest content of any modal in the app - email,
+   name, password, strength meter, four requirement rows, confirm password,
+   Continue, divider, Google - so it is the one that actually hits the
+   .modal-card height cap. Its content wrapper was a plain `p-6` div rather
+   than .modal-body, and .modal-card is `overflow: hidden`, so everything past
+   the cap was clipped with nothing to scroll: on a short viewport (a phone in
+   landscape, or a portrait phone once the keyboard is up) the Continue button
+   was simply unreachable. The class swap in the component fixes that; the
+   rules below are the rest of the phone pass.
+
+   Hand-written for the reason spelled out over .modal-overlay: index.css is a
+   prebuilt Tailwind snapshot with no build step, and none of the `sm:` padding
+   or grid variants this needs were ever emitted, so writing them as utilities
+   would produce markup that silently styles nothing.
+   ============================================================ */
+
+/* Padding scales down with the sheet. At 1.5rem a side, a 360px phone spent
+   48px of its width on padding alone. */
+.auth-modal-header {
+  padding: 0.875rem 1rem;
+  gap: 0.5rem;
+}
+
+.auth-modal-body {
+  padding: 1.25rem 1rem;
+}
+
+/* Long enough to collide with the close button on a narrow sheet ("Create Your
+   Account" at 20px), so it steps down and is allowed to wrap rather than push
+   the button off the edge. */
+.auth-modal-title {
+  font-size: 1.125rem;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+@media (width >= 40rem) {
+  .auth-modal-header {
+    padding: 1.5rem;
+    gap: 0.75rem;
+  }
+
+  .auth-modal-body {
+    padding: 1.5rem;
+  }
+
+  .auth-modal-title {
+    font-size: 1.25rem;
+    line-height: 1.5;
+  }
+}
+
+/* Close and back were 36px boxes (p-2 around a 20px icon) - under the 44px
+   minimum for a comfortable touch target, and they sit in the corner of the
+   sheet where a mis-tap either dismisses the form or loses a step. Pointer
+   devices keep the tighter original spacing. */
+@media (pointer: coarse) {
+  .auth-modal-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+}
+
+/* The four password rules stacked are ~90px of vertical space in the middle of
+   the form. Wrapping instead of stacking pairs them up whenever two fit on a
+   line and falls back to one per line when they don't, so it never overflows
+   at any width - which a fixed two-column grid would at 320px. */
+.auth-password-reqs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+}
+
+.auth-password-reqs > p {
+  margin: 0;
+}
+
+/* Role cards: 1.5rem of padding plus a 48px icon plus a 1rem gap left about
+   150px for the description on a small phone, which broke it onto four lines. */
+.auth-role-card {
+  padding: 1rem;
+}
+
+.auth-role-card-media {
+  gap: 0.75rem;
+}
+
+.auth-role-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
+@media (width >= 40rem) {
+  .auth-role-card {
+    padding: 1.5rem;
+  }
+
+  .auth-role-card-media {
+    gap: 1rem;
+  }
+
+  .auth-role-icon {
+    width: 3rem;
+    height: 3rem;
+  }
+}
+
+/* The Google button is an iframe Google sizes in fixed pixels from the `width`
+   we pass, so it cannot be made fluid with CSS - the component measures this
+   box instead and passes the result. This just guarantees that a stale
+   measurement (first paint, or a resize the observer hasn't reported yet) is
+   clipped to the sheet rather than pushing it sideways. */
+.auth-google-slot {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* Bottom of the last control to the home bar, on the step that has no footer. */
+@media (width < 40rem) {
+  .auth-modal-body {
+    padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+  }
 }
 
 /* ==========================================================================
