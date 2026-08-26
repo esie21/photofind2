@@ -6,6 +6,7 @@ import { notificationService } from '../services/notificationService';
 import { settlePaymentSuccess } from '../services/walletService';
 import { paymongoRequest, PayMongoResponse } from '../services/paymongoService';
 import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
+import { isPriceAcceptable } from '../config/pricingConfig';
 
 const router = express.Router();
 
@@ -66,6 +67,19 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
     // closes an existing hole: without a status check a client could pay for a
     // booking that was already cancelled or rejected, putting money into escrow
     // for work nobody is going to do.
+    // A cash booking has no online payment to make. Without this the client could pay
+    // by card here AND hand over cash on the day, and the provider - who has no way of
+    // knowing an online payment landed for a booking marked 'cash' - would be paid
+    // twice for one shoot. Switching method after the fact is deliberately not
+    // supported: it would need the provider's agreement, not just the client's.
+    if (String(booking.payment_method || 'online') === 'cash') {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'This booking is set to be paid in cash on the day, so there is nothing to pay online.',
+        payment_method: 'cash',
+      });
+    }
+
     const bookingStatus = String(booking.status);
     if (!['accepted', 'confirmed'].includes(bookingStatus)) {
       await dbClient.query('ROLLBACK');
@@ -88,16 +102,33 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
       });
     }
 
-    // Validate payment amount against service price (prevent underpayment)
+    // Re-check the stored price against the floor it was judged against when the
+    // booking was created.
+    //
+    // This endpoint takes no client-supplied price - booking_id is the only input - so
+    // this is defence in depth against a total_price that reached the row by some route
+    // other than POST /bookings' validation. It deliberately compares against the
+    // stored min_price_at_booking rather than re-deriving a minimum from the service
+    // as it stands now: an earlier version compared against the flat, unscaled
+    // services.price, which rejected every hourly booking legitimately shorter than one
+    // full unit, and any re-derivation would also start rejecting honest bookings the
+    // moment a provider edited their rates. Rows created before that column existed
+    // carry NULL and are covered by the > 0 check alone.
     const bookingPrice = parseFloat(booking.total_price || 0);
-    const servicePrice = parseFloat(booking.service_price || 0);
-    if (servicePrice > 0 && bookingPrice < servicePrice) {
+    if (bookingPrice <= 0) {
       await dbClient.query('ROLLBACK');
-      return res.status(400).json({
-        error: 'Payment amount is less than the service price',
-        expected: servicePrice,
-        received: bookingPrice
-      });
+      return res.status(400).json({ error: 'This booking has no valid price to charge.' });
+    }
+
+    const minAtBooking = booking.min_price_at_booking === null || booking.min_price_at_booking === undefined
+      ? null
+      : parseFloat(booking.min_price_at_booking);
+    if (minAtBooking !== null && !isNaN(minAtBooking) && !isPriceAcceptable(bookingPrice, minAtBooking)) {
+      await dbClient.query('ROLLBACK');
+      console.error(
+        `Refusing payment intent for booking ${booking_id}: stored total_price ${bookingPrice} is below its own recorded minimum ${minAtBooking}`
+      );
+      return res.status(400).json({ error: 'This booking has no valid price to charge.' });
     }
 
     // A booking can accumulate several payment rows - a new one is inserted below

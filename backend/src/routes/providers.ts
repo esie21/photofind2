@@ -4,6 +4,36 @@ import path from 'path';
 
 const router = Router();
 
+/**
+ * Whether `services.provider_id` is a foreign key to a separate `providers` table's
+ * id, rather than straight to `users.id` - true on at least one live deployment
+ * (discovered here the hard way: every `services.provider_id = u.id` comparison
+ * silently matched nothing there, so every card's featured service, price, and
+ * service-text search were quietly broken). Callers should alias the providers
+ * table `prv` and users `u` to match providerIdExpr/providersJoin.
+ */
+async function getServicesProviderJoin(): Promise<{ providerIdExpr: string; providersJoin: string; referencesProvidersTable: boolean }> {
+  const servicesFkRes = await pool.query(`
+    SELECT ccu.table_name AS foreign_table_name
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.key_column_usage AS kcu
+      ON tc.constraint_name = kcu.constraint_name
+    JOIN information_schema.constraint_column_usage AS ccu
+      ON ccu.constraint_name = tc.constraint_name
+    WHERE tc.table_name = 'services'
+      AND tc.constraint_type = 'FOREIGN KEY'
+      AND kcu.column_name = 'provider_id'
+    LIMIT 1
+  `);
+  const servicesRefTable = servicesFkRes.rows[0]?.foreign_table_name;
+  const servicesReferenceProvidersTable = !!servicesRefTable && servicesRefTable !== 'users';
+  return {
+    providerIdExpr: servicesReferenceProvidersTable ? 'prv.id' : 'u.id',
+    providersJoin: servicesReferenceProvidersTable ? 'LEFT JOIN providers prv ON prv.user_id = u.id' : '',
+    referencesProvidersTable: servicesReferenceProvidersTable,
+  };
+}
+
 // Public endpoint: Get providers
 router.get('/', async (req: Request, res: Response) => {
   try {
@@ -30,29 +60,7 @@ router.get('/', async (req: Request, res: Response) => {
     const hasDescription = existingCols.includes('description');
     const hasCreatedAt = existingCols.includes('created_at');
 
-    // services.provider_id references the providers table's own id on this
-    // deployment, not users.id directly - every `services.provider_id = u.id`
-    // comparison below used to silently match nothing, which is why every card's
-    // featured service, price, and service-text search were all quietly broken (no
-    // provider ever had a "featured_service", regardless of query or sort).
-    const servicesFkRes = await pool.query(`
-      SELECT ccu.table_name AS foreign_table_name
-      FROM information_schema.table_constraints AS tc
-      JOIN information_schema.key_column_usage AS kcu
-        ON tc.constraint_name = kcu.constraint_name
-      JOIN information_schema.constraint_column_usage AS ccu
-        ON ccu.constraint_name = tc.constraint_name
-      WHERE tc.table_name = 'services'
-        AND tc.constraint_type = 'FOREIGN KEY'
-        AND kcu.column_name = 'provider_id'
-      LIMIT 1
-    `);
-    const servicesRefTable = servicesFkRes.rows[0]?.foreign_table_name;
-    const servicesReferenceProvidersTable = !!servicesRefTable && servicesRefTable !== 'users';
-    // The id to compare services.provider_id against for "this user's own services" -
-    // either the user's own id, or their row in the separate providers table.
-    const providerIdExpr = servicesReferenceProvidersTable ? 'prv.id' : 'u.id';
-    const providersJoin = servicesReferenceProvidersTable ? 'LEFT JOIN providers prv ON prv.user_id = u.id' : '';
+    const { providerIdExpr, providersJoin } = await getServicesProviderJoin();
 
     const values: any[] = [];
     const whereClauses: string[] = [];
@@ -193,43 +201,42 @@ router.get('/', async (req: Request, res: Response) => {
 // Get category statistics (count of providers per category)
 router.get('/categories/stats', async (req: Request, res: Response) => {
   try {
-    // Count providers by their category field in users table
-    const userCategoryResult = await pool.query(`
-      SELECT category, COUNT(*) as count
-      FROM users
-      WHERE role = 'provider' AND category IS NOT NULL AND category != ''
+    // A provider counts toward a category if EITHER their primary category matches
+    // OR they offer a service tagged with it - the same OR that GET / filters by
+    // (line ~79). This used to run those two as separate GROUP BYs and take
+    // Math.max(userCount, serviceCount) per category, which undercounts whenever
+    // the two provider sets aren't a subset of one another: e.g. 3 providers whose
+    // primary category is "Videography" plus 2 *other* providers (different
+    // primary category) who each added one Videography-tagged service should read
+    // 5, but max(3, 2) read 3. Folding both signals into one set of (provider_id,
+    // category) pairs before counting distinct providers gives the true union -
+    // the same number the category filter actually returns.
+    //
+    // The service-side branch has to resolve back to the *user*'s id the same way
+    // GET / does - on the deployment where services.provider_id is a FK to a
+    // separate providers table (not users.id directly, see getServicesProviderJoin),
+    // joining straight to users on s.provider_id silently matches nothing and drops
+    // every service-only category from the count, reproducing the exact undercount
+    // this query exists to fix.
+    const { referencesProvidersTable } = await getServicesProviderJoin();
+    const serviceCategoryJoin = referencesProvidersTable
+      ? 'JOIN providers prv ON prv.id = s.provider_id JOIN users u ON u.id = prv.user_id'
+      : 'JOIN users u ON u.id = s.provider_id';
+    const categoryResult = await pool.query(`
+      SELECT category, COUNT(DISTINCT provider_id) as count
+      FROM (
+        SELECT id AS provider_id, category
+        FROM users
+        WHERE role = 'provider' AND category IS NOT NULL AND category != ''
+        UNION
+        SELECT u.id AS provider_id, s.category
+        FROM services s
+        ${serviceCategoryJoin}
+        WHERE u.role = 'provider' AND s.category IS NOT NULL AND s.category != ''
+      ) provider_categories
       GROUP BY category
       ORDER BY count DESC
     `);
-
-    // Also count by service categories for a more complete picture
-    const serviceCategoryResult = await pool.query(`
-      SELECT s.category, COUNT(DISTINCT s.provider_id) as count
-      FROM services s
-      JOIN users u ON u.id = s.provider_id
-      WHERE u.role = 'provider' AND s.category IS NOT NULL AND s.category != ''
-      GROUP BY s.category
-      ORDER BY count DESC
-    `);
-
-    // Merge the counts (prioritize user category, add service categories that aren't in user categories)
-    const categoryMap = new Map<string, number>();
-
-    // Add user categories
-    for (const row of userCategoryResult.rows) {
-      categoryMap.set(row.category, parseInt(row.count));
-    }
-
-    // Add service categories (don't override existing)
-    for (const row of serviceCategoryResult.rows) {
-      if (!categoryMap.has(row.category)) {
-        categoryMap.set(row.category, parseInt(row.count));
-      } else {
-        // Take the max of user count or service count
-        const existing = categoryMap.get(row.category) || 0;
-        categoryMap.set(row.category, Math.max(existing, parseInt(row.count)));
-      }
-    }
 
     // Get total provider count
     const totalResult = await pool.query(`
@@ -237,10 +244,10 @@ router.get('/categories/stats', async (req: Request, res: Response) => {
     `);
     const totalProviders = parseInt(totalResult.rows[0]?.total || '0');
 
-    // Convert to array and sort by count
-    const categories = Array.from(categoryMap.entries())
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count);
+    const categories = categoryResult.rows.map((row: any) => ({
+      name: row.category,
+      count: parseInt(row.count),
+    }));
 
     res.json({
       data: categories,
@@ -280,7 +287,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     // Deliberately narrower than the row we hold internally: this is unauthenticated, so
     // no email, verification documents or anything else a client has no business seeing.
     const result = await pool.query(
-      `SELECT id, name, profile_image, portfolio_images, portfolio_meta, bio, years_experience,
+      `SELECT id, name, profile_image, portfolio_images, portfolio_meta, portfolio_albums, bio, years_experience,
               location, category, title, rating, review_count, is_verified
        FROM users
        WHERE id = $1 AND role = 'provider'`,
@@ -309,6 +316,8 @@ router.get('/:id', async (req: Request, res: Response) => {
       // Keyed by the *stored* path, which is what portfolio_images holds before
       // absolutise() runs - the client resolves both through the same helper.
       portfolio_meta: r.portfolio_meta || {},
+      // Keyed by album name, not by path - see users.portfolio_albums.
+      portfolio_albums: r.portfolio_albums || {},
       bio: r.bio || '',
       years_experience: r.years_experience || 0,
       location: r.location || '',

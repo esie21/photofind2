@@ -4,6 +4,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { testConnection, initializeTables } from './config/database';
 import { pool } from './config/database';
+import { JWT_SECRET } from './config/authConfig';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
 import debugRoutes from './routes/debug';
@@ -137,8 +138,11 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/reviews', reviewsRoutes);
 app.use('/api/support', supportRoutes);
 
-// Register debug routes only in non-production
-if (process.env.NODE_ENV !== 'production') {
+// Register debug routes only when explicitly running in development. Opt-in, not
+// `!== 'production'`: these routes are unauthenticated and one of them rewrites any
+// account's password from its email alone, so an environment that never sets NODE_ENV
+// must not get them. See routes/debug.ts.
+if (process.env.NODE_ENV === 'development') {
   app.use('/api/debug', debugRoutes);
 }
 
@@ -278,7 +282,7 @@ io.use((socket: Socket, next: (err?: Error) => void) => {
   if (!token) return next(new Error('Unauthorized'));
 
   try {
-    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'your_secret_key');
+    const decoded: any = jwt.verify(token, JWT_SECRET);
     (socket.data as any).userId = String(decoded.userId);
     next();
   } catch (_e) {
@@ -295,6 +299,18 @@ io.on('connection', (socket: Socket) => {
   if (userId) {
     socket.join(`user:${userId}`);
     console.log(`User ${userId} connected and joined notification room`);
+  }
+
+  // Admins get a standing room for the support queue, so a new ticket or a reply on a
+  // ticket nobody has open shows up in the admin list live instead of only on the next
+  // filter change or page load.
+  if (userId) {
+    pool
+      .query('SELECT role FROM users WHERE id::text = $1', [userId])
+      .then((result) => {
+        if (result.rows[0]?.role === 'admin') socket.join('support:admin');
+      })
+      .catch((e) => console.error('Failed to check admin role for socket room:', e));
   }
 
   socket.on('chat:join', async (payload: any) => {
@@ -398,6 +414,10 @@ io.on('connection', (socket: Socket) => {
     const ticketId = String(payload?.ticketId || '');
     const isTyping = Boolean(payload?.isTyping);
     if (!ticketId) return;
+    // Every other support event checks access; this one broadcast to any room whose id
+    // the sender could name. Membership is the same guarantee - support:join is the only
+    // way into the room and it does check - and it costs no query on a per-keystroke event.
+    if (!socket.rooms.has(getSupportRoomName(ticketId))) return;
     socket.to(getSupportRoomName(ticketId)).emit('support:typing', {
       ticketId,
       userId,

@@ -3,8 +3,42 @@ import { MessageSquare, RefreshCw } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { ChatInterface } from './ChatInterface';
-import messageService, { Conversation } from '../api/services/messageService';
+import messageService, { ChatMessage, Conversation } from '../api/services/messageService';
 import { getUploadUrl } from '../api/config';
+
+const ATTACHMENT_LABELS: Record<string, string> = {
+  image: '📷 Photo',
+  video: '🎥 Video',
+  file: '📄 Document',
+};
+
+/**
+ * One line describing a conversation's most recent message.
+ *
+ * A message carrying only an attachment stores content NULL, so falling back on content
+ * alone described a photo or a video someone had just sent as "No messages yet" - the
+ * conversation looked empty while plainly sitting at the top of the list. The filename is
+ * the better label when it exists; the generic type is the fallback for older rows that
+ * never recorded one.
+ */
+function describeLastMessage(message?: ChatMessage | null): string {
+  if (!message) return 'No messages yet';
+
+  const content = message.content?.trim();
+  if (content) return content;
+
+  if (message.attachment_type) {
+    // For a document the filename is the informative part ("contract.pdf"); for a photo
+    // or video it is usually whatever the camera called it - "2637-161442811.mp4" says
+    // less than "Video" does - so those keep the generic label.
+    if (message.attachment_type === 'file' && message.attachment_name) {
+      return `📄 ${message.attachment_name}`;
+    }
+    return ATTACHMENT_LABELS[message.attachment_type] || '📎 Attachment';
+  }
+
+  return 'No messages yet';
+}
 
 export function MessagesPage() {
   const { user } = useAuth();
@@ -104,7 +138,7 @@ export function MessagesPage() {
                       <div className="flex-1 min-w-0">
                         <p className="text-gray-900 truncate">{other?.name || 'User'}</p>
                         <p className="text-sm text-gray-600 truncate">
-                          {conversation.last_message?.content || 'No messages yet'}
+                          {describeLastMessage(conversation.last_message)}
                         </p>
                       </div>
                       <p className="text-xs text-gray-500 whitespace-nowrap">

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { Upload, Calendar, PhilippinePeso, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle, ShieldCheck, FileText, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Upload, Calendar, PhilippinePeso, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle, ShieldCheck, FileText, X, ChevronLeft, ChevronRight, ChevronUp, ChevronDown } from 'lucide-react';
 import { CATEGORY_OPTIONS } from '../constants/categories';
+import { PLATFORM_COMMISSION_PERCENT } from '../constants/payment';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { PortfolioThumbnail, PortfolioPlayer } from './PortfolioMedia';
 import { useModal } from '../hooks/useModal';
@@ -15,7 +16,8 @@ import bookingService from '../api/services/bookingService';
 import availabilityService from '../api/services/availabilityService';
 import reviewService, { Review, ReviewStats } from '../api/services/reviewService';
 import { getUploadUrl, getStoredPath } from '../api/config';
-import type { PortfolioMeta } from '../api/services/authService';
+import type { PortfolioAlbumMeta, PortfolioAlbums, PortfolioMeta } from '../api/services/authService';
+import { groupPortfolio, describeProjectSize, type PortfolioProject } from '../utils/portfolio';
 import {
   IMAGE_MIME_TYPES,
   MEDIA_MIME_TYPES,
@@ -29,6 +31,8 @@ import { ChatInterface } from './ChatInterface';
 import { WalletDashboard } from './WalletDashboard';
 import { RescheduleModal } from './RescheduleModal';
 import { CompleteBookingModal } from './CompleteBookingModal';
+import { DisputeResponsePanel } from './DisputeResponsePanel';
+import { BookingDetailsModal } from './BookingDetailsModal';
 
 type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
 
@@ -47,10 +51,23 @@ const toPackage = (s: any) => ({
   hourly_rate: s.hourly_rate || (s.pricing_type === 'hourly' ? parseFloat(s.price) : null),
   package_price: s.package_price || (s.pricing_type === 'package' ? parseFloat(s.price) : null),
   duration_minutes: s.duration_minutes || null,
+  accepts_cash: s.accepts_cash === true,
   // Enable flags for UI
   enable_hourly: !!(s.hourly_rate || s.pricing_type === 'hourly' || s.pricing_type === 'both'),
   enable_package: !!(s.package_price || s.pricing_type === 'package' || s.pricing_type === 'both'),
 });
+
+/** Working copy of one project's details while its row is open for editing. */
+interface ProjectDraft {
+  name: string;
+  description: string;
+  category: string;
+  location: string;
+  /** ISO date (YYYY-MM-DD), or '' when not dated. */
+  doneOn: string;
+  /** Stored path of the chosen cover, or '' to fall back to the first item. */
+  cover: string;
+}
 
 interface ClientTrust {
   completed_count: number;
@@ -104,6 +121,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   }, [tabRequestId]);
   const [showChat, setShowChat] = useState(false);
   const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null);
+  const [detailsBooking, setDetailsBooking] = useState<any>(null);
   const { user, refreshUser, applyUser } = useAuth();
   const toast = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -139,6 +157,11 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   // Caption/album being edited in the image detail dialog.
   const [detailDraft, setDetailDraft] = useState<{ caption: string; album: string }>({ caption: '', album: '' });
+  // Which project's details are open for editing, by album name, plus the working copy.
+  const [editingProject, setEditingProject] = useState<string | null>(null);
+  const [projectDraft, setProjectDraft] = useState<ProjectDraft>({
+    name: '', description: '', category: '', location: '', doneOn: '', cover: '',
+  });
   const [packages, setPackages] = useState<any[]>([]);
   const [isLoadingPackages, setIsLoadingPackages] = useState(false);
   const [packagesError, setPackagesError] = useState<string | null>(null);
@@ -184,6 +207,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
     profile_image: u?.profile_image ?? '',
     portfolio_images: (u?.portfolio_images || []) as string[],
     portfolio_meta: (u?.portfolio_meta || {}) as PortfolioMeta,
+    portfolio_albums: (u?.portfolio_albums || {}) as PortfolioAlbums,
   });
 
   // These mirror the server's own rules (uploadService.MAX_FILE_SIZE, MAX_VIDEO_SIZE,
@@ -263,6 +287,13 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
       if (pkg.enable_package && !(Number(pkg.package_price) > 0)) {
         return `"${label}" needs a package price greater than zero.`;
       }
+      // A new service used to start pre-filled with 'Photography' and save that way
+      // if the picker was never touched, so a videographer's or makeup artist's first
+      // service silently landed under the wrong category - invisible to them and
+      // unfindable by clients filtering on their actual specialty.
+      if (!pkg.category || !String(pkg.category).trim()) {
+        return `"${label}" needs a category.`;
+      }
     }
     return null;
   };
@@ -293,7 +324,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
    * photo's caption from lingering in the column.
    */
   const persistPortfolio = async (
-    next: { images?: string[]; meta?: PortfolioMeta },
+    next: { images?: string[]; meta?: PortfolioMeta; albums?: PortfolioAlbums },
     success: { title: string; body: string }
   ) => {
     if (!user || portfolioBusy) return false;
@@ -308,6 +339,19 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
       if (keys.has(getStoredPath(path))) meta[getStoredPath(path)] = value;
     }
 
+    // Same again for project metadata: a project whose last image just went is gone, and
+    // holding its description locally would have it flicker back into the panel until the
+    // next refresh. The server prunes identically - this only keeps the form honest in
+    // the meantime.
+    const sourceAlbums: PortfolioAlbums = next.albums ?? (formState.portfolio_albums || {});
+    const liveAlbums = new Set(
+      Object.values(meta).map((entry) => (entry.album || '').trim()).filter(Boolean)
+    );
+    const albums: PortfolioAlbums = {};
+    for (const [name, value] of Object.entries(sourceAlbums)) {
+      if (liveAlbums.has(name)) albums[name] = value;
+    }
+
     setPortfolioBusy(true);
     try {
       // The PUT returns the full updated row, so the signed-in user is refreshed from
@@ -316,11 +360,13 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
       const updated = await userService.updateUser(user.id, {
         portfolio_images: images,
         portfolio_meta: meta,
+        portfolio_albums: albums,
       });
       setFormState((s: any) => ({
         ...s,
         portfolio_images: (updated.portfolio_images || images) as string[],
         portfolio_meta: (updated.portfolio_meta || meta) as PortfolioMeta,
+        portfolio_albums: (updated.portfolio_albums || albums) as PortfolioAlbums,
       }));
       applyUser(updated);
       toast.success(success.title, success.body);
@@ -442,6 +488,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
         ...s,
         portfolio_images: (fresh.portfolio_images || []) as string[],
         portfolio_meta: (fresh.portfolio_meta || {}) as PortfolioMeta,
+        portfolio_albums: (fresh.portfolio_albums || {}) as PortfolioAlbums,
       }));
       toast.success(
         'Added to your portfolio',
@@ -582,6 +629,35 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           reschedule_pending_approval: b.reschedule_pending_approval,
           rescheduled_by: b.rescheduled_by,
           client_trust: b.client_trust as ClientTrust | null,
+          // Everything below exists on the raw response (BookingsPage's mapping already
+          // reads all of it) but was dropped here, so BookingDetailsModal had nothing to
+          // render and the dispute banner below could never show the client's actual
+          // reason - dispute_reason was referenced but never populated.
+          service_description: b.service_description,
+          service_category: b.service_category,
+          service_duration_minutes: b.service_duration_minutes,
+          payment_due_at: b.payment_due_at,
+          payment_method: b.payment_method || 'online',
+          cash_confirmed_at: b.cash_confirmed_at,
+          created_at: b.created_at,
+          accepted_at: b.accepted_at,
+          rejected_at: b.rejected_at,
+          cancelled_at: b.cancelled_at,
+          completed_at: b.completed_at,
+          cancellation_reason: b.cancellation_reason,
+          dispute_reason: b.dispute_reason,
+          dispute_response: b.dispute_response,
+          dispute_response_at: b.dispute_response_at,
+          dispute_resolution: b.dispute_resolution,
+          dispute_resolved_at: b.dispute_resolved_at,
+          provider_completed_at: b.provider_completed_at,
+          client_confirmed_at: b.client_confirmed_at,
+          completion_notes: b.completion_notes,
+          rescheduled_at: b.rescheduled_at,
+          reschedule_reason: b.reschedule_reason,
+          reschedule_count: b.reschedule_count,
+          original_start_date: b.original_start_date,
+          original_end_date: b.original_end_date,
         };
       });
       setProviderBookings(mapped);
@@ -785,6 +861,94 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
     [portfolioMeta]
   );
 
+  const portfolioAlbums: PortfolioAlbums = formState.portfolio_albums || {};
+
+  // The same join the public grid uses, so what the provider arranges here is literally
+  // what a client sees - the two used to derive grouping separately and disagree about
+  // covers and un-grouped work.
+  const projects: PortfolioProject[] = useMemo(
+    () => groupPortfolio(portfolioImages, portfolioMeta, portfolioAlbums),
+    [portfolioImages, portfolioMeta, portfolioAlbums]
+  );
+
+  /**
+   * Saves one project's details.
+   *
+   * Renaming is the interesting case. The album name *is* the project's identity - it is
+   * the key in portfolio_albums and the value in every member image's meta.album - so a
+   * rename has to move both halves in a single write, or the details would detach from
+   * their images and the project would split into two: an empty one under the new name
+   * and a bare one under the old.
+   */
+  const saveProject = async (original: string, draft: ProjectDraft) => {
+    const name = draft.name.trim();
+    if (!name) {
+      toast.error('Name required', 'Give this project a name so clients know what it is.');
+      return;
+    }
+    if (name !== original && projects.some((p) => p.name === name)) {
+      toast.error('Name already used', `You already have a project called "${name}".`);
+      return;
+    }
+
+    const nextMeta: PortfolioMeta = {};
+    for (const [path, entry] of Object.entries(portfolioMeta)) {
+      nextMeta[path] =
+        (entry.album || '').trim() === original ? { ...entry, album: name } : entry;
+    }
+
+    const nextAlbums: PortfolioAlbums = {};
+    for (const [key, value] of Object.entries(portfolioAlbums)) {
+      if (key !== original) nextAlbums[key] = value;
+    }
+    const entry: PortfolioAlbumMeta = {
+      ...(draft.description.trim() ? { description: draft.description.trim() } : {}),
+      ...(draft.category ? { category: draft.category } : {}),
+      ...(draft.location.trim() ? { location: draft.location.trim() } : {}),
+      ...(draft.doneOn ? { done_on: draft.doneOn } : {}),
+      ...(draft.cover ? { cover: draft.cover } : {}),
+      ...(portfolioAlbums[original]?.order !== undefined
+        ? { order: portfolioAlbums[original].order }
+        : {}),
+    };
+    nextAlbums[name] = entry;
+
+    const ok = await persistPortfolio(
+      { meta: nextMeta, albums: nextAlbums },
+      { title: 'Project saved', body: `"${name}" is up to date on your profile.` }
+    );
+    if (ok) setEditingProject(null);
+  };
+
+  /**
+   * Moves a project up or down the public grid.
+   *
+   * Writes an explicit `order` on every project, not just the two being swapped. Order is
+   * optional in the data - projects without one fall back to the position of their first
+   * image - so setting it on a pair alone would rank those two against a fallback the
+   * provider can't see, and the result would look arbitrary.
+   */
+  const moveProject = async (from: number, to: number) => {
+    // Bounds are checked against the orderable list only. `projects` includes the
+    // un-grouped bucket, which has no entry to order and is pinned last regardless, so
+    // measuring against its length would admit an index one past the real end.
+    const ordered = projects.filter((p) => !p.isUngrouped).map((p) => p.name);
+    if (from < 0 || to < 0 || from >= ordered.length || to >= ordered.length) return;
+
+    const [moved] = ordered.splice(from, 1);
+    ordered.splice(to, 0, moved);
+
+    const nextAlbums: PortfolioAlbums = { ...portfolioAlbums };
+    ordered.forEach((name, index) => {
+      nextAlbums[name] = { ...(nextAlbums[name] || {}), order: index };
+    });
+
+    await persistPortfolio(
+      { albums: nextAlbums },
+      { title: 'Order saved', body: 'Your projects are in the new order.' }
+    );
+  };
+
   /** Moves an image within the working order. */
   const moveImage = (from: number, to: number) => {
     const list = [...displayOrder];
@@ -938,6 +1102,16 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                           </div>
                           <div className="text-right">
                             <div className="text-purple-600">₱{booking.amount}</div>
+                            {/* Whether this one is cash is a material fact *before*
+                                accepting, not after: the provider collects it themselves
+                                and is billed the commission out of their wallet. Nothing
+                                on this card said so, and this is the page they accept from. */}
+                            {booking.payment_method === 'cash' && (
+                              <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded-full">
+                                <PhilippinePeso className="w-3 h-3" />
+                                {booking.payment_status === 'paid' ? 'Cash received' : 'Cash on the day'}
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600 mb-3">
@@ -1168,6 +1342,10 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       placeholder="e.g., Vacation, Personal day..."
                       className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
                     />
+                    {/* This used to be a private note, so say plainly that it is not. */}
+                    <p className="text-xs text-gray-500 mt-1">
+                      Clients see this on the booking calendar, so keep it brief and public-friendly.
+                    </p>
                   </div>
 
                   <button
@@ -1287,10 +1465,24 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                   ))}
                 </div>
               ) : (() => {
-                const upcomingBookings = providerBookings.filter(b =>
-                  ['accepted', 'confirmed', 'pending'].includes(b.status) &&
-                  new Date(b.date) >= new Date()
+                // Compared against the start of today in Manila, using the raw start_date.
+                //
+                // This used to re-parse `b.date`, which is a formatted display string
+                // ("Tue, Aug 18, 2026"), and compare it to `new Date()`. Parsing it back
+                // yields midnight, so every booking scheduled for today dropped out of
+                // this list the moment the clock passed midnight - a 6:30am booking was
+                // hidden at 5:41am, hours before it started. Re-parsing a localised string
+                // is also fragile in its own right: if that format ever changes the result
+                // is Invalid Date and the comparison hides every booking instead.
+                const startOfTodayManila = new Date(
+                  `${new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' })}T00:00:00+08:00`
                 );
+                const upcomingBookings = providerBookings.filter(b => {
+                  if (!['accepted', 'confirmed', 'pending'].includes(b.status)) return false;
+                  const start = new Date(b.start_date || b.date);
+                  if (isNaN(start.getTime())) return false;
+                  return start >= startOfTodayManila;
+                });
 
                 if (upcomingBookings.length === 0) {
                   return (
@@ -1374,23 +1566,36 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                             try {
                               await Promise.all(
                                 packages.map(async (pkg) => {
-                                  // Determine pricing type based on enabled options
-                                  const pricingType = pkg.enable_hourly && pkg.enable_package ? 'both'
-                                    : pkg.enable_hourly ? 'hourly'
-                                      : 'package';
+                                  // Determine pricing type based on enabled options.
+                                  // Annotated rather than inferred: without it TS widens
+                                  // the ternary to `string`, which doesn't satisfy the
+                                  // union on CreateServiceData.pricing_type.
+                                  const pricingType: 'package' | 'hourly' | 'both' =
+                                    pkg.enable_hourly && pkg.enable_package ? 'both'
+                                      : pkg.enable_hourly ? 'hourly'
+                                        : 'package';
 
                                   // Use package_price as primary price for backward compatibility
                                   const primaryPrice = pkg.enable_package ? pkg.package_price : pkg.hourly_rate;
 
+                                  // null, not undefined, when a mode is off: updateService sends a
+                                  // partial update, and the backend only touches a column when the
+                                  // field is present at all - undefined would leave a stale rate from
+                                  // before the toggle was switched off sitting in the row, which
+                                  // would make the toggle look re-enabled the next time this loads.
                                   const serviceData = {
                                     title: pkg.title,
                                     description: pkg.description,
                                     price: primaryPrice || 0,
-                                    category: pkg.category || 'Photography',
+                                    // validatePackages already blocks Save until every
+                                    // package has an explicit category - no more
+                                    // silent 'Photography' fallback here.
+                                    category: pkg.category,
                                     pricing_type: pricingType,
-                                    hourly_rate: pkg.enable_hourly ? pkg.hourly_rate : undefined,
-                                    package_price: pkg.enable_package ? pkg.package_price : undefined,
-                                    duration_minutes: pkg.enable_package ? (pkg.duration_minutes || undefined) : undefined,
+                                    hourly_rate: pkg.enable_hourly ? pkg.hourly_rate : null,
+                                    package_price: pkg.enable_package ? pkg.package_price : null,
+                                    duration_minutes: pkg.enable_package ? (pkg.duration_minutes || null) : null,
+                                    accepts_cash: pkg.accepts_cash === true,
                                   };
 
                                   if (pkg.id) {
@@ -1944,6 +2149,210 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                 </div>
               )}
 
+              {/* Projects.
+                  The grid below is where files live; this is where they become a body of
+                  work a client can judge. Only rendered once something is grouped -
+                  before that the panel would be an empty box asking for work that has to
+                  be done in the grid first. */}
+              {projects.some((project) => !project.isUngrouped) && (
+                <div className="pf-editor-projects">
+                  <div className="pf-editor-projects__head">
+                    <h3 className="pf-editor-projects__title">Projects</h3>
+                    <p className="pf-editor-projects__hint">
+                      Clients browse your work one job at a time. A name, where and when it happened,
+                      and a line about the brief do more than extra photos.
+                    </p>
+                  </div>
+
+                  {projects.filter((project) => !project.isUngrouped).map((project, index, list) => {
+                    const isEditing = editingProject === project.name;
+                    const info = portfolioAlbums[project.name] || {};
+                    return (
+                      <div key={project.name} className="pf-editor-project">
+                        {isEditing ? (
+                          <div className="pf-editor-project__form">
+                            <label className="pf-field">
+                              <span className="pf-field__label">Project name</span>
+                              <input
+                                type="text"
+                                maxLength={60}
+                                value={projectDraft.name}
+                                onChange={(e) => setProjectDraft((d) => ({ ...d, name: e.target.value }))}
+                                className="pf-field__input"
+                              />
+                            </label>
+
+                            <label className="pf-field">
+                              <span className="pf-field__label">
+                                What was the job?
+                                <span className="pf-field__count">{projectDraft.description.length}/600</span>
+                              </span>
+                              <textarea
+                                rows={3}
+                                maxLength={600}
+                                value={projectDraft.description}
+                                onChange={(e) => setProjectDraft((d) => ({ ...d, description: e.target.value }))}
+                                placeholder={
+                                  ['Design', 'Event Organizer'].includes(formState.category)
+                                    ? 'What did the client need, what did you deliver, how did it turn out?'
+                                    : 'The occasion, the setting, anything that made this one memorable.'
+                                }
+                                className="pf-field__input pf-field__input--area"
+                              />
+                            </label>
+
+                            <div className="pf-field-row">
+                              <label className="pf-field">
+                                <span className="pf-field__label">Category</span>
+                                <select
+                                  value={projectDraft.category}
+                                  onChange={(e) => setProjectDraft((d) => ({ ...d, category: e.target.value }))}
+                                  className="pf-field__input"
+                                >
+                                  <option value="">No category</option>
+                                  {CATEGORY_OPTIONS.map((option) => (
+                                    <option key={option} value={option}>{option}</option>
+                                  ))}
+                                </select>
+                              </label>
+
+                              <label className="pf-field">
+                                <span className="pf-field__label">Where</span>
+                                <input
+                                  type="text"
+                                  maxLength={120}
+                                  value={projectDraft.location}
+                                  onChange={(e) => setProjectDraft((d) => ({ ...d, location: e.target.value }))}
+                                  placeholder="Tagaytay"
+                                  className="pf-field__input"
+                                />
+                              </label>
+
+                              <label className="pf-field">
+                                <span className="pf-field__label">When</span>
+                                <input
+                                  type="date"
+                                  value={projectDraft.doneOn}
+                                  // Today in the provider's own timezone. The server allows
+                                  // anything up to the end of today in UTC, so this is the
+                                  // stricter of the two and never offers a date the save
+                                  // would then refuse.
+                                  max={new Date().toLocaleDateString('en-CA')}
+                                  onChange={(e) => setProjectDraft((d) => ({ ...d, doneOn: e.target.value }))}
+                                  className="pf-field__input"
+                                />
+                              </label>
+                            </div>
+
+                            <div className="pf-field">
+                              <span className="pf-field__label">Cover</span>
+                              <div className="pf-cover-picker">
+                                {project.items.map((item) => (
+                                  <button
+                                    key={item}
+                                    type="button"
+                                    onClick={() => setProjectDraft((d) => ({ ...d, cover: item }))}
+                                    aria-pressed={(projectDraft.cover || project.items[0]) === item}
+                                    aria-label="Use as cover"
+                                    className="pf-cover-option"
+                                  >
+                                    <PortfolioThumbnail path={item} meta={metaFor(item)} alt="" />
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="pf-editor-project__actions">
+                              <button
+                                type="button"
+                                onClick={() => setEditingProject(null)}
+                                disabled={portfolioBusy}
+                                className="px-3 py-1.5 border border-gray-200 text-sm rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => saveProject(project.name, projectDraft)}
+                                disabled={portfolioBusy}
+                                className="px-3 py-1.5 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                              >
+                                {portfolioBusy ? 'Saving...' : 'Save project'}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="pf-editor-project__row">
+                            <span className="pf-editor-project__thumb">
+                              <PortfolioThumbnail path={project.cover} meta={metaFor(project.cover)} alt="" />
+                            </span>
+                            <div className="pf-editor-project__text">
+                              <p className="pf-editor-project__name">{project.name}</p>
+                              <p className="pf-editor-project__sub">
+                                {[info.category, info.location, describeProjectSize(project.count)]
+                                  .filter(Boolean)
+                                  .join(' · ')}
+                              </p>
+                              {/* The research is blunt about this: a thin set doesn't prove
+                                  you can deliver a whole job. Said once, quietly - it is a
+                                  nudge, not an error. */}
+                              {project.count < 5 && (
+                                <p className="pf-editor-project__nudge">
+                                  Only {project.count} item{project.count === 1 ? '' : 's'} &mdash; a few more
+                                  would show a client you can carry a whole job.
+                                </p>
+                              )}
+                              {!info.description && (
+                                <p className="pf-editor-project__nudge">No description yet.</p>
+                              )}
+                            </div>
+                            {editMode && (
+                              <div className="pf-editor-project__buttons">
+                                <button
+                                  type="button"
+                                  onClick={() => moveProject(index, index - 1)}
+                                  disabled={index === 0 || portfolioBusy}
+                                  aria-label={`Move ${project.name} up`}
+                                  className="pf-icon-button"
+                                >
+                                  <ChevronUp className="w-4 h-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => moveProject(index, index + 1)}
+                                  disabled={index === list.length - 1 || portfolioBusy}
+                                  aria-label={`Move ${project.name} down`}
+                                  className="pf-icon-button"
+                                >
+                                  <ChevronDown className="w-4 h-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setProjectDraft({
+                                      name: project.name,
+                                      description: info.description || '',
+                                      category: info.category || '',
+                                      location: info.location || '',
+                                      doneOn: info.done_on || '',
+                                      cover: info.cover || '',
+                                    });
+                                    setEditingProject(project.name);
+                                  }}
+                                  className="px-3 py-1.5 border border-gray-200 text-sm rounded-lg hover:bg-gray-50"
+                                >
+                                  Edit
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
               {/* Previously used album names become suggestions, so "Weddings" doesn't end
                   up alongside "weddings" and "Wedding". */}
               <datalist id="portfolio-albums">
@@ -2160,7 +2569,10 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                         id: null,
                         title: 'New Service',
                         description: 'Description of service features and benefits...',
-                        category: 'Photography',
+                        // Left unset deliberately - see validatePackages. Pre-filling
+                        // this let a first service save as 'Photography' without the
+                        // picker ever being touched.
+                        category: '',
                         hourly_rate: 500,
                         package_price: 2000,
                         duration_minutes: 240,
@@ -2182,7 +2594,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                   ))}
                 </div>
               ) : packagesError ? (
-                <InlineError message={packagesError} onRetry={() => setPackages([])} />
+                <InlineError message={packagesError} onRetry={loadPackages} />
               ) : packages.length === 0 ? (
                 <div className="p-8 border-2 border-dashed border-gray-200 rounded-xl text-center">
                   <Tag className="w-8 h-8 text-gray-300 mx-auto mb-3" />
@@ -2235,6 +2647,14 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                           {editMode && (
                             <button
                               onClick={async () => {
+                                // Deleting a saved service is immediate and permanent - it also
+                                // detaches it from every booking (past and upcoming) that was
+                                // ever made against it, since those keep the booking but lose
+                                // the service reference. A brand-new, not-yet-saved row (no
+                                // pkg.id) has none of that at stake, so it's removed silently.
+                                if (pkg.id && !confirm(`Delete "${pkg.title || 'this service'}"? This can't be undone, and any past or upcoming bookings for it will lose their service details.`)) {
+                                  return;
+                                }
                                 if (pkg.id && user) {
                                   try {
                                     await serviceService.deleteService(pkg.id);
@@ -2277,7 +2697,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                         <div className="mt-3">
                           <label className="block text-xs text-gray-500 mb-1">Service Category</label>
                           <select
-                            value={pkg.category || 'Photography'}
+                            value={pkg.category || ''}
                             onChange={(e) => {
                               const updated = [...packages];
                               updated[index].category = e.target.value;
@@ -2285,6 +2705,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                             }}
                             className="w-full sm:w-48 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none bg-white"
                           >
+                            <option value="">Select a category</option>
                             {CATEGORY_OPTIONS.map((cat) => (
                               <option key={cat} value={cat}>{cat}</option>
                             ))}
@@ -2409,6 +2830,33 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                               <p className="text-xs text-green-600 mt-2">Fixed price for the entire package duration</p>
                             </div>
                           )}
+
+                          {/* Cash is a per-service choice, not an account-wide one: a
+                              provider may happily take cash for a ₱2,000 portrait shoot
+                              and want a wedding paid up front. */}
+                          <div className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                            <label className="flex items-start gap-3 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={pkg.accepts_cash === true}
+                                onChange={(e) => {
+                                  const updated = [...packages];
+                                  updated[index].accepts_cash = e.target.checked;
+                                  setPackages(updated);
+                                }}
+                                className="mt-0.5 w-4 h-4"
+                              />
+                              <span className="text-sm">
+                                <span className="block font-medium text-gray-900">Accept cash on the day</span>
+                                <span className="block text-xs text-gray-600 mt-0.5">
+                                  Clients can choose to pay you in cash at the shoot instead of online. You mark it
+                                  received afterwards, and the {PLATFORM_COMMISSION_PERCENT}% platform commission is taken from your
+                                  wallet balance instead of the payment. Cash bookings aren&apos;t held in escrow, so
+                                  neither side is protected if the shoot goes wrong.
+                                </span>
+                              </span>
+                            </label>
+                          </div>
                         </div>
                       ) : (
                         <div className="mt-2 flex flex-wrap gap-2">
@@ -2433,6 +2881,12 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                               )}
                             </>
                           )}
+                          {pkg.accepts_cash && (
+                            <span className="inline-flex items-center px-2 py-1 text-xs bg-amber-100 text-amber-700 rounded-full">
+                              <PhilippinePeso className="w-3 h-3 mr-1" />
+                              Cash accepted
+                            </span>
+                          )}
                         </div>
                       )}
                     </div>
@@ -2449,7 +2903,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                               id: null,
                               title: 'New Service',
                               description: 'Description of service features and benefits...',
-                              category: 'Photography',
+                              category: '',
                               hourly_rate: 500,
                               package_price: 2000,
                               duration_minutes: 240,
@@ -2754,12 +3208,41 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                           : 'The client has disputed this booking. An admin will review it shortly.'}
                                       </p>
                                       <p className="text-xs text-red-600 mt-2">
-                                        Status: Under Admin Review. You will be notified of the resolution.
+                                        Status: Under Admin Review. Respond below so the admin hears your side.
                                       </p>
                                     </div>
                                   </div>
+                                  {/* The provider previously had no way to answer a
+                                      dispute: completion_notes are written before the
+                                      dispute exists, so nothing they could say ever
+                                      addressed what the client actually alleged. */}
+                                  <DisputeResponsePanel
+                                    bookingId={booking.id}
+                                    role="provider"
+                                    existingResponse={booking.dispute_response}
+                                    existingResponseAt={booking.dispute_response_at}
+                                    onSubmitted={fetchBookings}
+                                  />
                                 </div>
                               )}
+                              <button
+                                onClick={() => {
+                                  setDetailsBooking({
+                                    ...booking,
+                                    otherParty: {
+                                      id: booking.client_id,
+                                      name: booking.client,
+                                      image: booking.image,
+                                      email: booking.clientEmail,
+                                    },
+                                    price: booking.amount,
+                                  });
+                                }}
+                                className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center gap-2"
+                              >
+                                <FileText className="w-4 h-4" />
+                                View Details
+                              </button>
                               <button
                                 onClick={() => {
                                   setSelectedBookingId(booking.id);
@@ -2942,6 +3425,14 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
           />
         );
       })()}
+
+      {detailsBooking && (
+        <BookingDetailsModal
+          booking={detailsBooking}
+          isProvider
+          onClose={() => setDetailsBooking(null)}
+        />
+      )}
 
       {/* Reschedule Modal */}
       {showRescheduleModal && rescheduleBooking && (

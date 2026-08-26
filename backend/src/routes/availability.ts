@@ -39,6 +39,23 @@ function manilaTodayStr(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
 }
 
+/**
+ * Rewrites an override row's date to a plain 'YYYY-MM-DD' before it goes out over the API.
+ *
+ * override_date is a DATE column, which node-pg hands back as a JS Date, so res.json
+ * serialised it as a full instant - "2026-08-25T16:00:00.000Z" for what is really
+ * 26 August in Manila. Both callers expected a date string and neither survived it: the
+ * provider dashboard built `override_date + 'T00:00:00'` and rendered "Invalid Date",
+ * and the booking calendar matched `override_date === '2026-08-26'`, which could never be
+ * true - so a blocked date never actually showed as blocked to a client.
+ *
+ * Converting through toDateStr rather than slicing the ISO string matters: that instant
+ * is 16:00Z, so a naive slice yields the 25th, a day earlier than the provider blocked.
+ */
+function serialiseOverride<T extends { override_date: string | Date }>(row: T) {
+  return { ...row, override_date: toDateStr(row.override_date) };
+}
+
 function addDaysToDateStr(dateStr: string, days: number): string {
   const d = new Date(`${dateStr}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
@@ -216,7 +233,7 @@ router.get('/overrides/:providerId', async (req: Request, res: Response) => {
     query += ' ORDER BY override_date';
 
     const result = await pool.query(query, values);
-    return res.json({ data: result.rows });
+    return res.json({ data: result.rows.map(serialiseOverride) });
   } catch (error) {
     console.error('Error fetching overrides:', error);
     return res.status(500).json({ error: 'Failed to fetch overrides' });
@@ -251,7 +268,7 @@ router.post('/overrides', verifyToken, async (req: Request & { userId?: string }
     // Regenerate slots for that date
     await regenerateSlotsForDate(userId, override_date);
 
-    return res.json({ data: result.rows[0] });
+    return res.json({ data: serialiseOverride(result.rows[0]) });
   } catch (error) {
     console.error('Error saving override:', error);
     return res.status(500).json({ error: 'Failed to save override' });
@@ -463,7 +480,7 @@ router.get('/calendar/:providerId', async (req: Request, res: Response) => {
         month,
         year,
         days: result.rows,
-        overrides: overrides.rows
+        overrides: overrides.rows.map(serialiseOverride)
       }
     });
   } catch (error) {

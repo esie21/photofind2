@@ -29,6 +29,15 @@ export interface Booking {
   completion_notes?: string | null;
   dispute_raised?: boolean;
   dispute_reason?: string | null;
+  dispute_response?: string | null;
+  dispute_response_at?: string | null;
+  // Payment
+  /** 'online' pays through PayMongo before the shoot; 'cash' is handed over on the day. */
+  payment_method?: 'online' | 'cash';
+  payment_status?: 'unpaid' | 'pending' | 'paid' | 'failed';
+  payment_due_at?: string | null;
+  /** Set once the provider records that the cash arrived. */
+  cash_confirmed_at?: string | null;
   // Related data
   service_title?: string;
   client_name?: string;
@@ -47,12 +56,21 @@ export interface BookingEvidence {
   file_url: string;
   caption?: string;
   uploaded_at: string;
+  /** True for photos attached after a dispute was raised, false for completion photos. */
+  is_dispute_evidence?: boolean;
+  /** Which side of the booking filed this, resolved server-side. */
+  uploader_role?: 'client' | 'provider' | 'other';
 }
 
 export interface DisputedBooking extends Booking {
   client_email?: string;
   provider_email?: string;
+  client_user_id?: string;
+  provider_user_id?: string;
+  /** The provider's completion photos. */
   evidence: BookingEvidence[];
+  /** Photos either party attached after the dispute was raised. */
+  dispute_evidence?: BookingEvidence[];
 }
 
 export interface RescheduleBookingData {
@@ -69,6 +87,54 @@ export interface CreateBookingData {
   total_price: number;
   slot_ids?: string[];
   duration_minutes?: number;
+  /**
+   * Defaults to 'online'. The server re-checks the service's accepts_cash flag, so
+   * asking for 'cash' on a service that hasn't opted in is refused there rather than
+   * being taken on trust from here.
+   */
+  payment_method?: 'online' | 'cash';
+}
+
+export interface CashConfirmationResult {
+  booking_id: string;
+  payment_id: string;
+  payment_status: 'paid';
+  payment_method: 'cash';
+  gross_amount: number;
+  commission_charged: number;
+  available_balance: number;
+  outstanding_commission: number;
+}
+
+/**
+ * POST a multipart body straight at the backend, bypassing the Vercel proxy's 4.5MB
+ * body limit. Shared by completion and dispute evidence uploads so both surface the
+ * backend's own error text rather than a bare status code.
+ */
+async function postMultipart<T>(path: string, formData: FormData): Promise<T> {
+  const token = localStorage.getItem('authToken');
+  const response = await fetch(`${API_CONFIG.DIRECT_UPLOAD_URL}${path}`, {
+    method: 'POST',
+    body: formData,
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    let errorText = `API Error: ${response.status} ${response.statusText}`;
+    try {
+      const errJson = await response.json();
+      if (errJson?.error) errorText = errJson.error;
+      else if (errJson?.message) errorText = errJson.message;
+    } catch (e) {
+      // ignore JSON parse errors
+    }
+    throw new Error(errorText);
+  }
+
+  return response.json();
 }
 
 const bookingService = {
@@ -101,6 +167,21 @@ const bookingService = {
 
   async updateBooking(id: string, data: Partial<Booking>): Promise<Booking> {
     const resp = await apiClient.put<{ data: Booking }>(API_CONFIG.ENDPOINTS.BOOKINGS.UPDATE(id), data);
+    return resp.data;
+  },
+
+  /**
+   * Provider-only: record that the client paid in cash on the day.
+   *
+   * This is what marks a cash booking paid - there is no online payment to settle. It
+   * also charges the platform commission to the provider's wallet, because the platform
+   * never handled the money it is owed a cut of.
+   */
+  async confirmCashPayment(id: string): Promise<CashConfirmationResult> {
+    const resp = await apiClient.post<{ data: CashConfirmationResult; message: string }>(
+      (API_CONFIG.ENDPOINTS.BOOKINGS as any).CONFIRM_CASH(id),
+      {}
+    );
     return resp.data;
   },
 
@@ -161,32 +242,10 @@ const bookingService = {
       formData.append('evidence_types', JSON.stringify(evidenceTypes));
     }
 
-    // Use direct backend URL for file uploads (bypasses Vercel proxy limits)
-    const directUrl = `${API_CONFIG.DIRECT_UPLOAD_URL}${API_CONFIG.ENDPOINTS.BOOKINGS.COMPLETE(id)}`;
-
-    const token = localStorage.getItem('authToken');
-    const response = await fetch(directUrl, {
-      method: 'POST',
-      body: formData,
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      credentials: 'include',
-    });
-
-    if (!response.ok) {
-      let errorText = `API Error: ${response.status} ${response.statusText}`;
-      try {
-        const errJson = await response.json();
-        if (errJson?.error) errorText = errJson.error;
-        else if (errJson?.message) errorText = errJson.message;
-      } catch (e) {
-        // ignore JSON parse errors
-      }
-      throw new Error(errorText);
-    }
-
-    return response.json();
+    return postMultipart<{ data: Booking; message: string }>(
+      API_CONFIG.ENDPOINTS.BOOKINGS.COMPLETE(id),
+      formData
+    );
   },
 
   /**
@@ -200,6 +259,36 @@ const bookingService = {
     return apiClient.put<{ data: Booking; message: string }>(
       API_CONFIG.ENDPOINTS.BOOKINGS.CONFIRM(id),
       { confirmed, dispute_reason: disputeReason }
+    );
+  },
+
+  /**
+   * Attach photos to an open dispute. Available to both the client and the provider -
+   * unlike completeBooking, which is provider-only - so an admin sees both sides.
+   */
+  async uploadDisputeEvidence(
+    id: string,
+    files: File[],
+    caption?: string
+  ): Promise<{ data: BookingEvidence[]; message: string }> {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('evidence', file));
+    if (caption?.trim()) formData.append('caption', caption.trim());
+
+    return postMultipart<{ data: BookingEvidence[]; message: string }>(
+      API_CONFIG.ENDPOINTS.BOOKINGS.DISPUTE_EVIDENCE(id),
+      formData
+    );
+  },
+
+  /**
+   * Provider states their side of an open dispute. Re-submitting replaces the previous
+   * response.
+   */
+  async submitDisputeResponse(id: string, response: string): Promise<{ data: Booking; message: string }> {
+    return apiClient.put<{ data: Booking; message: string }>(
+      API_CONFIG.ENDPOINTS.BOOKINGS.DISPUTE_RESPONSE(id),
+      { response }
     );
   },
 

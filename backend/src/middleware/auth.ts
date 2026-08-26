@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { JWT_SECRET } from '../config/authConfig';
 
 interface AuthRequest extends Request {
   userId?: string;
@@ -19,10 +20,7 @@ export function verifyToken(
   }
 
   try {
-    const decoded: any = jwt.verify(
-      token,
-      process.env.JWT_SECRET || 'your_secret_key'
-    );
+    const decoded: any = jwt.verify(token, JWT_SECRET);
     // Keep userId as string (UUID or numeric string) for consistent comparisons with route params
     req.userId = String(decoded.userId);
     req.role = decoded.role;

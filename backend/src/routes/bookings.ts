@@ -4,9 +4,14 @@ import { pool } from '../config/database';
 import { verifyToken } from '../middleware/auth';
 import { notificationService } from '../services/notificationService';
 import { paymongoRequest, createRefund } from '../services/paymongoService';
+import {
+  computeMinimumBookingPrice,
+  isPriceAcceptable,
+  servicePricingColumns,
+} from '../config/pricingConfig';
+import { computePaymentDueAt, PAYMENT_REMINDER_LEAD_HOURS, CASH_CONFIRM_GRACE_MINUTES } from '../config/paymentConfig';
+import { releaseEscrow, settleCashPayment } from '../services/walletService';
 import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
-import { computePaymentDueAt, PAYMENT_REMINDER_LEAD_HOURS } from '../config/paymentConfig';
-import { releaseEscrow } from '../services/walletService';
 import { auditService } from '../services/auditService';
 import {
   UPLOADS_ROOT,
@@ -103,6 +108,73 @@ const requireBookingPaid = async (req: any, res: Response, next: any) => {
     return res.status(400).json({ error: 'Invalid booking id' });
   }
 };
+
+// Dispute evidence uses the same storage, path safety and type checking as completion
+// evidence, but a tighter per-request cap - this is a rebuttal, not a gallery.
+const disputeEvidenceUpload = multer({
+  storage: evidenceStorage,
+  limits: { fileSize: MAX_FILE_SIZE, files: 5 },
+  fileFilter: imageFileFilter,
+});
+
+// Total dispute photos one party may attach across all their uploads on one booking.
+const MAX_DISPUTE_EVIDENCE_PER_PARTY = 10;
+
+// Either party on a booking that is actually in dispute may add to that dispute. Runs
+// BEFORE multer so a refused request never writes files to disk, and stashes the caller's
+// side and both resolved user ids on the request so handlers don't resolve them twice.
+//
+// Note the ids go through resolveClientUserId/resolveProviderUserId rather than being
+// compared raw: bookings.client_id/provider_id are row ids in the separate clients/
+// providers tables on this deployment, so a raw comparison 403s the real participants.
+const requireDisputeParticipant = async (req: any, res: Response, next: any) => {
+  try {
+    const bookingId = safeSegment(req.params.id);
+    const bookingRes = await pool.query(
+      'SELECT client_id, provider_id, status, dispute_raised FROM bookings WHERE id::text = $1',
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    if (booking.status !== 'disputed' && !booking.dispute_raised) {
+      return res.status(400).json({ error: 'This booking is not under dispute' });
+    }
+
+    const [clientUserId, providerUserId] = await Promise.all([
+      resolveClientUserId(String(booking.client_id)),
+      resolveProviderUserId(String(booking.provider_id)),
+    ]);
+
+    if (clientUserId === String(req.userId)) {
+      req.disputeRole = 'client';
+    } else if (providerUserId === String(req.userId)) {
+      req.disputeRole = 'provider';
+    } else {
+      return res.status(403).json({ error: 'Only the client or provider on this booking can add to its dispute' });
+    }
+
+    req.disputeParties = { clientUserId, providerUserId };
+    return next();
+  } catch {
+    return res.status(400).json({ error: 'Invalid booking id' });
+  }
+};
+
+// Both dispute endpoints below tell every admin that new material landed on a case they
+// are holding, so the queue reflects it without an admin reopening each booking.
+async function notifyAdminsOfDisputeActivity(title: string, message: string, bookingId: string, data: Record<string, any> = {}) {
+  const adminsRes = await pool.query("SELECT id FROM users WHERE role = 'admin' AND deleted_at IS NULL");
+  for (const admin of adminsRes.rows) {
+    await notificationService.create({
+      userId: String(admin.id),
+      type: 'booking_disputed',
+      title,
+      message,
+      data: { booking_id: bookingId, ...data },
+    });
+  }
+}
 
 function parseId(v: any): string | null {
   if (!v) return null;
@@ -524,7 +596,7 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
   const clientId = req.userId; // from verifyToken
   // booking_mode is deliberately not read from the body - see the comment where
   // `mode` is set below.
-  const { provider_id, service_id, start_date, end_date, total_price } = req.body;
+  const { provider_id, service_id, start_date, end_date, total_price, slot_ids, payment_method } = req.body;
 
   if (!clientId) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -547,71 +619,59 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       SELECT column_name FROM information_schema.columns WHERE table_name = 'services'
     `);
     const serviceColumns = columnCheck.rows.map((r: { column_name: string }) => r.column_name);
-    const pricingCols = ['id', 'price', 'pricing_type', 'duration_minutes'];
-    if (serviceColumns.includes('package_price')) pricingCols.push('package_price');
-    if (serviceColumns.includes('hourly_rate')) pricingCols.push('hourly_rate');
-    if (serviceColumns.includes('hourly_price')) pricingCols.push('hourly_price');
+    const pricingCols = servicePricingColumns(serviceColumns);
+
+    // accepts_cash is read here rather than trusted from the request body. The client
+    // sends which method it wants, but whether cash is on offer at all is the
+    // provider's decision, recorded on the service - without this check anyone could
+    // POST payment_method: 'cash' and force a provider who never opted in to chase
+    // the money themselves and owe commission on it.
+    const hasAcceptsCash = serviceColumns.includes('accepts_cash');
+    const serviceSelectCols = hasAcceptsCash ? [...pricingCols, 'accepts_cash'] : pricingCols;
 
     const serviceCheck = await pool.query(
-      `SELECT ${pricingCols.join(', ')} FROM services WHERE id::text = $1`,
+      `SELECT ${serviceSelectCols.join(', ')} FROM services WHERE id::text = $1`,
       [serviceIdStr]
     );
     if (serviceCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Service not found' });
     }
     const service = serviceCheck.rows[0];
-    const servicePrice = parseFloat(service.price) || 0;
-    const packagePrice = parseFloat(service.package_price) || servicePrice;
-    const packageDuration = service.duration_minutes || 60;
-    const platformFeeRate = PLATFORM_COMMISSION_RATE;
 
-    // Validate total_price is not less than expected (with platform fee)
+    const requestedMethod = payment_method === undefined || payment_method === null
+      ? 'online'
+      : String(payment_method).trim().toLowerCase();
+
+    if (!['online', 'cash'].includes(requestedMethod)) {
+      return res.status(400).json({ error: 'payment_method must be either "online" or "cash"' });
+    }
+
+    if (requestedMethod === 'cash' && !(hasAcceptsCash && service.accepts_cash === true)) {
+      return res.status(400).json({
+        error: 'This service does not accept cash payment. Please pay online instead.',
+      });
+    }
+
+    // Validate total_price is not less than expected (with platform fee). The rule
+    // itself lives in pricingConfig so POST /payments/create-intent enforces the same
+    // one - it used to carry its own, different comparison against the flat service
+    // price. NOTE: this prices the *submitted* window; the slot check inside the
+    // transaction below is what stops that window being shorter than the time the
+    // booking actually reserves.
     const submittedPrice = parseFloat(total_price) || 0;
-
-    // Hourly pricing scales with how long the booking actually is. This used to check
-    // against a single hour's rate no matter the duration, so an 8-hour booking could
-    // be submitted at 1 hour's price and pass - and create-intent's own check compares
-    // against the same single-hour figure, so it went through there too.
-    if (service.pricing_type === 'hourly') {
-      const startForPrice = new Date(String(start_date));
-      const endForPrice = end_date
-        ? new Date(String(end_date))
-        : new Date(startForPrice.getTime() + packageDuration * 60 * 1000);
-      const durationMinutes = Math.round((endForPrice.getTime() - startForPrice.getTime()) / (1000 * 60));
-      const hours = Math.max(1, durationMinutes / 60);
-      const minPrice = servicePrice * hours * (1 + platformFeeRate);
-      if (submittedPrice < minPrice * 0.99) {
-        return res.status(400).json({
-          error: 'Invalid price',
-          detail: `Price must be at least ₱${minPrice.toFixed(2)}`
-        });
-      }
-    } else {
-      // Package pricing: price scales with duration (e.g. 2 hrs of a 1-hr package = 2×)
-      const startForPrice = new Date(String(start_date));
-      let endForPrice: Date;
-      if (end_date) {
-        endForPrice = new Date(String(end_date));
-      } else {
-        endForPrice = new Date(startForPrice.getTime() + packageDuration * 60 * 1000);
-      }
-      const durationMinutes = Math.round((endForPrice.getTime() - startForPrice.getTime()) / (1000 * 60));
-      const units = Math.max(1, durationMinutes / packageDuration);
-      const expectedServicePrice = packagePrice * units;
-      let minPrice = expectedServicePrice * (1 + platformFeeRate);
-
-      if (service.pricing_type === 'both') {
-        const hourlyRate = parseFloat(service.hourly_rate) || parseFloat(service.hourly_price) || servicePrice;
-        const hourlyExpected = hourlyRate * (durationMinutes / 60) * (1 + platformFeeRate);
-        minPrice = Math.min(minPrice, hourlyExpected);
-      }
-
-      if (submittedPrice < minPrice * 0.99) {
-        return res.status(400).json({
-          error: 'Invalid price',
-          detail: `Price must be at least ₱${minPrice.toFixed(2)}`
-        });
-      }
+    const pricing = computeMinimumBookingPrice(
+      service,
+      new Date(String(start_date)),
+      end_date ? new Date(String(end_date)) : null
+    );
+    if (!pricing.ok) {
+      return res.status(400).json({ error: 'Invalid price', detail: pricing.error });
+    }
+    if (!isPriceAcceptable(submittedPrice, pricing.minPrice)) {
+      return res.status(400).json({
+        error: 'Invalid price',
+        detail: `Price must be at least ₱${pricing.minPrice.toFixed(2)}`
+      });
     }
 
     // Convert user IDs to record IDs if needed (handles providers/clients tables)
@@ -644,6 +704,15 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // Serialise booking creation per provider.
+      //
+      // The overlap check below is a plain SELECT followed by an INSERT, which under
+      // READ COMMITTED sees only rows committed before it ran - so two concurrent
+      // requests for the same provider could both find no conflict and both insert,
+      // leaving two overlapping non-cancelled bookings that the check exists to
+      // prevent. The same lock guards the cancel path further down this file.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [providerIdStr]);
 
       // Check if the provider has blocked this date
       const bookingDate = start.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -680,9 +749,88 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
         return res.status(409).json({ error: 'This time slot conflicts with another booking' });
       }
 
+      // Settle what these slot ids actually are before anything is written.
+      //
+      // The UPDATE further down used to be the only statement that touched these
+      // rows, and it filtered on nothing but the slot id and the provider - no
+      // status, no held_by. So a request naming slots already 'booked' against
+      // someone else's confirmed booking would silently reassign their booking_id to
+      // this new booking, detaching the original booking from its slot and raising no
+      // conflict at all. POST /availability/slots/book has checked exactly this since
+      // it was written (status 'booked' -> 409, held by another user -> 409); this
+      // route never did. FOR UPDATE holds the rows for the rest of the transaction so
+      // a concurrent request can't pass the same checks behind us.
+      const requestedSlotIds = Array.isArray(slot_ids) ? slot_ids.map((id: any) => String(id)) : [];
+      let slotRows: any[] = [];
+
+      if (requestedSlotIds.length > 0) {
+        const slotRes = await client.query(
+          `SELECT id, provider_id, status, held_by, start_datetime, end_datetime
+           FROM time_slots
+           WHERE id::text = ANY($1)
+           FOR UPDATE`,
+          [requestedSlotIds]
+        );
+        slotRows = slotRes.rows;
+
+        if (slotRows.length !== requestedSlotIds.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'One or more selected time slots no longer exist' });
+        }
+
+        for (const slot of slotRows) {
+          // time_slots.provider_id is a user id, unlike bookings.provider_id.
+          if (String(slot.provider_id) !== providerUserIdStr) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'All selected time slots must belong to this provider' });
+          }
+          if (String(slot.status) === 'booked') {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'One of the selected time slots has already been booked',
+              slot_id: slot.id,
+            });
+          }
+          if (String(slot.status) === 'held' && String(slot.held_by) !== clientUserIdStr) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'One of the selected time slots is being held by someone else',
+              slot_id: slot.id,
+            });
+          }
+        }
+
+        // Tie the price to what is actually being reserved.
+        //
+        // The minimum-price check ran against the submitted start_date/end_date, but
+        // what the booking really takes off the calendar is these slots, and nothing
+        // connected the two - so a short (cheap) window could be submitted alongside
+        // slots covering a much longer real block. Only the underpaying direction is
+        // refused: slots covering less time than was paid for costs the client money,
+        // not the provider, and rejecting it would break nothing but their day.
+        const slotStartMs = Math.min(...slotRows.map((s: any) => new Date(s.start_datetime).getTime()));
+        const slotEndMs = Math.max(...slotRows.map((s: any) => new Date(s.end_datetime).getTime()));
+        const BOUNDARY_TOLERANCE_MS = 60 * 1000;
+
+        if (
+          !isNaN(slotStartMs) && !isNaN(slotEndMs) &&
+          (slotStartMs < start.getTime() - BOUNDARY_TOLERANCE_MS ||
+            slotEndMs > end.getTime() + BOUNDARY_TOLERANCE_MS)
+        ) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: 'Invalid price',
+            detail: 'The selected time slots cover more time than the booking window being charged for.',
+          });
+        }
+      }
+
+      // min_price_at_booking records the floor this price was actually judged against,
+      // so create-intent can re-check it before charging without re-deriving it from a
+      // service whose rates may have changed since. See config/pricingConfig.ts.
       const insertQuery = `
-        INSERT INTO bookings (client_id, provider_id, service_id, start_date, end_date, status, booking_mode, accepted_at, total_price)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO bookings (client_id, provider_id, service_id, start_date, end_date, status, booking_mode, accepted_at, total_price, min_price_at_booking, payment_method)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING *
       `;
 
@@ -696,10 +844,33 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
         mode,
         acceptedAt,
         total_price,
+        pricing.minPrice,
+        requestedMethod,
       ];
 
       const result = await client.query(insertQuery, values);
       const booking = result.rows[0];
+
+      // The client already held these slots (POST /availability/slots/held) before
+      // submitting, and sends them back here - but this route never read slot_ids at
+      // all, so a booking was created in the bookings table while its time_slots rows
+      // stayed exactly as they were. The bookings-table conflict check above still
+      // stopped a real double-booking, but nothing ever flipped the slot picker's own
+      // data to 'booked': the hold this booking replaces would just sit there until it
+      // expired on its own timer, and the grid would then show the now-booked time as
+      // available again - looking free right up until a second client tried to submit
+      // and got a 409 that the picker gave them no reason to expect.
+      //
+      // Every id here has been located, ownership-checked and row-locked above, so
+      // this can no longer overwrite a slot belonging to another booking.
+      if (requestedSlotIds.length > 0) {
+        await client.query(
+          `UPDATE time_slots
+           SET status = 'booked', booking_id = $1, held_by = NULL, hold_expires_at = NULL
+           WHERE id::text = ANY($2) AND provider_id::text = $3`,
+          [String(booking.id), requestedSlotIds, providerUserIdStr]
+        );
+      }
 
       await client.query('COMMIT');
 
@@ -1002,11 +1173,14 @@ router.get('/disputed', verifyToken, async (req: Request & { userId?: string }, 
          LEFT JOIN users u2 ON u2.id = p.user_id`
       : `LEFT JOIN users u2 ON u2.id = b.provider_id`;
 
+    // u1.id / u2.id come back explicitly: b.client_id and b.provider_id may be row ids in
+    // the clients/providers tables, so they can't be matched against booking_evidence.
+    // uploaded_by (a users.id) to work out which side filed a given photo.
     const query = `
       SELECT b.*,
              s.title as service_title,
-             u1.name as client_name, u1.email as client_email,
-             u2.name as provider_name, u2.email as provider_email
+             u1.id as client_user_id, u1.name as client_name, u1.email as client_email,
+             u2.id as provider_user_id, u2.name as provider_name, u2.email as provider_email
       FROM bookings b
       LEFT JOIN services s ON s.id::text = b.service_id::text
       ${clientJoin}
@@ -1042,11 +1216,32 @@ router.get('/disputed', verifyToken, async (req: Request & { userId?: string }, 
       evidenceByBooking[bookingId].push(evidence);
     }
 
-    // Attach evidence to bookings
-    const bookingsWithEvidence = rows.map((booking: any) => ({
-      ...booking,
-      evidence: evidenceByBooking[String(booking.id)] || []
-    }));
+    // Attach evidence to bookings, tagged by which side filed it and split into the
+    // provider's completion photos versus material added after the dispute was raised.
+    // An admin judging a case needs to know whose exhibit they are looking at; before
+    // this every photo arrived in one undifferentiated list that only the provider
+    // could ever have contributed to.
+    const bookingsWithEvidence = rows.map((booking: any) => {
+      const clientUserId = booking.client_user_id ? String(booking.client_user_id) : null;
+      const providerUserId = booking.provider_user_id ? String(booking.provider_user_id) : null;
+
+      const tagged = (evidenceByBooking[String(booking.id)] || []).map((e: any) => {
+        const uploadedBy = String(e.uploaded_by);
+        return {
+          ...e,
+          uploader_role:
+            uploadedBy === clientUserId ? 'client'
+            : uploadedBy === providerUserId ? 'provider'
+            : 'other',
+        };
+      });
+
+      return {
+        ...booking,
+        evidence: tagged.filter((e: any) => !e.is_dispute_evidence),
+        dispute_evidence: tagged.filter((e: any) => e.is_dispute_evidence),
+      };
+    });
 
     return res.json({ data: bookingsWithEvidence });
   } catch (error) {
@@ -1155,6 +1350,7 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
 
 router.get('/:id', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   const currentUserId = req.userId;
+  const role = (req as any).role;
   const bookingId = String(req.params.id || '');
   if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
   if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
@@ -1181,7 +1377,10 @@ router.get('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       resolveProviderUserId(String(booking.provider_id)),
     ]);
 
-    if (clientUserId !== String(currentUserId) && providerUserId !== String(currentUserId)) {
+    // Support needs this too: the admin ticket thread links to the booking a
+    // conversation is about, so an admin reading a ticket can see what it's about
+    // without a separate admin-only booking-lookup endpoint.
+    if (clientUserId !== String(currentUserId) && providerUserId !== String(currentUserId) && role !== 'admin') {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -1234,7 +1433,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const hasClientsTable = existingTables.includes('clients');
 
     const existingRes = await pool.query(
-      'SELECT id, client_id, provider_id, status, start_date, end_date, dispute_raised, payment_due_at FROM bookings WHERE id::text = $1',
+      'SELECT id, client_id, provider_id, status, start_date, end_date, dispute_raised, payment_due_at, payment_method FROM bookings WHERE id::text = $1',
       [bookingId]
     );
     const existing = existingRes.rows[0];
@@ -1340,7 +1539,12 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
         // Accepting is what opens payment, so it is what starts the clock. Only set on
         // the first accept (COALESCE above), so flipping accepted -> confirmed doesn't
         // hand the client a fresh 24 hours.
-        if (!existing.payment_due_at) {
+        //
+        // A cash booking gets no deadline at all. The clock exists so an unpaid online
+        // booking can't hold a slot indefinitely, but there is nothing for a cash client
+        // to do in the next 24 hours - they pay on the day - so arming it would have
+        // expireUnpaidBookings cancel every cash booking a day after it was accepted.
+        if (!existing.payment_due_at && String(existing.payment_method || 'online') !== 'cash') {
           updates.push(`payment_due_at = $${idx++}`);
           values.push(computePaymentDueAt(new Date(), existing.start_date ? new Date(existing.start_date) : null));
         }
@@ -1820,7 +2024,11 @@ router.put('/:id/reschedule/approve', verifyToken, async (req: Request & { userI
     // original start - keeping it would let a booking expire for non-payment during the
     // very negotiation that moved its date, or leave the "2 hours before the start"
     // cutoff pointing at a time that no longer exists.
-    const stillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid';
+    // Cash bookings never carry a payment deadline (see the accept path), so there is
+    // nothing to restart - and writing one here would arm the expiry sweep against a
+    // booking whose client was never asked to pay in advance.
+    const stillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid'
+      && String(booking.payment_method || 'online') !== 'cash';
     const newDueAt = stillUnpaid
       ? computePaymentDueAt(new Date(), booking.start_date ? new Date(booking.start_date) : null)
       : null;
@@ -1998,7 +2206,9 @@ router.put('/:id/reschedule/reject', verifyToken, async (req: Request & { userId
     // the clock restarts from now, because the client shouldn't lose their slot over days
     // spent negotiating a change that was then declined. Measured against the time being
     // reverted to.
-    const rejectStillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid';
+    // Same cash exemption as the approve path above.
+    const rejectStillUnpaid = String(booking.payment_status || 'unpaid') !== 'paid'
+      && String(booking.payment_method || 'online') !== 'cash';
     const revertedDueAt = rejectStillUnpaid
       ? computePaymentDueAt(
           new Date(),
@@ -2095,6 +2305,7 @@ export async function expireUnpaidBookings() {
        LEFT JOIN services s ON s.id::text = b.service_id::text
        WHERE b.status IN ('accepted', 'confirmed')
          AND COALESCE(b.payment_status, 'unpaid') <> 'paid'
+         AND COALESCE(b.payment_method, 'online') <> 'cash'
          AND b.payment_due_at IS NOT NULL
          AND b.payment_due_at < NOW()`
     );
@@ -2125,6 +2336,7 @@ export async function expireUnpaidBookings() {
            WHERE id::text = $1
              AND status IN ('accepted', 'confirmed')
              AND COALESCE(payment_status, 'unpaid') <> 'paid'
+             AND COALESCE(payment_method, 'online') <> 'cash'
            RETURNING id`,
           [String(booking.id), 'Payment was not received before the deadline']
         );
@@ -2199,6 +2411,7 @@ export async function sendPaymentReminders() {
        LEFT JOIN services s ON s.id::text = b.service_id::text
        WHERE b.status IN ('accepted', 'confirmed')
          AND COALESCE(b.payment_status, 'unpaid') <> 'paid'
+         AND COALESCE(b.payment_method, 'online') <> 'cash'
          AND b.payment_due_at IS NOT NULL
          AND b.payment_due_at > NOW()
          AND b.payment_due_at < NOW() + ($1 || ' hours')::interval
@@ -2370,14 +2583,19 @@ export async function autoConfirmPastCompletions() {
 
         // Get payment record for this booking
         const paymentRes = await txClient.query(
-          `SELECT id, net_provider_amount, status FROM payments
+          `SELECT id, net_provider_amount, status, payment_method_type FROM payments
            WHERE booking_id::text = $1 AND status = 'succeeded'
            ORDER BY created_at DESC LIMIT 1`,
           [String(booking.id)]
         );
         const payment = paymentRes.rows[0];
+        // A cash payment was never escrowed - the provider was handed the money on the
+        // day - so there is nothing here to release. Calling releaseEscrow anyway would
+        // find pending_balance short by the full amount and log a SHORTFALL that reads
+        // like a missing escrow credit rather than a payment that correctly bypassed it.
+        const isCashPayment = String(payment?.payment_method_type || '') === 'cash';
 
-        if (payment && payment.status === 'succeeded') {
+        if (payment && payment.status === 'succeeded' && !isCashPayment) {
           const amount = parseFloat(payment.net_provider_amount);
           const { released } = await releaseEscrow(txClient, providerUserId, amount, {
             bookingId: String(booking.id),
@@ -2391,8 +2609,9 @@ export async function autoConfirmPastCompletions() {
           console.log(`Auto-released payment of ${released} to provider ${providerUserId} for booking ${booking.id}`);
         }
 
-        // Warn if auto-confirmed but payment wasn't released
-        if (!paymentReleased) {
+        // Warn if auto-confirmed but payment wasn't released. Cash is exempt: the
+        // provider has had the money since the shoot, so nothing is owed to them here.
+        if (!paymentReleased && !isCashPayment) {
           console.warn(`WARNING: Booking ${booking.id} auto-confirmed but payment not released. Provider ${providerUserId} may not have received payment.`);
         }
 
@@ -2668,14 +2887,16 @@ export async function autoResolveStaleDisputes() {
         let releasedAmount = 0;
 
         const paymentRes = await txClient.query(
-          `SELECT id, net_provider_amount, status FROM payments
+          `SELECT id, net_provider_amount, status, payment_method_type FROM payments
            WHERE booking_id::text = $1 AND status = 'succeeded'
            ORDER BY created_at DESC LIMIT 1`,
           [String(booking.id)]
         );
         const payment = paymentRes.rows[0];
 
-        if (payment && payment.status === 'succeeded') {
+        // Cash never entered escrow, so there is nothing held to release - see the same
+        // guard in autoConfirmPastCompletions.
+        if (payment && payment.status === 'succeeded' && String(payment.payment_method_type || '') !== 'cash') {
           const amount = parseFloat(payment.net_provider_amount);
           const { released } = await releaseEscrow(txClient, providerUserId, amount, {
             bookingId: String(booking.id),
@@ -2977,6 +3198,274 @@ router.post('/:id/complete',
   }
 });
 
+// ==================== CASH PAYMENT ====================
+
+/**
+ * The provider records that the client handed over the cash.
+ *
+ * This is the cash equivalent of a PayMongo payment succeeding, and it is the only way
+ * a cash booking ever reaches payment_status = 'paid'. The differences from the online
+ * path are all consequences of one fact: the money went straight from the client to the
+ * provider and never touched the platform.
+ *
+ *  - Nothing is credited to the wallet. The provider already holds the full amount.
+ *  - The platform's commission is *debited* from the wallet instead, which is how the
+ *    15% still gets collected on a payment it never handled. See settleCashPayment.
+ *  - There is no escrow, so PUT /:id/confirm's release step has nothing to release for
+ *    these bookings - releaseEscrow is driven by the payments row's net_provider_amount,
+ *    which is why the row written here records net = gross - commission but never moves
+ *    it into pending_balance.
+ *
+ * Only the provider can call it, and only from the booking's start time onwards: an
+ * "already paid" flag set weeks early would let a provider mark a booking paid, keep the
+ * slot, and leave the client with no deadline, no escrow and no evidence either way.
+ */
+router.post('/:id/confirm-cash', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = req.userId;
+  const bookingId = String(req.params.id || '');
+
+  if (!currentUserId) return res.status(401).json({ error: 'Unauthorized' });
+  if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
+
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+
+    const bookingRes = await dbClient.query(
+      `SELECT b.*, s.title AS service_title
+       FROM bookings b
+       LEFT JOIN services s ON s.id::text = b.service_id::text
+       WHERE b.id::text = $1 AND b.deleted_at IS NULL
+       FOR UPDATE OF b`,
+      [bookingId]
+    );
+    const booking = bookingRes.rows[0];
+    if (!booking) {
+      await dbClient.query('ROLLBACK');
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    const providerUserId = await resolveProviderUserId(String(booking.provider_id));
+    const clientUserId = await resolveClientUserId(String(booking.client_id));
+
+    if (String(providerUserId) !== String(currentUserId)) {
+      await dbClient.query('ROLLBACK');
+      // Deliberately not 404: the client can legitimately see this booking, they just
+      // aren't the one who can say the cash arrived. Only the person who would have
+      // received it gets to confirm it.
+      return res.status(403).json({ error: 'Only the provider can confirm a cash payment' });
+    }
+
+    if (String(booking.payment_method || 'online') !== 'cash') {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({ error: 'This booking is set up to be paid online, not in cash.' });
+    }
+
+    const bookingStatus = String(booking.status);
+    if (!['accepted', 'confirmed', 'awaiting_confirmation', 'completed'].includes(bookingStatus)) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({
+        error: bookingStatus === 'pending'
+          ? 'Accept this booking before recording a cash payment for it.'
+          : `Cannot record a cash payment for a ${bookingStatus} booking`,
+      });
+    }
+
+    // Idempotency. cash_confirmed_at is claimed inside the same transaction below, but
+    // answering a repeat submission with a clear 409 rather than a silent no-op tells a
+    // double-tapping provider what actually happened.
+    if (booking.cash_confirmed_at || String(booking.payment_status) === 'paid') {
+      await dbClient.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'This booking is already marked as paid.',
+        already_paid: true,
+        cash_confirmed_at: booking.cash_confirmed_at,
+      });
+    }
+
+    // No confirming a booking that hasn't happened yet - see CASH_CONFIRM_GRACE_MINUTES
+    // for why, and for the frontend copy that has to agree with it.
+    const startsAt = booking.start_date ? new Date(booking.start_date) : null;
+    if (startsAt && !isNaN(startsAt.getTime())) {
+      const earliest = new Date(startsAt.getTime() - CASH_CONFIRM_GRACE_MINUTES * 60 * 1000);
+      if (new Date() < earliest) {
+        await dbClient.query('ROLLBACK');
+        return res.status(400).json({
+          error: 'You can record the cash payment from the start of the booking onwards.',
+          can_confirm_from: earliest.toISOString(),
+        });
+      }
+    }
+
+    const grossAmount = parseFloat(booking.total_price || 0);
+    if (!(grossAmount > 0)) {
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({ error: 'This booking has no valid price to record.' });
+    }
+
+    const commissionAmount = Math.round(grossAmount * PLATFORM_COMMISSION_RATE * 100) / 100;
+    const netProviderAmount = Math.round((grossAmount - commissionAmount) * 100) / 100;
+
+    // Claim the booking. The WHERE repeats the guards so two concurrent confirmations
+    // can't both get past the read above and charge the commission twice - the loser
+    // matches no row and is turned away.
+    const claimRes = await dbClient.query(
+      `UPDATE bookings
+       SET cash_confirmed_at = CURRENT_TIMESTAMP,
+           cash_confirmed_by = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $1
+         AND cash_confirmed_at IS NULL
+         AND COALESCE(payment_status, 'unpaid') <> 'paid'
+       RETURNING id`,
+      [bookingId, currentUserId]
+    );
+    if (claimRes.rows.length === 0) {
+      await dbClient.query('ROLLBACK');
+      return res.status(409).json({ error: 'This booking is already marked as paid.', already_paid: true });
+    }
+
+    // Write the payments row this booking never had. UPDATE-then-INSERT rather than a
+    // plain INSERT because payments carries UNIQUE (booking_id): a booking that was
+    // started online and switched to cash, or that has a dead intent from an abandoned
+    // attempt, already has a row here and a second INSERT would violate the constraint.
+    const existingPayment = await dbClient.query(
+      `SELECT id, status FROM payments
+       WHERE booking_id::text = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [bookingId]
+    );
+
+    // Belt and braces against the booking-level guards above having missed something:
+    // a succeeded payment already exists, so the money is accounted for and settling it
+    // again would charge the commission twice.
+    if (existingPayment.rows[0] && String(existingPayment.rows[0].status) === 'succeeded') {
+      await dbClient.query('ROLLBACK');
+      return res.status(409).json({ error: 'This booking already has a settled payment.', already_paid: true });
+    }
+
+    let paymentId: string;
+    if (existingPayment.rows[0]) {
+      const updated = await dbClient.query(
+        `UPDATE payments
+         SET status = 'succeeded',
+             payment_method_type = 'cash',
+             gross_amount = $2,
+             commission_rate = $3,
+             commission_amount = $4,
+             net_provider_amount = $5,
+             paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+             failure_reason = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $1
+         RETURNING id`,
+        [String(existingPayment.rows[0].id), grossAmount, PLATFORM_COMMISSION_RATE, commissionAmount, netProviderAmount]
+      );
+      paymentId = String(updated.rows[0].id);
+    } else {
+      const inserted = await dbClient.query(
+        `INSERT INTO payments (
+          booking_id, client_id, provider_id,
+          idempotency_key,
+          gross_amount, commission_rate, commission_amount, net_provider_amount,
+          status, payment_method_type, paid_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'succeeded', 'cash', CURRENT_TIMESTAMP)
+        RETURNING id`,
+        [
+          bookingId,
+          clientUserId,
+          providerUserId,
+          `cash_${bookingId}`,
+          grossAmount,
+          PLATFORM_COMMISSION_RATE,
+          commissionAmount,
+          netProviderAmount,
+        ]
+      );
+      paymentId = String(inserted.rows[0].id);
+    }
+
+    const settlement = await settleCashPayment(dbClient, paymentId);
+
+    // settleCashPayment claims the payment with "status = 'succeeded' AND
+    // wallet_credited_at IS NULL" and does nothing at all if that claim fails - which it
+    // can, for a payment row that was credited once and later moved to 'refunded' by a
+    // dispute, since wallet_credited_at stays set. Committing anyway was silently
+    // destructive: the booking kept cash_confirmed_at, payment_status stayed 'unpaid'
+    // (settleCashPayment returns before setting it), no commission was charged, and the
+    // response still said "paid". The provider could never retry either, because
+    // cash_confirmed_at is exactly what the idempotency guard above checks. Roll the
+    // whole thing back instead and say so.
+    if (!settlement.settled) {
+      await dbClient.query('ROLLBACK');
+      console.error(
+        `Cash settlement for booking ${bookingId} could not claim payment ${paymentId} - ` +
+        `it is not 'succeeded' or was already credited. Nothing was recorded.`
+      );
+      return res.status(409).json({
+        error: 'This booking already has a settled payment on record. Refresh and check before trying again.',
+        already_paid: true,
+      });
+    }
+
+    await dbClient.query('COMMIT');
+
+    // Telling the client is the only check on this whole flow. Nobody but the provider
+    // asserts the cash changed hands, so the client has to hear about it while the
+    // booking is still fresh enough to argue about.
+    try {
+      const providerInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]);
+      const providerName = providerInfo.rows[0]?.name || 'Your provider';
+      await notificationService.create({
+        userId: String(clientUserId),
+        type: 'payment_received',
+        title: 'Cash payment recorded',
+        message: `${providerName} marked the ₱${grossAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })} cash payment for "${booking.service_title || 'your booking'}" as received. If that's wrong, open the booking and tell us.`,
+        data: { booking_id: bookingId, amount: grossAmount, payment_method: 'cash' },
+      });
+    } catch (notifError) {
+      console.error('Failed to send cash payment notification:', notifError);
+    }
+
+    try {
+      const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+      if (chatId) {
+        await pool.query(
+          `INSERT INTO chat_messages (chat_id, sender_id, content, is_system) VALUES ($1, NULL, $2, TRUE)`,
+          [chatId, `Cash payment of ₱${grossAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })} was recorded as received.`]
+        );
+      }
+    } catch (chatError) {
+      console.error('Failed to post cash payment system message:', chatError);
+    }
+
+    return res.json({
+      data: {
+        booking_id: bookingId,
+        payment_id: paymentId,
+        payment_status: 'paid',
+        payment_method: 'cash',
+        gross_amount: grossAmount,
+        commission_charged: settlement.commissionCharged,
+        available_balance: settlement.balanceAfter,
+        // Surfaced so the dashboard can say "you now owe X" rather than the provider
+        // discovering it when a payout is refused.
+        outstanding_commission: settlement.balanceAfter < 0
+          ? Math.round(-settlement.balanceAfter * 100) / 100
+          : 0,
+      },
+      message: 'Cash payment recorded.',
+    });
+  } catch (error: any) {
+    try { await dbClient.query('ROLLBACK'); } catch (_e) { /* noop */ }
+    console.error('Error confirming cash payment:', error);
+    return res.status(500).json({ error: 'Failed to record the cash payment', detail: error.message });
+  } finally {
+    dbClient.release();
+  }
+});
+
 // ==================== CLIENT CONFIRM OR DISPUTE COMPLETION ====================
 
 router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
@@ -3104,14 +3593,18 @@ router.put('/:id/confirm', verifyToken, async (req: Request & { userId?: string 
 
       // Get payment record for this booking
       const paymentRes = await client.query(
-        `SELECT id, net_provider_amount, status FROM payments
+        `SELECT id, net_provider_amount, status, payment_method_type FROM payments
            WHERE booking_id::text = $1 AND status = 'succeeded'
            ORDER BY created_at DESC LIMIT 1`,
         [bookingId]
       );
       const payment = paymentRes.rows[0];
 
-      if (payment && payment.status === 'succeeded') {
+      // Cash never entered escrow, so there is nothing held to release - see the same
+      // guard in autoConfirmPastCompletions.
+      if (payment && payment.status === 'succeeded' && String(payment.payment_method_type || '') === 'cash') {
+        console.log(`Booking ${bookingId} was paid in cash - no escrow to release.`);
+      } else if (payment && payment.status === 'succeeded') {
         const amount = parseFloat(payment.net_provider_amount);
 
         const { released } = await releaseEscrow(client, providerUserId, amount, {
@@ -3340,10 +3833,260 @@ router.get('/:id/evidence', verifyToken, async (req: Request & { userId?: string
       [bookingId]
     );
 
-    return res.json({ data: evidenceRes.rows });
+    // Same tagging as GET /disputed, so a participant's view can label the other side's
+    // dispute photos instead of mixing them in with the provider's completion set.
+    const tagged = evidenceRes.rows.map((e: any) => {
+      const uploadedBy = String(e.uploaded_by);
+      return {
+        ...e,
+        uploader_role:
+          uploadedBy === evidenceClientUserId ? 'client'
+          : uploadedBy === evidenceProviderUserId ? 'provider'
+          : 'other',
+      };
+    });
+
+    return res.json({ data: tagged });
   } catch (error) {
     console.error('Error fetching evidence:', error);
     return res.status(500).json({ error: 'Failed to fetch evidence' });
+  }
+});
+
+// ==================== ADD EVIDENCE TO AN OPEN DISPUTE ====================
+// Before this, POST /:id/complete was the only upload path and it is provider-only
+// (requireBookingProvider), so a dispute reached the admin as the provider's photos and
+// notes against a single paragraph of client text. Either party can now attach photos
+// while the dispute is open.
+
+router.post('/:id/dispute-evidence',
+  verifyToken,
+  requireDisputeParticipant,
+  handleUpload(disputeEvidenceUpload.array('evidence', 5)),
+  verifyUploadedContent,
+  async (req: Request & { userId?: string }, res: Response) => {
+  const currentUserId = String(req.userId);
+  const bookingId = String(req.params.id || '');
+  const files = (req.files as Express.Multer.File[]) || [];
+  const role: 'client' | 'provider' = (req as any).disputeRole;
+  const { clientUserId, providerUserId } = (req as any).disputeParties;
+  const caption = typeof req.body?.caption === 'string' ? req.body.caption.trim().slice(0, 500) : null;
+
+  // discardUploads() rather than a local unlink loop: it checks existsSync first and
+  // warns on a failure it can't recover from. The loop this replaces swallowed every
+  // error silently, so a permissions problem or a race during cleanup left an orphaned
+  // file on disk with nothing in the log to find it by.
+  const discardFiles = () => discardUploads(req);
+
+  if (files.length === 0) {
+    return res.status(400).json({ error: 'Select at least one photo to attach' });
+  }
+
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+
+    // Re-check the dispute is still open under a row lock: the guard above ran before
+    // multer, and an admin can resolve the dispute while a large upload is in flight.
+    const lockRes = await dbClient.query(
+      `SELECT status, dispute_raised FROM bookings WHERE id::text = $1 FOR UPDATE`,
+      [bookingId]
+    );
+    const locked = lockRes.rows[0];
+    if (!locked || (locked.status !== 'disputed' && !locked.dispute_raised)) {
+      await dbClient.query('ROLLBACK');
+      discardFiles();
+      return res.status(409).json({ error: 'This dispute has already been resolved, so no more evidence can be added.' });
+    }
+
+    // Count against this party's own quota only, so one side can't exhaust the other's.
+    const existingRes = await dbClient.query(
+      `SELECT COUNT(*)::int AS count FROM booking_evidence
+       WHERE booking_id::text = $1 AND uploaded_by::text = $2 AND is_dispute_evidence = TRUE`,
+      [bookingId, currentUserId]
+    );
+    const existingCount = existingRes.rows[0]?.count || 0;
+    if (existingCount + files.length > MAX_DISPUTE_EVIDENCE_PER_PARTY) {
+      await dbClient.query('ROLLBACK');
+      discardFiles();
+      return res.status(400).json({
+        error: `You can attach at most ${MAX_DISPUTE_EVIDENCE_PER_PARTY} photos to this dispute (${existingCount} already attached).`,
+      });
+    }
+
+    const inserted: any[] = [];
+    for (const file of files) {
+      const fileUrl = `bookings/${bookingId}/${file.filename}`;
+      const insertRes = await dbClient.query(
+        `INSERT INTO booking_evidence (booking_id, uploaded_by, evidence_type, file_url, caption, is_dispute_evidence)
+         VALUES ($1, $2, 'other', $3, $4, TRUE)
+         RETURNING *`,
+        [bookingId, currentUserId, fileUrl, caption]
+      );
+      inserted.push({ ...insertRes.rows[0], uploader_role: role });
+    }
+
+    await dbClient.query('COMMIT');
+
+    // Everything past the commit is best-effort: the evidence is stored, so a failed
+    // notification must not read back to the uploader as a failed upload.
+    const otherPartyUserId = role === 'client' ? providerUserId : clientUserId;
+    const photoLabel = `${files.length} photo${files.length === 1 ? '' : 's'}`;
+    try {
+      const uploaderRes = await pool.query('SELECT name FROM users WHERE id::text = $1', [currentUserId]);
+      const uploaderName = uploaderRes.rows[0]?.name || (role === 'client' ? 'The client' : 'The provider');
+
+      await notificationService.create({
+        userId: otherPartyUserId,
+        type: 'booking_disputed',
+        title: 'New Dispute Evidence',
+        message: `${uploaderName} attached ${photoLabel} to the dispute on your booking.`,
+        data: { booking_id: bookingId, uploaded_by_role: role },
+      });
+
+      await notifyAdminsOfDisputeActivity(
+        'Dispute Evidence Added',
+        `${uploaderName} (${role}) attached ${photoLabel} to a disputed booking.`,
+        bookingId,
+        { uploaded_by_role: role }
+      );
+    } catch (notifyError) {
+      console.error('Failed to send dispute evidence notifications:', notifyError);
+    }
+
+    try {
+      const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+      if (chatId) {
+        await pool.query(
+          `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+           VALUES ($1, NULL, $2, TRUE)`,
+          [chatId, `The ${role} attached ${photoLabel} to this dispute for the admin to review.`]
+        );
+        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+        const io = (req.app as any).get('io');
+        if (io) {
+          io.to(`booking:${bookingId}`).emit('booking:dispute_evidence_added', {
+            bookingId,
+            uploaded_by_role: role,
+            count: files.length,
+          });
+        }
+      }
+    } catch (chatError) {
+      console.error('Failed to send dispute evidence chat message (non-fatal):', chatError);
+    }
+
+    return res.status(201).json({
+      data: inserted,
+      message: `${photoLabel} attached to the dispute.`,
+    });
+  } catch (error) {
+    try { await dbClient.query('ROLLBACK'); } catch { /* connection may be gone */ }
+    discardFiles();
+    console.error('Error attaching dispute evidence:', error);
+    return res.status(500).json({ error: 'Failed to attach evidence to this dispute' });
+  } finally {
+    dbClient.release();
+  }
+});
+
+// ==================== PROVIDER RESPONDS TO A DISPUTE ====================
+// The provider's only prior "voice" in a dispute was completion_notes, which are written
+// before the dispute exists and so can't answer what the client actually alleged.
+
+router.put('/:id/dispute-response', verifyToken, requireDisputeParticipant, async (req: Request & { userId?: string }, res: Response) => {
+  const bookingId = String(req.params.id || '');
+  const role: 'client' | 'provider' = (req as any).disputeRole;
+  const { clientUserId, providerUserId } = (req as any).disputeParties;
+
+  if (role !== 'provider') {
+    return res.status(403).json({ error: 'Only the provider can respond to a dispute' });
+  }
+
+  const raw = req.body?.response;
+  const response = typeof raw === 'string' ? raw.trim() : '';
+  if (response.length < 10) {
+    return res.status(400).json({ error: 'Please give a detailed response (at least 10 characters)' });
+  }
+  if (response.length > 2000) {
+    return res.status(400).json({ error: 'Response must be 2000 characters or fewer' });
+  }
+
+  try {
+    // The WHERE clause re-asserts the dispute is open, so a response submitted just after
+    // an admin resolved the case updates nothing rather than overwriting a closed record.
+    // The CTE carries the pre-update value out alongside the new row, so the wording
+    // below can say "updated" rather than "responded" without a second racy read.
+    const updateRes = await pool.query(
+      `WITH prev AS (
+         SELECT dispute_response AS previous_response FROM bookings WHERE id::text = $2
+       )
+       UPDATE bookings b
+       SET dispute_response = $1,
+           dispute_response_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       FROM prev
+       WHERE b.id::text = $2 AND (b.status = 'disputed' OR b.dispute_raised = TRUE)
+       RETURNING b.*, prev.previous_response`,
+      [response, bookingId]
+    );
+
+    if (!updateRes.rows[0]) {
+      return res.status(409).json({ error: 'This dispute has already been resolved, so a response can no longer be added.' });
+    }
+
+    const isUpdate = !!updateRes.rows[0].previous_response;
+    const excerpt = `${response.substring(0, 100)}${response.length > 100 ? '...' : ''}`;
+
+    try {
+      const providerRes = await pool.query('SELECT name FROM users WHERE id::text = $1', [providerUserId]);
+      const providerName = providerRes.rows[0]?.name || 'The provider';
+
+      await notificationService.create({
+        userId: clientUserId,
+        type: 'booking_disputed',
+        title: 'Provider Responded to Your Dispute',
+        message: `${providerName} responded: ${excerpt}`,
+        data: { booking_id: bookingId, response },
+      });
+
+      await notifyAdminsOfDisputeActivity(
+        'Provider Responded to Dispute',
+        `${providerName} responded to a disputed booking: ${excerpt}`,
+        bookingId,
+        { response }
+      );
+    } catch (notifyError) {
+      console.error('Failed to send dispute response notifications:', notifyError);
+    }
+
+    try {
+      const chatId = await ensureBookingChatExists(bookingId, clientUserId, providerUserId);
+      if (chatId) {
+        await pool.query(
+          `INSERT INTO chat_messages (chat_id, sender_id, content, is_system)
+           VALUES ($1, NULL, $2, TRUE)`,
+          [chatId, `The provider ${isUpdate ? 'updated their response to' : 'responded to'} this dispute. An admin will review both sides.`]
+        );
+        await pool.query('UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [chatId]);
+
+        const io = (req.app as any).get('io');
+        if (io) {
+          io.to(`booking:${bookingId}`).emit('booking:dispute_response', { bookingId, response });
+        }
+      }
+    } catch (chatError) {
+      console.error('Failed to send dispute response chat message (non-fatal):', chatError);
+    }
+
+    return res.json({
+      data: updateRes.rows[0],
+      message: 'Your response has been recorded and the admin has been notified.',
+    });
+  } catch (error) {
+    console.error('Error saving dispute response:', error);
+    return res.status(500).json({ error: 'Failed to save your response' });
   }
 });
 
@@ -3441,7 +4184,8 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
 
     // Get payment info
     const paymentRes = await dbClient.query(
-      `SELECT id, gross_amount, net_provider_amount, status, paymongo_payment_id, paymongo_payment_intent_id
+      `SELECT id, gross_amount, net_provider_amount, commission_amount, status,
+              payment_method_type, paymongo_payment_id, paymongo_payment_intent_id
        FROM payments WHERE booking_id::text = $1`,
       [bookingId]
     );
@@ -3490,8 +4234,90 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
     let releasedAmount = 0;
     let refundedAmount = 0;
     let paymongoRefundResult: { id: string; status: string } | null = null;
+    // Set on a cash dispute where the client is owed money: the platform never held it,
+    // so it cannot send it back. The admin is told the figure to chase instead.
+    let manualRefundRequired = 0;
 
-    if (payment && payment.status === 'succeeded') {
+    // Read from the booking, not only from the payment row. A cash booking that was
+    // disputed before the provider ever confirmed the cash has no payments row at all,
+    // and keying off payment_method_type alone reported it to the admin as an ordinary
+    // online payment - so the "we can't refund this" warning stayed hidden on exactly
+    // the case where the admin most needs it.
+    const isCashPayment = String(booking.payment_method || 'online') === 'cash'
+      || String(payment?.payment_method_type || '') === 'cash';
+
+    if (payment && payment.status === 'succeeded' && isCashPayment) {
+      // Cash disputes cannot be settled by moving money, because the platform never had
+      // any: the client handed it to the provider on the day. Two things still have to
+      // happen, and neither of them is a refund.
+      //
+      //  1. The resolution is recorded and the booking leaves 'disputed' - an admin must
+      //     never be blocked from closing a case just because the money moved offline.
+      //     The old code would have reached createRefund, found no PayMongo payment id,
+      //     thrown, and rolled the whole resolution back.
+      //  2. If the client is owed some or all of it back, the platform gives up its
+      //     commission on that share. Keeping a 15% cut of a shoot that was refunded
+      //     would mean the platform profited from the failure.
+      //
+      // The refund itself is between the two people, and the response says so.
+      manualRefundRequired = clientRefundAmount;
+
+      const commissionCharged = parseFloat(payment.commission_amount || 0) || 0;
+      const commissionToReverse = Math.round(((commissionCharged * refundPct) / 100) * 100) / 100;
+
+      if (commissionToReverse > 0) {
+        const walletRes = await dbClient.query(
+          `SELECT id, available_balance FROM wallets WHERE provider_id::text = $1 FOR UPDATE`,
+          [providerUserId]
+        );
+        let cashWallet = walletRes.rows[0];
+        if (!cashWallet) {
+          const created = await dbClient.query(
+            `INSERT INTO wallets (provider_id, available_balance, pending_balance)
+             VALUES ($1, 0, 0)
+             RETURNING id, available_balance`,
+            [providerUserId]
+          );
+          cashWallet = created.rows[0];
+        }
+
+        const currentAvailable = parseFloat(cashWallet.available_balance) || 0;
+        const newAvailable = Math.round((currentAvailable + commissionToReverse) * 100) / 100;
+
+        await dbClient.query(
+          `UPDATE wallets SET available_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id::text = $2`,
+          [newAvailable, String(cashWallet.id)]
+        );
+
+        await dbClient.query(
+          `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
+           VALUES ($1, $2, 'adjustment', $3, $4, $5, $6)`,
+          [
+            String(cashWallet.id),
+            String(payment.id),
+            commissionToReverse,
+            newAvailable,
+            `dispute_cash_commission_reversal_${bookingId}`,
+            `Platform commission reversed (${refundPct}%) after the cash booking #${bookingId} was disputed`,
+          ]
+        );
+      }
+
+      await dbClient.query(
+        `UPDATE payments
+         SET status = $2,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $1`,
+        [String(payment.id), refundPct >= 100 ? 'refunded' : refundPct > 0 ? 'partially_refunded' : 'succeeded']
+      );
+
+      // The provider keeps whatever share of the cash the resolution leaves them, and
+      // they already physically hold it - so from the wallet's point of view nothing was
+      // released, but the booking is genuinely settled.
+      releasedAmount = Math.round((grossAmount - clientRefundAmount) * 100) / 100;
+      paymentReleased = releasedAmount > 0;
+      refundedAmount = clientRefundAmount;
+    } else if (payment && payment.status === 'succeeded') {
       // If the client is owed money back, issue a real PayMongo refund first, before
       // touching any balances. Nothing has been COMMITted yet, so if this throws, the
       // outer catch rolls back the booking status update too - the booking stays
@@ -3763,7 +4589,11 @@ router.put('/:id/resolve-dispute', verifyToken, async (req: Request & { userId?:
           refunded_to_client: refundedAmount,
           refund_percentage: refundPct,
           paymongo_refund_id: paymongoRefundResult?.id || null,
-          refund_status: paymongoRefundResult?.status || null
+          refund_status: paymongoRefundResult?.status || null,
+          payment_method: isCashPayment ? 'cash' : 'online',
+          // Non-zero only for cash: the platform can't send back money it never held,
+          // so this is what the provider has to return to the client directly.
+          manual_refund_required: manualRefundRequired,
         }
       });
   } catch (error: any) {

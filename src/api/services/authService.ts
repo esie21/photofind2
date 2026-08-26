@@ -51,6 +51,28 @@ export interface PortfolioImageMeta {
 
 export type PortfolioMeta = Record<string, PortfolioImageMeta>;
 
+/**
+ * Per-project metadata, keyed by the album name that PortfolioImageMeta.album holds.
+ * See users.portfolio_albums. Every field is optional: an album with no entry here still
+ * renders from its images alone.
+ */
+export interface PortfolioAlbumMeta {
+  /** What the job was - the brief, the occasion, how it went. */
+  description?: string;
+  /** One of CATEGORY_OPTIONS. Drives the filter chips on the public grid. */
+  category?: string;
+  /** Where the work happened. Shown on the card beside the date. */
+  location?: string;
+  /** ISO date (YYYY-MM-DD) the work was done. */
+  done_on?: string;
+  /** Stored path of the item to lead with. Falls back to the album's first item. */
+  cover?: string;
+  /** Position on the public grid. */
+  order?: number;
+}
+
+export type PortfolioAlbums = Record<string, PortfolioAlbumMeta>;
+
 export interface User {
   id: string;
   email: string;
@@ -61,6 +83,8 @@ export interface User {
   portfolio_images?: string[];
   /** Caption/album for each portfolio image, keyed by its stored path. */
   portfolio_meta?: PortfolioMeta;
+  /** Title, context and cover for each project, keyed by album name. */
+  portfolio_albums?: PortfolioAlbums;
   bio?: string;
   years_experience?: number;
   location?: string;
@@ -69,6 +93,8 @@ export interface User {
   is_verified?: boolean;
   verification_status?: 'unsubmitted' | 'pending' | 'approved' | 'rejected' | string;
   verification_documents?: Array<{ path: string; original_name: string; uploaded_at: string }> | null;
+  /** False for a Google account that has never set a real password - see routes/auth.ts. */
+  has_password?: boolean;
 }
 
 const authService = {
@@ -123,6 +149,10 @@ const authService = {
 
   async getCurrentUser(): Promise<User> {
     return apiClient.get<User>(API_CONFIG.ENDPOINTS.AUTH.ME);
+  },
+
+  async changePassword(data: { currentPassword?: string; newPassword: string }): Promise<void> {
+    await apiClient.post<{ success: boolean }>(API_CONFIG.ENDPOINTS.AUTH.CHANGE_PASSWORD, data);
   },
 
   setToken(token: string | null) {

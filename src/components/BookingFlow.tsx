@@ -3,6 +3,7 @@ import { Check, Calendar as CalendarIcon, Clock, CreditCard, ChevronRight, Messa
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import bookingService from '../api/services/bookingService';
 import serviceService, { Service } from '../api/services/serviceService';
+import { PLATFORM_COMMISSION_RATE, PLATFORM_COMMISSION_PERCENT } from '../constants/payment';
 import availabilityService from '../api/services/availabilityService';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
@@ -40,6 +41,10 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
   const [stepError, setStepError] = useState<string | null>(null);
   // Hourly booking specific state
   const [selectedHours, setSelectedHours] = useState<number>(1);
+  // How the client intends to pay. 'online' is the default and the only option unless
+  // the chosen service has opted into cash; the server re-checks that flag, so this is
+  // presentation, not enforcement.
+  const [paymentMethod, setPaymentMethod] = useState<'online' | 'cash'>('online');
 
   // Availability state
   const [availableSlots, setAvailableSlots] = useState<TimeSlot[]>([]);
@@ -357,6 +362,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
           package_price: packagePrice,
           has_hourly: hasHourly,
           has_package: hasPackage,
+          accepts_cash: s.accepts_cash === true,
           description: s.description,
           features: s.description ? s.description.split('\n').filter(Boolean) : [s.category || 'Professional service'],
         };
@@ -364,9 +370,9 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     }
     // Fallback default services if provider has none
     return [
-      { id: 'basic', name: 'Basic Package', duration: '4 hours', duration_minutes: 240, photos: '200+ photos', price: 1200, pricing_type: 'both' as const, hourly_rate: 300, package_price: 1200, has_hourly: true, has_package: true, description: '', features: ['4 hours coverage', '200+ edited photos', 'Online gallery', 'Print release'] },
-      { id: 'standard', name: 'Standard Package', duration: '8 hours', duration_minutes: 480, photos: '400+ photos', price: 2400, pricing_type: 'both' as const, hourly_rate: 400, package_price: 2400, has_hourly: true, has_package: true, description: '', features: ['8 hours coverage', '400+ edited photos', 'Online gallery', 'Print release', 'Engagement session', 'USB drive'] },
-      { id: 'premium', name: 'Premium Package', duration: 'Full day', duration_minutes: 720, photos: '600+ photos', price: 3600, pricing_type: 'both' as const, hourly_rate: 500, package_price: 3600, has_hourly: true, has_package: true, description: '', features: ['Full day coverage', '600+ edited photos', 'Online gallery', 'Print release', 'Engagement session', 'USB drive', 'Second photographer', 'Premium album'] },
+      { id: 'basic', name: 'Basic Package', duration: '4 hours', duration_minutes: 240, photos: '200+ photos', price: 1200, pricing_type: 'both' as const, hourly_rate: 300, package_price: 1200, has_hourly: true, has_package: true, accepts_cash: false, description: '', features: ['4 hours coverage', '200+ edited photos', 'Online gallery', 'Print release'] },
+      { id: 'standard', name: 'Standard Package', duration: '8 hours', duration_minutes: 480, photos: '400+ photos', price: 2400, pricing_type: 'both' as const, hourly_rate: 400, package_price: 2400, has_hourly: true, has_package: true, accepts_cash: false, description: '', features: ['8 hours coverage', '400+ edited photos', 'Online gallery', 'Print release', 'Engagement session', 'USB drive'] },
+      { id: 'premium', name: 'Premium Package', duration: 'Full day', duration_minutes: 720, photos: '600+ photos', price: 3600, pricing_type: 'both' as const, hourly_rate: 500, package_price: 3600, has_hourly: true, has_package: true, accepts_cash: false, description: '', features: ['Full day coverage', '600+ edited photos', 'Online gallery', 'Print release', 'Engagement session', 'USB drive', 'Second photographer', 'Premium album'] },
     ];
   }, [providerServices]);
 
@@ -374,6 +380,16 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
 
   // Check if selected service has both pricing options
   const selectedServiceHasBothPricing = selectedServiceData?.has_hourly && selectedServiceData?.has_package;
+
+  // Cash is offered only when this particular service has opted in.
+  const cashAvailable = selectedServiceData?.accepts_cash === true;
+
+  // Switching to a service that doesn't take cash has to drop the choice, or a client
+  // who picked cash on the previous service would carry it into a booking the server
+  // will reject at submit - after they've held slots and reached the last step.
+  useEffect(() => {
+    if (!cashAvailable) setPaymentMethod('online');
+  }, [cashAvailable]);
 
   // Dynamic steps based on whether we need pricing selection step
   const steps = selectedServiceHasBothPricing
@@ -444,9 +460,14 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
 
   // Pricing based on booking type selection
   const isHourlyPricing = bookingType === 'hourly';
+  // Both branches fall back to the flat `price` column, same as the package branch
+  // already did. A service whose specific hourly_rate/package_price came back empty -
+  // a stale row from before the backend wrote those columns correctly, or any other gap
+  // between what's configured and what loaded - should charge whatever price the service
+  // does have, not silently charge nothing for an hour of a provider's time.
   const basePrice = selectedServiceData
     ? (bookingType === 'hourly'
-        ? (selectedServiceData.hourly_rate || 0)
+        ? (selectedServiceData.hourly_rate || selectedServiceData.price || 0)
         : (selectedServiceData.package_price || selectedServiceData.price || 0))
     : 0;
   const packageDurationMinutes = selectedServiceData?.duration_minutes || 0;
@@ -466,7 +487,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
           ? basePrice * packageUnits
           : basePrice)
     : 0;
-  const platformFee = Number.isFinite(servicePrice) ? servicePrice * 0.15 : 0;
+  const platformFee = Number.isFinite(servicePrice) ? servicePrice * PLATFORM_COMMISSION_RATE : 0;
   const total = Number.isFinite(servicePrice + platformFee) ? servicePrice + platformFee : 0;
 
   const selectedDateString = useMemo(() => {
@@ -737,7 +758,11 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
   };
 
   const submitBooking = async () => {
-    if (!user || !selectedServiceData) {
+    // selectedService, not selectedServiceData: the id is what gets submitted, and
+    // narrowing it here is what lets the payload below typecheck. They can't disagree
+    // (selectedServiceData is looked up by that id) but only one of them proves to the
+    // compiler that service_id isn't null.
+    if (!user || !selectedService || !selectedServiceData) {
       setError('Missing required information. Please log in and select a service.');
       return;
     }
@@ -791,6 +816,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
         slot_ids: heldSlotIds,
         duration_minutes: totalDurationMinutes,
         total_price: Number(total.toFixed(2)),
+        payment_method: paymentMethod,
       };
 
       console.log('Submitting booking:', bookingData);
@@ -800,7 +826,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
       // it, and the backend refuses to create a payment intent before that, so the
       // client pays from the Bookings page once it has been confirmed.
       setSuccess(true);
-      toast.success('Request sent!', `${providerName} will review your booking request.`);
+      toast.success(
+        'Request sent!',
+        paymentMethod === 'cash'
+          ? `${providerName} will review your request. Bring the cash to the shoot.`
+          : `${providerName} will review your booking request.`
+      );
       setTimeout(() => {
         onComplete();
       }, 2500);
@@ -1337,6 +1368,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                   const isToday = todayStr === dateObj.toDateString();
 
                                   const showUnavailable = status === 'booked' || status === 'blocked';
+                                  // The provider's own note for why they blocked the day
+                                  // ("Vacation"), which the calendar endpoint has always
+                                  // returned and this grid never surfaced.
+                                  const blockedReason = status === 'blocked'
+                                    ? String(getDayOverride(day)?.reason || '').trim()
+                                    : '';
 
                                   return (
                                     <button
@@ -1349,7 +1386,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                         ${selectable ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}
                                       `}
                                       title={
-                                        status === 'blocked' ? 'Provider unavailable' :
+                                        status === 'blocked' ? (blockedReason ? `Provider unavailable - ${blockedReason}` : 'Provider unavailable') :
                                         status === 'booked' ? 'Fully booked' :
                                         status === 'past' ? 'Past date' :
                                         dayData?.available_count ? `${dayData.available_count} slot${dayData.available_count !== 1 ? 's' : ''} available` :
@@ -1364,7 +1401,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                             ? 'bg-blue-600 text-white'
                                             : isToday
                                               ? 'border border-blue-600 text-blue-600'
-                                              : 'text-gray-900'
+                                              // A day that is blocked or fully booked reads
+                                              // as unavailable rather than merely dimmed,
+                                              // matching how a taken time slot is styled.
+                                              : showUnavailable
+                                                ? 'text-red-400 line-through'
+                                                : 'text-gray-900'
                                           }
                                           ${!isSelected && selectable ? 'hover:bg-gray-100' : ''}
                                         `}
@@ -1764,7 +1806,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                           <span className="text-gray-900">₱{servicePrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
                         </div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-gray-600">Platform Fee (15%)</span>
+                          <span className="text-gray-600">Platform Fee ({PLATFORM_COMMISSION_PERCENT}%)</span>
                           <span className="text-gray-900">₱{platformFee.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
                         </div>
                         <div className="flex justify-between font-semibold text-lg pt-2 border-t border-gray-200">
@@ -1774,25 +1816,77 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       </div>
                     </div>
 
-                    <div className="bg-green-50 border border-green-200 rounded-xl p-4">
-                      <div className="flex items-start gap-3">
-                        <Check className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-                        <div className="text-sm text-green-800">
-                          <p className="mb-1"><strong>You pay after the provider confirms</strong></p>
-                          <p>Sending this request doesn&apos;t charge you. Once {providerName} accepts, a &quot;Pay now&quot; button appears on your Bookings page. Payment is handled securely by PayMongo and your card details are never stored on our servers.</p>
+                    {/* Only shown when this service takes cash. With one option there is
+                        no choice to present, and a disabled second option just advertises
+                        something the client can't have. */}
+                    {cashAvailable && (
+                      <div>
+                        <h3 className="text-gray-900 mb-1">How do you want to pay?</h3>
+                        <p className="text-sm text-gray-600 mb-3">You can change nothing about this later, so pick the one you mean.</p>
+                        <div className="pay-method">
+                          <button
+                            type="button"
+                            aria-pressed={paymentMethod === 'online'}
+                            onClick={() => setPaymentMethod('online')}
+                            className="pay-method__option"
+                          >
+                            <span className="pay-method__icon"><CreditCard className="w-5 h-5" /></span>
+                            <span>
+                              <span className="pay-method__label">Pay online</span>
+                              <span className="pay-method__hint">Card, GCash or PayMaya after {providerName} accepts. We hold the money until the shoot is done.</span>
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={paymentMethod === 'cash'}
+                            onClick={() => setPaymentMethod('cash')}
+                            className="pay-method__option"
+                          >
+                            <span className="pay-method__icon"><PhilippinePeso className="w-5 h-5" /></span>
+                            <span>
+                              <span className="pay-method__label">Pay cash on the day</span>
+                              <span className="pay-method__hint">Hand ₱{total.toLocaleString('en-PH', { minimumFractionDigits: 2 })} to {providerName} at the shoot.</span>
+                            </span>
+                          </button>
                         </div>
                       </div>
-                    </div>
+                    )}
 
-                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-                      <div className="flex items-start gap-3">
-                        <CreditCard className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-                        <div className="text-sm text-blue-800">
-                          <p className="mb-1"><strong>Payment Methods Accepted</strong></p>
-                          <p>Credit/Debit Cards (Visa, Mastercard), GCash, PayMaya, and more.</p>
+                    {paymentMethod === 'cash' ? (
+                      <div className="cash-notice">
+                        <Info className="w-5 h-5 cash-notice__icon" />
+                        <div>
+                          <p className="cash-notice__title">Paying cash means no refund protection</p>
+                          <p className="cash-notice__body">
+                            Nothing is charged now or when {providerName} accepts &mdash; you bring ₱{total.toLocaleString('en-PH', { minimumFractionDigits: 2 })} to the shoot.
+                            Because the money goes straight to {providerName} and never through PhotoFind, we can&apos;t hold it in escrow
+                            and we can&apos;t refund it for you if something goes wrong. Paying online keeps both of those.
+                          </p>
                         </div>
                       </div>
-                    </div>
+                    ) : (
+                      <>
+                        <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                          <div className="flex items-start gap-3">
+                            <Check className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                            <div className="text-sm text-green-800">
+                              <p className="mb-1"><strong>You pay after the provider confirms</strong></p>
+                              <p>Sending this request doesn&apos;t charge you. Once {providerName} accepts, a &quot;Pay now&quot; button appears on your Bookings page. Payment is handled securely by PayMongo and your card details are never stored on our servers.</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                          <div className="flex items-start gap-3">
+                            <CreditCard className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                            <div className="text-sm text-blue-800">
+                              <p className="mb-1"><strong>Payment Methods Accepted</strong></p>
+                              <p>Credit/Debit Cards (Visa, Mastercard), GCash, PayMaya, and more.</p>
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               )}
@@ -1906,7 +2000,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                           </span>
                         </div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-gray-600">Platform Fee (15%)</span>
+                          <span className="text-gray-600">Platform Fee ({PLATFORM_COMMISSION_PERCENT}%)</span>
                           <span className="text-gray-900">
                             ₱{platformFee.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
                           </span>

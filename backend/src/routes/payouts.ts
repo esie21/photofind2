@@ -80,6 +80,22 @@ router.post('/request', verifyToken, async (req: Request & { userId?: string }, 
     const wallet = walletRes.rows[0];
     const availableBalance = parseFloat(wallet.available_balance);
 
+    // A negative balance means unpaid commission on cash bookings (settleCashPayment
+    // debits it there, because the platform never touched that money and has no other
+    // way to collect its cut). The generic "insufficient balance" branch below would
+    // technically catch this too, but it would report `available: -450` and leave the
+    // provider with no idea what happened or how to fix it.
+    if (availableBalance < 0) {
+      const owed = Math.round(-availableBalance * 100) / 100;
+      await dbClient.query('ROLLBACK');
+      return res.status(400).json({
+        error: `You owe ₱${owed.toFixed(2)} in platform commission on cash bookings. That is cleared automatically by your next online payments, and payouts resume once your balance is back above zero.`,
+        available: availableBalance,
+        outstanding_commission: owed,
+        requested: payoutAmount,
+      });
+    }
+
     if (payoutAmount > availableBalance) {
       await dbClient.query('ROLLBACK');
       return res.status(400).json({

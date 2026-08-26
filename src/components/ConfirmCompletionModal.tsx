@@ -4,6 +4,7 @@ import { X, AlertCircle, Loader2, CheckCircle, AlertTriangle, Image, Clock } fro
 import bookingService, { BookingEvidence } from '../api/services/bookingService';
 import { getUploadUrl } from '../api/config';
 import { useToast } from '../context/ToastContext';
+import { DisputeEvidencePicker, PickedEvidenceFile, revokePickedFiles } from './DisputeEvidencePicker';
 
 // The backend returns these exact messages (bookings.ts) when this booking was already
 // resolved elsewhere (e.g. the 48-hour auto-confirm scheduler) while this modal was open.
@@ -31,6 +32,7 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
   const [evidence, setEvidence] = useState<BookingEvidence[]>([]);
   const [showDispute, setShowDispute] = useState(false);
   const [disputeReason, setDisputeReason] = useState('');
+  const [disputeFiles, setDisputeFiles] = useState<PickedEvidenceFile[]>([]);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
   // Escape reaches the lightbox first when one is open - useModal only delivers it to
@@ -90,6 +92,24 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
 
     try {
       await bookingService.confirmBooking(booking.id, false, disputeReason.trim());
+
+      // Photos go up as a second call: the booking only becomes a valid upload target
+      // once it is actually 'disputed', and PUT /:id/confirm takes JSON, not multipart.
+      // A failure here must not read as "dispute not filed" - the dispute is already on
+      // record, and the client can attach the photos later from the booking's banner.
+      if (disputeFiles.length > 0) {
+        try {
+          await bookingService.uploadDisputeEvidence(booking.id, disputeFiles.map((f) => f.file));
+        } catch (uploadErr: any) {
+          toast.warning(
+            'Dispute filed, photos failed',
+            uploadErr?.message || 'Your dispute was raised. Add the photos from the booking on your Bookings page.'
+          );
+        }
+      }
+
+      revokePickedFiles(disputeFiles);
+      setDisputeFiles([]);
       onSuccess();
     } catch (err: any) {
       console.error('Dispute error:', err);
@@ -275,6 +295,16 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
                   rows={3}
                   className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-red-500 focus:border-transparent resize-none"
                 />
+                {/* Until now the client's case was text only, while the provider's
+                    completion photos were already in front of the admin. */}
+                <DisputeEvidencePicker
+                  files={disputeFiles}
+                  onChange={setDisputeFiles}
+                  disabled={isLoading}
+                  onError={setError}
+                  label="Supporting photos (optional)"
+                  helpText="Photos showing the problem. The admin reviews these next to the provider's."
+                />
               </div>
             )}
           </div>
@@ -315,6 +345,8 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
                   onClick={() => {
                     setShowDispute(false);
                     setDisputeReason('');
+                    revokePickedFiles(disputeFiles);
+                    setDisputeFiles([]);
                     setError(null);
                   }}
                   disabled={isLoading}
