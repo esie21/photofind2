@@ -2983,6 +2983,9 @@ html {
   width: 100%;
   max-width: 100%;
   overflow: hidden;
+  /* Matches the height GoogleLogin gives its own container at size="large", so the
+     row does not collapse and then jump during the frame before the button mounts. */
+  min-height: 40px;
 }
 
 /* Bottom of the last control to the home bar, on the step that has no footer. */

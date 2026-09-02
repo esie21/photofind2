@@ -101,7 +101,12 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
   // was wider than the form column on any phone and pushed the sheet sideways. Measure
   // the slot instead and clamp to the 200-400px Google itself accepts.
   const googleSlotRef = useRef<HTMLDivElement | null>(null);
-  const [googleButtonWidth, setGoogleButtonWidth] = useState(320);
+  // Null until the slot has actually been measured. GoogleLogin re-runs
+  // google.accounts.id.initialize() whenever its `width` prop changes, so seeding this
+  // with a guess meant every open initialised GSI twice - once for the guess, once for
+  // the real measurement - which is what "initialize() is called multiple times" was.
+  // The button is held back until there is a real width, so it initialises once.
+  const [googleButtonWidth, setGoogleButtonWidth] = useState<number | null>(null);
 
   // The terms preview registers separately so Escape closes it without also closing
   // the sign-up form underneath, and so the page stays locked while either is open.
@@ -644,15 +649,17 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
               <div className="space-y-3">
                 {googleClientId ? (
                   <div ref={googleSlotRef} className="auth-google-slot">
-                    <GoogleLogin
-                      onSuccess={handleGoogleSuccess}
-                      onError={() => setError('Google sign-in was cancelled or failed')}
-                      theme="outline"
-                      size="large"
-                      width={googleButtonWidth}
-                      text={mode === 'login' ? 'signin_with' : 'signup_with'}
-                      shape="rectangular"
-                    />
+                    {googleButtonWidth !== null && (
+                      <GoogleLogin
+                        onSuccess={handleGoogleSuccess}
+                        onError={() => setError('Google sign-in was cancelled or failed')}
+                        theme="outline"
+                        size="large"
+                        width={googleButtonWidth}
+                        text={mode === 'login' ? 'signin_with' : 'signup_with'}
+                        shape="rectangular"
+                      />
+                    )}
                   </div>
                 ) : (
                   <div className="p-3 border border-amber-200 bg-amber-50 rounded-xl text-sm text-amber-800">
