@@ -1438,7 +1438,6 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;`);
     await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
     await client.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
-    await client.query(`ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS details JSONB;`);
 
     // Reviews indexes - only create if columns exist
     const reviewColsCheck = await client.query(`
@@ -1620,6 +1619,12 @@ export async function initializeTables() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs (action);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs (entity_type, entity_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs (created_at DESC);`);
+    // Sat in the middle of the reviews block above, which runs ~140 lines before
+    // audit_logs is created. On any database that already had the table it succeeded and
+    // nothing looked wrong; on a database built from nothing it threw, and because the
+    // whole function is one try block, everything after it - including seeding the admin
+    // user - was silently skipped. It belongs here, after the table is guaranteed.
+    await client.query(`ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS details JSONB;`);
 
     // ==================== SUPPORT TICKETS TABLE ====================
     const supportTicketsExist = await client.query(`SELECT to_regclass('public.support_tickets') as exists`);
@@ -1711,7 +1716,16 @@ export async function initializeTables() {
     }
 
     console.log('Database tables initialized successfully');
-    // Seed admin user if not present
+  } catch (error) {
+    console.error('Error initializing tables:', error);
+  }
+
+  // Seeded in its own block rather than at the end of the one above. The admin is the
+  // only account a fresh deployment starts with, and it used to be the last statement
+  // inside that single enormous try - so one failing migration anywhere in the previous
+  // sixteen hundred lines skipped it with no message naming the admin at all, leaving a
+  // running site nobody could sign in to. Whatever else went wrong, still try.
+  try {
     const adminEmail = process.env.ADMIN_EMAIL || 'esiecadungog772@gmail.com';
     const adminPassword = process.env.ADMIN_PASSWORD || '12345678';
     const adminName = process.env.ADMIN_NAME || 'Admin';
@@ -1728,7 +1742,7 @@ export async function initializeTables() {
       console.log('Admin user already exists');
     }
   } catch (error) {
-    console.error('Error initializing tables:', error);
+    console.error('Admin user seeding failed:', error);
   } finally {
     client.release();
   }
