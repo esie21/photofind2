@@ -1,3 +1,9 @@
+// The single place the deployed backend's origin is named. Everything that has to reach
+// the backend directly instead of through Vercel's /api rewrite - uploads, static files
+// and the Socket.IO connection - is built from this, so moving hosts is one edit here
+// plus the rewrite in vercel.json rather than a hunt through the file.
+const PROD_BACKEND_ORIGIN = 'https://photofind2.onrender.com';
+
 // Both environments use a relative path so the browser only ever talks to one origin:
 // in production Vercel rewrites /api to the backend, in development Vite's dev-server
 // proxy (see vite.config.ts) forwards it to localhost:3001.
@@ -8,22 +14,27 @@ const API_BASE = import.meta.env.PROD
 // Direct backend URL for file uploads (bypasses Vercel's 4.5MB body size limit).
 // Only production needs to skip the rewrite - the dev proxy streams uploads fine.
 const DIRECT_BACKEND_URL = import.meta.env.PROD
-  ? 'https://photofind2.onrender.com/api'
+  ? `${PROD_BACKEND_ORIGIN}/api`
   : (import.meta.env.VITE_API_URL || '/api');
 
 // Static files URL (for uploaded images, evidence photos, etc.)
 // Production points straight at the backend to avoid Vercel proxy issues with static
 // files; development goes through the dev-server proxy.
 const STATIC_BASE_URL = import.meta.env.PROD
-  ? 'https://photofind2.onrender.com/uploads'
+  ? `${PROD_BACKEND_ORIGIN}/uploads`
   : '/uploads';
 
-// Origin for Socket.IO connections. Callers used to derive this by stripping "/api" off
-// BASE_URL, which now yields an empty string in development - socket.io-client does not
-// resolve "" to the current origin reliably, so state it explicitly instead. Production
-// keeps exactly the value it resolved to before.
+// Origin for Socket.IO connections, which must be the backend's own origin in
+// production. This used to be BASE_URL with a trailing "/api" stripped off - in
+// production BASE_URL *is* "/api", so that yielded the empty string, and
+// socket.io-client resolves "" to the page's own origin. Every connection therefore
+// tried to open wss://<the Vercel domain>/socket.io/, where two things are wrong at
+// once: the rewrite in vercel.json only covers /api, and Vercel does not proxy
+// WebSocket traffic at all. Chat, support and live notifications could never connect.
+// Development still points at the dev-server origin, whose proxy does forward
+// /socket.io to localhost:3001 with ws: true.
 const SOCKET_BASE_URL = import.meta.env.PROD
-  ? API_BASE.replace(/\/api$/i, '')
+  ? PROD_BACKEND_ORIGIN
   : (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
 
 /**
