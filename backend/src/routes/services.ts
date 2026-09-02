@@ -28,6 +28,33 @@ function validateRates(body: any): string | null {
   );
 }
 
+/**
+ * The longest package a client can actually book, in minutes.
+ *
+ * This is not a taste judgement about how long a shoot may run - it is the point past
+ * which the booking flow stops being able to satisfy the package at all. The duration
+ * step requires a client to select at least `duration_minutes` of consecutive
+ * availability, and the slot picker can only load so many days at once
+ * (MAX_TIMESLOT_WINDOW_DAYS in routes/availability.ts). A package longer than the
+ * window is not merely hard to book, it is unsatisfiable: the client is held on the
+ * date step by an error no amount of clicking can clear.
+ *
+ * Nothing validated this before, so a provider typing "48" into a field labelled
+ * "Duration (hours)" silently published a service no one could ever book.
+ */
+const MAX_SERVICE_DURATION_MINUTES = 14 * 24 * 60; // 14 days
+
+/** Rejects a duration the booking flow could never satisfy. Absent means "not set". */
+function durationError(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 'Duration must be greater than zero';
+  if (n > MAX_SERVICE_DURATION_MINUTES) {
+    return `Duration cannot exceed ${MAX_SERVICE_DURATION_MINUTES / 60} hours (${MAX_SERVICE_DURATION_MINUTES / (60 * 24)} days)`;
+  }
+  return null;
+}
+
 // Helper function to get provider ID from user ID
 async function getProviderIdFromUserId(userId: string): Promise<string> {
   try {
@@ -381,6 +408,11 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       return res.status(400).json({ error: rateProblem });
     }
 
+    const durationProblem = durationError(duration_minutes);
+    if (durationProblem) {
+      return res.status(400).json({ error: durationProblem });
+    }
+
     // providers.ts's category filter and stats queries match stored values with exact
     // string equality, so a category outside the picker's own options would silently
     // make this service unfindable by category rather than erroring anywhere.
@@ -559,6 +591,11 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
     const rateProblem = validateRates(req.body);
     if (rateProblem) {
       return res.status(400).json({ error: rateProblem });
+    }
+
+    const durationProblem = durationError(duration_minutes);
+    if (durationProblem) {
+      return res.status(400).json({ error: durationProblem });
     }
 
     // Get provider ID from user ID

@@ -37,6 +37,16 @@ import { BookingDetailsModal } from './BookingDetailsModal';
 type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
 
 /**
+ * The longest package duration a client can actually book, in hours.
+ *
+ * Mirrors MAX_SERVICE_DURATION_MINUTES in the backend's routes/services.ts, which is
+ * the authority. Past this the booking flow cannot load enough consecutive
+ * availability to satisfy the package, so the service publishes fine and then strands
+ * every client on the date step with an error no amount of clicking clears.
+ */
+const MAX_PACKAGE_DURATION_HOURS = 14 * 24;
+
+/**
  * A service row as the API returns it, in the shape the pricing editor works with.
  * Three copies of this mapping had drifted apart - one of them disagreed with the other
  * two about whether pricing_type 'both' enables the hourly rate.
@@ -2823,8 +2833,17 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                     placeholder="e.g., 4"
                                     className="w-28 px-3 py-2 text-sm border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none"
                                     min="0.5"
+                                    max={MAX_PACKAGE_DURATION_HOURS}
                                     step="0.5"
                                   />
+                                  {/* A package longer than the booking flow's slot window can't be
+                                      satisfied by any selection, so it publishes a service nobody can
+                                      book. The server rejects it too - this is just the earlier word. */}
+                                  {pkg.duration_minutes && pkg.duration_minutes / 60 > MAX_PACKAGE_DURATION_HOURS && (
+                                    <p className="text-xs text-red-600 mt-1">
+                                      Maximum {MAX_PACKAGE_DURATION_HOURS} hours ({MAX_PACKAGE_DURATION_HOURS / 24} days).
+                                    </p>
+                                  )}
                                 </div>
                               </div>
                               <p className="text-xs text-green-600 mt-2">Fixed price for the entire package duration</p>

@@ -61,6 +61,61 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
   // unavailable in the grid - this counts only the ones that can actually be picked.
   const bookableSlotsCount = availableSlots.filter(s => s.status !== 'booked').length;
 
+  // How many consecutive days of availability the picker loads at once.
+  //
+  // It used to load exactly one, and that alone made a booking of 24 hours or more
+  // impossible: a selection can only be built from slots that are on screen, so it
+  // could never reach past midnight no matter how the provider's schedule was set up.
+  // (The other half of the problem was that days didn't join up at all - see
+  // ruleWindowForDate in the backend's routes/availability.ts.)
+  const SLOT_WINDOW_MIN_DAYS = 3;
+  // Keep in step with MAX_TIMESLOT_WINDOW_DAYS server-side; asking for more is clamped
+  // there anyway, which would silently hand back a window too short for the package.
+  const SLOT_WINDOW_MAX_DAYS = 16;
+
+  // The grid renders one section per calendar day. With a multi-day window loaded a
+  // single flat grid would run two midnights together with nothing to mark them, and
+  // "9:00 PM" would appear three times over with no way to tell the days apart.
+  const slotsByDay = useMemo(() => {
+    const groups: { key: string; label: string; slots: TimeSlot[] }[] = [];
+    const indexByKey = new Map<string, number>();
+
+    for (const slot of availableSlots) {
+      const start = new Date(slot.start);
+      const key = start.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+
+      if (!indexByKey.has(key)) {
+        indexByKey.set(key, groups.length);
+        groups.push({
+          key,
+          label: start.toLocaleDateString('en-US', {
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+            timeZone: 'Asia/Manila',
+          }),
+          slots: [],
+        });
+      }
+
+      groups[indexByKey.get(key)!].slots.push(slot);
+    }
+
+    return groups;
+  }, [availableSlots]);
+
+  const slotWindowDays = useMemo(() => {
+    // Read straight off providerServices rather than the transformed `services` memo,
+    // which is declared further down and would be in its temporal dead zone here.
+    const packageMinutes = Number(
+      providerServices.find(svc => String(svc.id) === String(selectedService))?.duration_minutes || 0
+    );
+    // A package has to fit inside the window with a day in hand for a start time that
+    // isn't midnight, or its duration requirement can never be satisfied on screen.
+    const neededForPackage = packageMinutes > 0 ? Math.ceil(packageMinutes / (24 * 60)) + 1 : 0;
+    return Math.min(SLOT_WINDOW_MAX_DAYS, Math.max(SLOT_WINDOW_MIN_DAYS, neededForPackage));
+  }, [providerServices, selectedService]);
+
   // Fetch provider services on mount
   useEffect(() => {
     const fetchServices = async () => {
@@ -121,7 +176,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     if (!providerId) return;
     setLoadingSlots(true);
     try {
-      const data = await availabilityService.getAvailableSlots(providerId, dateStr);
+      const data = await availabilityService.getAvailableSlots(providerId, dateStr, slotWindowDays);
       setAvailableSlots(data.slots || []);
     } catch (err) {
       console.error('Failed to fetch slots:', err);
@@ -129,7 +184,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
     } finally {
       setLoadingSlots(false);
     }
-  }, [providerId]);
+  }, [providerId, slotWindowDays]);
 
   // When date changes, fetch slots and release holds
   useEffect(() => {
@@ -699,7 +754,19 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
         return false;
       }
       if (bookingType === 'package' && packageDurationMinutes > 0 && totalDurationMinutes < packageDurationMinutes) {
-        setStepError(`This package requires ${formatDuration(packageDurationMinutes)}. You selected ${formatDuration(totalDurationMinutes)} — tap a later end time or use Auto-fill.`);
+        // Distinguish "you haven't dragged far enough yet" from "this provider does
+        // not have that much consecutive time free". The second reads as the first
+        // otherwise, and the client is left tapping at a grid that can never satisfy
+        // the package however they use it.
+        const bookableMinutes = availableSlots
+          .filter(slot => slot.status !== 'booked' && (!slot.is_held || heldSlotIds.includes(slot.id)))
+          .reduce((sum, slot) => sum + (new Date(slot.end).getTime() - new Date(slot.start).getTime()) / 60000, 0);
+
+        setStepError(
+          bookableMinutes < packageDurationMinutes
+            ? `This package needs ${formatDuration(packageDurationMinutes)}, and this provider only has ${formatDuration(Math.round(bookableMinutes))} free across the days shown. Try a different start date.`
+            : `This package requires ${formatDuration(packageDurationMinutes)}. You selected ${formatDuration(totalDurationMinutes)} — tap a later end time (it can run into the next day) or use Auto-fill.`
+        );
         return false;
       }
     }
@@ -1508,7 +1575,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                       const first = getSortedSelectedSlots(selectedSlots)[0];
                                       const full = buildPackageSlotsFromStart(first);
                                       if (!full) {
-                                        toast.error('Not enough time', `Not enough consecutive availability for ${formatDuration(packageDurationMinutes)} from ${selectedTimeLabel}. Try an earlier start time.`);
+                                        toast.error('Not enough time', `There isn't ${formatDuration(packageDurationMinutes)} of unbroken availability from ${selectedTimeLabel} - something in that stretch is already taken. Try an earlier start time or a different date.`);
                                         return;
                                       }
                                       await applySlotSelection(full);
@@ -1588,68 +1655,80 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                               <p className="text-sm text-gray-400 mt-1">Try selecting a different date</p>
                             </div>
                           ) : (
-                            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-1.5 sm:gap-2">
-                              {availableSlots.map((slot) => {
-                                const startTime = new Date(slot.start);
-                                const timeLabel = startTime.toLocaleTimeString('en-US', {
-                                  hour: 'numeric',
-                                  minute: '2-digit',
-                                  hour12: true,
-                                  timeZone: 'Asia/Manila',
-                                });
-                                const isSelected = selectedSlots.some(s => s.id === slot.id);
-                                const isHeldByMe = heldSlotIds.includes(slot.id);
-                                const isHeldByOther = slot.is_held && !isHeldByMe;
-                                const isBooked = slot.status === 'booked';
-                                const isDisabled = isHeldByOther || isBooked;
-
-                                return (
-                                  <button
-                                    key={slot.id}
-                                    onClick={() => !isDisabled && handleSlotToggle(slot)}
-                                    disabled={isDisabled}
-                                    title={
-                                      isBooked
-                                        ? 'Unavailable - already booked'
-                                        : isHeldByOther
-                                          ? 'Temporarily unavailable (held by another user)'
-                                          : ''
-                                    }
-                                    className={`
-                                      relative p-2 sm:p-3 rounded-lg text-center transition-all duration-150
-                                      ${isBooked
-                                        ? 'bg-red-50 border border-red-200 cursor-not-allowed'
-                                        : isHeldByOther
-                                          ? 'bg-orange-50 border border-orange-200 cursor-not-allowed'
-                                          : isSelected
-                                            ? isHeldByMe
-                                              ? 'bg-green-500 text-white shadow-md'
-                                              : 'bg-blue-600 text-white shadow-md'
-                                            : 'bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-300'
-                                      }
-                                      ${isDisabled && !isHeldByOther && !isBooked ? 'opacity-40 cursor-not-allowed' : ''}
-                                      ${!isDisabled ? 'cursor-pointer active:scale-95' : ''}
-                                    `}
-                                  >
-                                    <span className={`font-medium text-xs sm:text-sm ${
-                                      isBooked ? 'text-red-400 line-through' :
-                                      isHeldByOther ? 'text-orange-400' :
-                                      isSelected ? 'text-white' : 'text-gray-700'
-                                    }`}>
-                                      {timeLabel}
+                            <div className="space-y-4">
+                              {slotsByDay.map((day, dayIndex) => (
+                                <div key={day.key}>
+                                  <div className={`flex items-center gap-2 mb-2 ${dayIndex > 0 ? 'pt-4 border-t border-gray-100' : ''}`}>
+                                    <span className="text-xs font-semibold text-gray-500 uppercase">{day.label}</span>
+                                    <span className="text-xs text-gray-400">
+                                      {dayIndex === 0 ? 'selected date' : 'keep going to book past midnight'}
                                     </span>
-                                    {isHeldByMe && (
-                                      <Check className="w-3 h-3 absolute top-0.5 right-0.5 text-white" />
-                                    )}
-                                    {isHeldByOther && (
-                                      <Timer className="w-3 h-3 absolute top-0.5 right-0.5 text-orange-400" />
-                                    )}
-                                    {isBooked && (
-                                      <Ban className="w-3 h-3 absolute top-0.5 right-0.5 text-red-400" />
-                                    )}
-                                  </button>
-                                );
-                              })}
+                                  </div>
+                                  <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-1.5 sm:gap-2">
+                                  {day.slots.map((slot) => {
+                                    const startTime = new Date(slot.start);
+                                    const timeLabel = startTime.toLocaleTimeString('en-US', {
+                                      hour: 'numeric',
+                                      minute: '2-digit',
+                                      hour12: true,
+                                      timeZone: 'Asia/Manila',
+                                    });
+                                    const isSelected = selectedSlots.some(s => s.id === slot.id);
+                                    const isHeldByMe = heldSlotIds.includes(slot.id);
+                                    const isHeldByOther = slot.is_held && !isHeldByMe;
+                                    const isBooked = slot.status === 'booked';
+                                    const isDisabled = isHeldByOther || isBooked;
+
+                                    return (
+                                      <button
+                                        key={slot.id}
+                                        onClick={() => !isDisabled && handleSlotToggle(slot)}
+                                        disabled={isDisabled}
+                                        title={
+                                          isBooked
+                                            ? 'Unavailable - already booked'
+                                            : isHeldByOther
+                                              ? 'Temporarily unavailable (held by another user)'
+                                              : ''
+                                        }
+                                        className={`
+                                          relative p-2 sm:p-3 rounded-lg text-center transition-all duration-150
+                                          ${isBooked
+                                            ? 'bg-red-50 border border-red-200 cursor-not-allowed'
+                                            : isHeldByOther
+                                              ? 'bg-orange-50 border border-orange-200 cursor-not-allowed'
+                                              : isSelected
+                                                ? isHeldByMe
+                                                  ? 'bg-green-500 text-white shadow-md'
+                                                  : 'bg-blue-600 text-white shadow-md'
+                                                : 'bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-300'
+                                          }
+                                          ${isDisabled && !isHeldByOther && !isBooked ? 'opacity-40 cursor-not-allowed' : ''}
+                                          ${!isDisabled ? 'cursor-pointer active:scale-95' : ''}
+                                        `}
+                                      >
+                                        <span className={`font-medium text-xs sm:text-sm ${
+                                          isBooked ? 'text-red-400 line-through' :
+                                          isHeldByOther ? 'text-orange-400' :
+                                          isSelected ? 'text-white' : 'text-gray-700'
+                                        }`}>
+                                          {timeLabel}
+                                        </span>
+                                        {isHeldByMe && (
+                                          <Check className="w-3 h-3 absolute top-0.5 right-0.5 text-white" />
+                                        )}
+                                        {isHeldByOther && (
+                                          <Timer className="w-3 h-3 absolute top-0.5 right-0.5 text-orange-400" />
+                                        )}
+                                        {isBooked && (
+                                          <Ban className="w-3 h-3 absolute top-0.5 right-0.5 text-red-400" />
+                                        )}
+                                      </button>
+                                    );
+                                  })}
+                                  </div>
+                                </div>
+                              ))}
                             </div>
                           )}
 
@@ -1674,8 +1753,8 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                 <p className="text-sm text-blue-800 font-medium">Book multiple hours</p>
                                 <p className="text-xs text-blue-600 mt-0.5">
                                   {bookingType === 'package' && packageDurationMinutes > 0
-                                    ? `Tap your start time, then tap your end time to select the full range. For an ${formatDuration(packageDurationMinutes)} package starting at 8:00 AM, tap 4:00 PM as the end.`
-                                    : 'Tap your start time, then tap your end time to select the full range. Each slot is 30 minutes.'}
+                                    ? `Tap your start time, then tap your end time to select the full ${formatDuration(packageDurationMinutes)}. The days below the selected date are part of the same grid, so a session can run straight through midnight.`
+                                    : 'Tap your start time, then tap your end time to select the full range. Each slot is 30 minutes, and the days below the selected date are part of the same grid - a session can run straight through midnight.'}
                                   {heldSlotIds.length > 0 && ' Your reserved slots will update when you change the selection.'}
                                 </p>
                               </div>

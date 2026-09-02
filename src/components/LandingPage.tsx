@@ -58,9 +58,11 @@ interface LandingPageProps {
   onViewChange: (view: 'client' | 'provider') => void;
   onSearch: (query: string) => void;
   onCategorySelect?: (category: string) => void;
+  /** Open one provider's profile. Without it the featured cards fall back to the browse list. */
+  onViewProvider?: (providerId: string) => void;
 }
 
-export function LandingPage({ onViewChange, onSearch, onCategorySelect }: LandingPageProps) {
+export function LandingPage({ onViewChange, onSearch, onCategorySelect, onViewProvider }: LandingPageProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [currentSlide, setCurrentSlide] = useState(0);
   const [categoryStats, setCategoryStats] = useState<{ name: string; count: number }[]>([]);
@@ -265,7 +267,19 @@ export function LandingPage({ onViewChange, onSearch, onCategorySelect }: Landin
                   {providers.map((provider, index) => (
                   <button
                     key={index}
-                    onClick={() => onViewChange('client')}
+                    // Clicking a named provider's card - their photo, their name, their
+                    // rate - used to land on the unfiltered browse list, which reads as
+                    // the click having been swallowed: the client asked to see *this*
+                    // person and got everyone. Falls back to the list only when there's
+                    // no id to open, or no handler wired up.
+                    onClick={() => {
+                      if (onViewProvider && provider?.id) {
+                        onViewProvider(String(provider.id));
+                        return;
+                      }
+                      onViewChange('client');
+                    }}
+                    title={provider.name ? `View ${provider.name}'s profile` : undefined}
                     className="flex-shrink-0 px-3 text-left"
                     style={{ width: `${100 / visibleCount}%` }}
                   >

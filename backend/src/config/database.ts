@@ -1,6 +1,7 @@
 import '../loadEnv';
 import { Pool, Client } from 'pg';
 import bcrypt from 'bcryptjs';
+import { PREVIOUS_TERMS_VERSION } from './termsConfig';
 
 // Support both DATABASE_URL (Railway/Heroku style) and individual variables
 const poolConfig = process.env.DATABASE_URL
@@ -114,6 +115,29 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR(255);`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users (google_id) WHERE google_id IS NOT NULL;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version VARCHAR(32);`);
+
+    // Which version of the terms each user actually accepted.
+    //
+    // terms_accepted_at records only *when*, so every edit to the document silently
+    // re-attributed agreement to text the user had never seen, with nothing to say who
+    // was on which version. Users who accepted before this column existed are stamped
+    // with the previous version - the document they really did see - which leaves them
+    // correctly out of date against the current one and gets them the re-acceptance
+    // prompt instead of a false clean record.
+    try {
+      const versioned = await client.query(
+        `UPDATE users
+         SET terms_version = $1
+         WHERE terms_accepted_at IS NOT NULL AND terms_version IS NULL`,
+        [PREVIOUS_TERMS_VERSION]
+      );
+      if (versioned.rowCount) {
+        console.log(`Backfilled terms_version='${PREVIOUS_TERMS_VERSION}' for ${versioned.rowCount} pre-versioning user(s).`);
+      }
+    } catch (e) {
+      console.log('terms_version backfill skipped (non-fatal):', (e as Error).message);
+    }
 
     // Tracks whether this account has a password its owner actually knows, as opposed to
     // the random one generated on Google sign-up (see routes/auth.ts). NULL means "no
@@ -258,6 +282,12 @@ export async function initializeTables() {
     // Why a booking was cancelled. 'cancelled' now covers both a person cancelling and a
     // payment deadline passing, and those read very differently to whoever it happened to.
     await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;`);
+
+    // What the client agreed to pay. Only ever created by database.sql, which is applied
+    // by hand - the CREATE TABLE above never had it, so a database built purely by this
+    // function (any fresh deploy) had no total_price at all. Every booking insert and the
+    // whole payment path reference it, so that database could not take a single booking.
+    await client.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS total_price DECIMAL(10, 2);`);
 
     // The minimum this booking was allowed to cost, as computed when it was created
     // (see config/pricingConfig.ts). Stored rather than re-derived so that
@@ -1071,6 +1101,33 @@ export async function initializeTables() {
       `);
     } catch (ruleConstraintError) {
       console.log('availability_rules unique constraint backfill (non-fatal):', ruleConstraintError);
+    }
+
+    // Re-point the auto-generated 24/7 default from 23:30 to the 23:59 end-of-day
+    // sentinel that routes/availability.ts now writes and understands.
+    //
+    // end_time is a TIME column, so midnight is not expressible and 23:30 was taken
+    // literally: slot generation stopped there, leaving every day with a 30-minute
+    // hole before midnight that consecutive-slot selection could not bridge. Providers
+    // already carrying these rows would otherwise stay capped at 23.5 hours forever,
+    // since nothing rewrites an existing rule until they re-save their schedule.
+    //
+    // Scoped to the exact shape the default writer produces (00:00-23:30, 30-minute
+    // slots, no buffer) so a schedule a provider deliberately ended at 23:30 with any
+    // other setting is left alone. The missing slots backfill themselves on the next
+    // generation pass, which every timeslot/calendar read triggers.
+    try {
+      const normalisedRules = await client.query(`
+        UPDATE availability_rules
+        SET end_time = '23:59', updated_at = CURRENT_TIMESTAMP
+        WHERE start_time = '00:00' AND end_time = '23:30'
+          AND slot_duration = 30 AND buffer_minutes = 0
+      `);
+      if (normalisedRules.rowCount) {
+        console.log(`Normalised ${normalisedRules.rowCount} default availability rule(s) to run through midnight.`);
+      }
+    } catch (e) {
+      console.log('availability_rules end-of-day normalisation skipped (non-fatal):', (e as Error).message);
     }
 
     // Availability Overrides - exceptions for specific dates

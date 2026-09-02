@@ -4,7 +4,7 @@ import { X, Mail, Loader, AlertCircle, Eye, EyeOff, ArrowLeft, Check, Camera, Us
 import { GoogleLogin, CredentialResponse } from '@react-oauth/google';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
-import { TermsContent } from './TermsContent';
+import { TermsContent, TermsKeyPoints } from './TermsContent';
 import { API_CONFIG } from '../api/config';
 
 interface AuthModalProps {
@@ -257,8 +257,21 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
     }
   };
 
-  const handleRoleSelect = async (role: 'client' | 'provider') => {
+  // Choosing a role no longer submits.
+  //
+  // The role cards used to be the submit buttons, which forced the terms checkbox to
+  // sit above them - so the reader was asked to agree before the form knew, or they
+  // did, which half of the agreement applied to them. Picking first means the key
+  // points shown next to the checkbox are the ones for their role.
+  const handleRoleChoose = (role: 'client' | 'provider') => {
     setSelectedRole(role);
+    setError(null);
+  };
+
+  const handleCreateAccount = async () => {
+    const role = selectedRole;
+    if (!role || !agreedToTerms) return;
+
     setError(null);
     setLoading(true);
 
@@ -685,30 +698,10 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
                 </div>
               )}
 
-              <label className="mb-4 flex items-start gap-3 p-3 rounded-xl hover:bg-gray-50 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={agreedToTerms}
-                  onChange={(e) => setAgreedToTerms(e.target.checked)}
-                  className="mt-0.5 w-4 h-4"
-                  style={{ accentColor: '#9333ea' }}
-                />
-                <span className="text-sm text-gray-600">
-                  I agree to the{' '}
-                  <button
-                    type="button"
-                    onClick={() => setShowTermsPreview(true)}
-                    className="text-purple-600 hover:underline"
-                  >
-                    Terms & Conditions
-                  </button>
-                </span>
-              </label>
-
               <div className="space-y-4">
                 <button
-                  onClick={() => handleRoleSelect('client')}
-                  disabled={loading || !agreedToTerms}
+                  onClick={() => handleRoleChoose('client')}
+                  disabled={loading}
                   className={`w-full auth-role-card border-2 rounded-2xl transition-all text-left disabled:opacity-50 ${
                     selectedRole === 'client'
                       ? 'border-purple-500 bg-purple-50'
@@ -725,15 +718,12 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
                         Looking to hire creative professionals for my projects
                       </p>
                     </div>
-                    {loading && selectedRole === 'client' && (
-                      <Loader className="w-5 h-5 animate-spin text-purple-600" />
-                    )}
                   </div>
                 </button>
 
                 <button
-                  onClick={() => handleRoleSelect('provider')}
-                  disabled={loading || !agreedToTerms}
+                  onClick={() => handleRoleChoose('provider')}
+                  disabled={loading}
                   className={`w-full auth-role-card border-2 rounded-2xl transition-all text-left disabled:opacity-50 ${
                     selectedRole === 'provider'
                       ? 'border-pink-500 bg-pink-50'
@@ -750,12 +740,49 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
                         I want to offer my creative services and grow my business
                       </p>
                     </div>
-                    {loading && selectedRole === 'provider' && (
-                      <Loader className="w-5 h-5 animate-spin text-pink-600" />
-                    )}
                   </div>
                 </button>
               </div>
+
+              {/* Terms come after the role, so the summary can be the reader's own half
+                  of the agreement. Showing the key points here rather than only behind
+                  the link is the point: a link to a nine-minute document is a link
+                  almost nobody opens, and the checkbox above it was being ticked on no
+                  information at all. */}
+              {selectedRole && (
+                <div className="mt-6">
+                  <TermsKeyPoints audience={selectedRole} limit={5} />
+
+                  <label className="flex items-start gap-3 p-3 rounded-xl hover:bg-gray-50 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={agreedToTerms}
+                      onChange={(e) => setAgreedToTerms(e.target.checked)}
+                      className="mt-0.5 w-4 h-4"
+                      style={{ accentColor: '#9333ea' }}
+                    />
+                    <span className="text-sm text-gray-600">
+                      I agree to the{' '}
+                      <button
+                        type="button"
+                        onClick={() => setShowTermsPreview(true)}
+                        className="text-purple-600 hover:underline"
+                      >
+                        Terms &amp; Conditions
+                      </button>
+                    </span>
+                  </label>
+
+                  <button
+                    onClick={handleCreateAccount}
+                    disabled={loading || !agreedToTerms}
+                    className="mt-2 w-full px-4 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 disabled:opacity-50 font-medium flex items-center justify-center gap-2"
+                  >
+                    {loading && <Loader className="w-5 h-5 animate-spin" />}
+                    {loading ? 'Creating account...' : 'Create account'}
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -771,7 +798,7 @@ export function AuthModal({ mode, onClose, onSuccess, onForgotPassword }: AuthMo
               </button>
             </div>
             <div className="modal-body p-6">
-              <TermsContent />
+              <TermsContent defaultAudience={selectedRole || 'all'} />
             </div>
             <div className="modal-footer border-t border-gray-200 p-4 flex justify-end">
               <button

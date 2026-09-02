@@ -4396,3 +4396,300 @@ html {
   max-height: 100%;
   overflow: visible;
 }
+
+/* ============================================================
+   TERMS & CONDITIONS
+   ------------------------------------------------------------
+   The agreement is ~1,900 words across 22 sections - about nine minutes - and it
+   is shown in full behind a single checkbox at signup. Nobody was going to read
+   that, so the styles below exist to make it skimmable: a plain-language summary
+   first, a one-line gist under every heading, filter chips for the reader's own
+   role, and a marker on the clauses that cost money.
+
+   Hand-written because this project ships a prebuilt Tailwind snapshot with no
+   build step - a utility class that isn't already compiled in renders as nothing
+   at all, so new visual work has to be real CSS.
+   ============================================================ */
+
+/* --- Header: reading time, section count --- */
+.terms-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  font-size: var(--text-xs);
+  color: var(--color-gray-400);
+  margin-bottom: 1rem;
+}
+
+/* --- "The short version" card --- */
+.terms-summary {
+  border: 1px solid var(--color-purple-200);
+  background-color: var(--color-purple-50);
+  border-radius: 0.75rem;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.terms-summary-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-purple-900);
+  margin-bottom: 0.25rem;
+}
+
+.terms-summary-lede {
+  font-size: var(--text-xs);
+  color: var(--color-purple-700);
+  margin-bottom: 0.75rem;
+}
+
+.terms-summary-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.terms-summary-list li {
+  position: relative;
+  padding-left: 1.1rem;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--color-gray-700);
+}
+
+/* A dash rather than a bullet glyph: it sits on the text baseline at any size and
+   doesn't need a font that carries the character. */
+.terms-summary-list li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.65em;
+  width: 0.5rem;
+  height: 1px;
+  background-color: var(--color-purple-400);
+}
+
+.terms-summary-note {
+  font-size: var(--text-xs);
+  color: var(--color-purple-700);
+  margin-top: 0.75rem;
+}
+
+/* --- Role filter chips --- */
+.terms-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.terms-filter-label {
+  font-size: var(--text-xs);
+  color: var(--color-gray-500);
+}
+
+.terms-chip {
+  border: 1px solid var(--color-gray-200);
+  background-color: var(--color-white);
+  color: var(--color-gray-600);
+  border-radius: 9999px;
+  padding: 0.25rem 0.75rem;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.terms-chip:hover {
+  border-color: var(--color-purple-300);
+  color: var(--color-purple-700);
+}
+
+.terms-chip[aria-pressed='true'] {
+  background-color: var(--color-purple-600);
+  border-color: var(--color-purple-600);
+  color: var(--color-white);
+}
+
+.terms-chip:focus-visible {
+  outline: 2px solid var(--color-purple-600);
+  outline-offset: 2px;
+}
+
+/* --- Table of contents (full page only) --- */
+.terms-toc {
+  border: 1px solid var(--color-gray-200);
+  border-radius: 0.75rem;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.terms-toc-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--color-gray-500);
+  margin-bottom: 0.75rem;
+}
+
+.terms-toc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.375rem;
+}
+
+@media (min-width: 40rem) {
+  .terms-toc-list {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.375rem 1.5rem;
+  }
+}
+
+.terms-toc-list a {
+  font-size: var(--text-sm);
+  color: var(--color-gray-600);
+  text-decoration: none;
+}
+
+.terms-toc-list a:hover {
+  color: var(--color-purple-700);
+  text-decoration: underline;
+}
+
+/* --- Sections --- */
+/* scroll-margin so a jump from the contents list doesn't tuck the heading under
+   the top of the viewport. */
+.terms-section {
+  scroll-margin-top: 1.5rem;
+}
+
+.terms-section + .terms-section {
+  margin-top: 1.5rem;
+}
+
+/* The money-and-risk clauses. A left rule rather than a fill, so the marked
+   sections stand out when skimming without turning the page into a warning
+   notice. */
+.terms-section--important {
+  border-left: 3px solid var(--color-purple-400);
+  padding-left: 1rem;
+  margin-left: -1rem;
+}
+
+.terms-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.375rem;
+}
+
+.terms-badge {
+  border-radius: 9999px;
+  padding: 0.125rem 0.5rem;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.terms-badge--client {
+  background-color: var(--color-blue-50);
+  color: var(--color-blue-700);
+}
+
+.terms-badge--provider {
+  background-color: var(--color-pink-50);
+  color: var(--color-pink-700);
+}
+
+.terms-badge--important {
+  background-color: var(--color-purple-100);
+  color: var(--color-purple-700);
+}
+
+/* The gist, in plain language, ahead of the formal wording. Every clause stays
+   visible - this is a way in, not a replacement for the text below it. */
+.terms-inshort {
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--color-gray-800);
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+}
+
+.terms-inshort-label {
+  color: var(--color-purple-600);
+  font-weight: 600;
+}
+
+.terms-body p {
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  color: var(--color-gray-600);
+  margin-bottom: 0.5rem;
+}
+
+.terms-body p:last-child {
+  margin-bottom: 0;
+}
+
+/* Dense clauses - prohibited conduct, payout rules, what data is collected - read
+   as one long semicolon-separated sentence in prose. As a list they can be
+   scanned. */
+.terms-list {
+  list-style: none;
+  margin: 0.25rem 0 0.5rem;
+  padding: 0;
+  display: grid;
+  gap: 0.375rem;
+}
+
+.terms-list li {
+  position: relative;
+  padding-left: 1.1rem;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--color-gray-600);
+}
+
+.terms-list li::before {
+  content: '';
+  position: absolute;
+  left: 0.15rem;
+  top: 0.62em;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background-color: var(--color-gray-400);
+}
+
+.terms-empty {
+  font-size: var(--text-sm);
+  color: var(--color-gray-500);
+}
+
+/* --- Key points inline at signup --- */
+/* The decisive moment. These bullets sit next to the checkbox itself rather than
+   behind the "Terms & Conditions" link, because a link opening a nine-minute
+   document is a link nobody follows. */
+.terms-keypoints {
+  border: 1px solid var(--color-gray-200);
+  background-color: var(--color-gray-50);
+  border-radius: 0.75rem;
+  padding: 0.875rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.terms-keypoints-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--color-gray-500);
+  margin-bottom: 0.5rem;
+}

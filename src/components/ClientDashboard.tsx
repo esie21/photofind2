@@ -256,7 +256,19 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
                 ) : (providersList.map((provider) => (
                   <div key={provider.id} className="bg-white rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow">
                     <div className="flex flex-col sm:flex-row gap-6">
-                      <div className="relative w-full sm:w-32 h-32 flex-shrink-0">
+                      {/* The photo opens the profile, same as the "View Profile" button
+                          below. It used to be inert, which is the one thing a client is
+                          most likely to click on a card like this - tapping a provider's
+                          picture reads as "show me this person", and it silently did
+                          nothing. A button rather than a click handler on the div so it
+                          is reachable by keyboard and announced as the link it acts like. */}
+                      <button
+                        type="button"
+                        onClick={() => handleViewProfile(provider)}
+                        title={`View ${provider.name}'s profile`}
+                        aria-label={`View ${provider.name}'s profile`}
+                        className="relative w-full sm:w-32 h-32 flex-shrink-0 block cursor-pointer rounded-xl"
+                      >
                         <ImageWithFallback
                           src={getUploadUrl(provider.profile_image || provider.image)}
                           alt={provider.name}
@@ -267,7 +279,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
                             Available
                           </div>
                         )}
-                      </div>
+                      </button>
 
                       <div className="flex-1">
                         <div className="flex items-start justify-between mb-2">
