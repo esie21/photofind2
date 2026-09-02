@@ -9,6 +9,11 @@ const DEFAULT_SLOT_DURATION = 30; // minutes - 30 min slots for flexible booking
 const DEFAULT_BUFFER_MINUTES = 0;
 const HOLD_DURATION_MINUTES = 10;
 const SLOT_GENERATION_DAYS = 60; // Generate slots 60 days ahead
+// Ceiling on how wide a window GET /providers/:id/timeslots will return in one call.
+// Generous enough for the longest bookable package (see MAX_SERVICE_DURATION_MINUTES
+// in routes/services.ts) plus the extra day a selection needs to run into, while still
+// bounding the response for a caller that asks for something absurd.
+const MAX_TIMESLOT_WINDOW_DAYS = 16;
 
 // Helper functions
 function parseId(raw: any): string | null {
@@ -73,6 +78,44 @@ function manilaDateTime(dateStr: string, hours: number, minutes: number): Date {
   const hh = String(hours).padStart(2, '0');
   const mm = String(minutes).padStart(2, '0');
   return new Date(`${dateStr}T${hh}:${mm}:00${PROVIDER_TIMEZONE_OFFSET}`);
+}
+
+// availability_rules.start_time/end_time are TIME columns, so the latest instant they
+// can express is 23:59 - "open until midnight" has no literal representation, and
+// CHECK (end_time > start_time) means a rule can never cross midnight either. 23:59 is
+// therefore the end-of-day sentinel, and taking it literally is what capped this whole
+// system at 23.5 hours: a 00:00-23:59 day generated its last 30-minute slot at
+// 23:00-23:30 and stopped, leaving a gap before midnight.
+//
+// That gap was not cosmetic. Consecutive-slot selection requires slot.end to equal the
+// next slot's start exactly, so an unbridgeable hole at every midnight meant no booking
+// could ever span two days and no single day could offer 24 hours - a 24-hour booking
+// was arithmetically impossible however the provider configured their schedule.
+const END_OF_DAY_SENTINEL_MINUTES = 23 * 60 + 59;
+
+/**
+ * The absolute [start, end) window a rule covers on a given date, with the end-of-day
+ * sentinel resolved to the next day's 00:00 so consecutive days join up seamlessly.
+ *
+ * The final slot of such a day starts at 23:30 and ends at the next day's 00:00, which
+ * is exactly where that day's first slot starts - so the day-scoped queries still file
+ * it under the right date (they key off start_datetime) while selection can now run
+ * straight through midnight.
+ */
+function ruleWindowForDate(
+  dateStr: string,
+  startTime: unknown,
+  endTime: unknown
+): { windowStart: Date; windowEnd: Date } {
+  const [startHours, startMinutes] = String(startTime).split(':').map((v) => parseInt(v, 10) || 0);
+  const [endHours, endMinutes] = String(endTime).split(':').map((v) => parseInt(v, 10) || 0);
+
+  const windowStart = manilaDateTime(dateStr, startHours, startMinutes);
+  const windowEnd = endHours * 60 + endMinutes >= END_OF_DAY_SENTINEL_MINUTES
+    ? manilaDateTime(addDaysToDateStr(dateStr, 1), 0, 0)
+    : manilaDateTime(dateStr, endHours, endMinutes);
+
+  return { windowStart, windowEnd };
 }
 
 // Get provider's user_id from providers table if needed
@@ -356,9 +399,27 @@ router.get('/providers/:providerId/timeslots', async (req: Request, res: Respons
 
     const dateStr = req.query.date ? String(req.query.date) : null;
     if (!dateStr) return res.status(400).json({ error: 'Missing date (YYYY-MM-DD)' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      return res.status(400).json({ error: 'Invalid date (expected YYYY-MM-DD)' });
+    }
+
+    // How many consecutive days to return, starting at `date`.
+    //
+    // This endpoint used to serve exactly one calendar day, which is the other half of
+    // why a 24-hour booking was impossible: the picker only ever held one day's slots,
+    // so a selection could not reach across midnight even once the slots themselves
+    // ran contiguously. Callers that want a long booking (or a multi-day package) ask
+    // for the window they need; omitting `days` keeps the original single-day
+    // behaviour for every existing caller.
+    const requestedDays = req.query.days === undefined ? 1 : parseInt(String(req.query.days), 10);
+    if (!Number.isFinite(requestedDays) || requestedDays < 1) {
+      return res.status(400).json({ error: 'days must be a positive whole number' });
+    }
+    const days = Math.min(requestedDays, MAX_TIMESLOT_WINDOW_DAYS);
+    const endDateStr = addDaysToDateStr(dateStr, days);
 
     const providerUserId = await getProviderUserId(providerId);
-    console.log(`[Timeslots] Fetching for provider ${providerId} (userId: ${providerUserId}), date: ${dateStr}`);
+    console.log(`[Timeslots] Fetching for provider ${providerId} (userId: ${providerUserId}), date: ${dateStr}, days: ${days}`);
 
     // Ensure slots are generated
     await generateSlotsForProvider(providerUserId, SLOT_GENERATION_DAYS);
@@ -369,18 +430,28 @@ router.get('/providers/:providerId/timeslots', async (req: Request, res: Respons
     // Get available, held, AND booked slots. Booked ones are included (not just
     // available/held) so the client sees them as visibly unavailable in the grid
     // instead of the slot just silently missing with no explanation.
+    //
+    // Bounded by absolute instants rather than DATE(start_datetime) so the window can
+    // span days without a per-row function call, and so the comparison doesn't depend
+    // on the session timezone the way DATE() does. The bounds are Manila midnights,
+    // which is the day boundary the whole availability system is anchored to.
     const result = await pool.query(
       `SELECT id, start_datetime, end_datetime, status, held_by, hold_expires_at
        FROM time_slots
        WHERE provider_id::text = $1
-         AND DATE(start_datetime) = $2::date
+         AND start_datetime >= $2
+         AND start_datetime < $3
          AND status IN ('available', 'held', 'booked')
          AND start_datetime > NOW()
        ORDER BY start_datetime`,
-      [providerUserId, dateStr]
+      [
+        providerUserId,
+        manilaDateTime(dateStr, 0, 0).toISOString(),
+        manilaDateTime(endDateStr, 0, 0).toISOString(),
+      ]
     );
 
-    console.log(`[Timeslots] Found ${result.rows.length} slots for ${dateStr}`);
+    console.log(`[Timeslots] Found ${result.rows.length} slots for ${dateStr} (+${days - 1} day(s))`);
 
     // Debug: If no slots, check what's in the database
     if (result.rows.length === 0) {
@@ -414,6 +485,9 @@ router.get('/providers/:providerId/timeslots', async (req: Request, res: Respons
       data: {
         provider_id: providerId,
         date: dateStr,
+        days,
+        // Exclusive, matching the query bound above.
+        end_date: endDateStr,
         slots: result.rows.map(s => ({
           id: s.id,
           start: s.start_datetime,
@@ -769,7 +843,7 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
         await client.query(
           `INSERT INTO availability_rules
            (provider_id, day_of_week, start_time, end_time, slot_duration, buffer_minutes, is_active)
-           VALUES ($1, $2, '00:00', '23:30', 30, 0, TRUE)
+           VALUES ($1, $2, '00:00', '23:59', 30, 0, TRUE)
            ON CONFLICT ON CONSTRAINT unique_provider_rule_slot DO NOTHING`,
           [providerId, day]
         );
@@ -845,11 +919,8 @@ async function generateSlotsForProvider(providerId: string, daysAhead: number = 
       // Generate slots for this day's rules
       let slotsCreatedForDay = 0;
       for (const rule of dayRules) {
-        const startTimeParts = String(rule.start_time).split(':');
-        const endTimeParts = String(rule.end_time).split(':');
-
-        const slotStart = manilaDateTime(dateStr, parseInt(startTimeParts[0]), parseInt(startTimeParts[1]));
-        const dayEnd = manilaDateTime(dateStr, parseInt(endTimeParts[0]), parseInt(endTimeParts[1]));
+        const { windowStart: slotStart, windowEnd: dayEnd } =
+          ruleWindowForDate(dateStr, rule.start_time, rule.end_time);
 
         const slotDuration = rule.slot_duration || DEFAULT_SLOT_DURATION;
         const bufferMinutes = rule.buffer_minutes || DEFAULT_BUFFER_MINUTES;
@@ -940,11 +1011,8 @@ async function regenerateSlotsForDate(providerId: string, dateInput: string | Da
 
     // Generate slots for this specific date
     for (const rule of rulesToUse) {
-      const startTimeParts = String(rule.start_time).split(':');
-      const endTimeParts = String(rule.end_time).split(':');
-
-      const slotStart = manilaDateTime(dateStr, parseInt(startTimeParts[0]), parseInt(startTimeParts[1]));
-      const dayEnd = manilaDateTime(dateStr, parseInt(endTimeParts[0]), parseInt(endTimeParts[1]));
+      const { windowStart: slotStart, windowEnd: dayEnd } =
+        ruleWindowForDate(dateStr, rule.start_time, rule.end_time);
 
       const slotDuration = rule.slot_duration || DEFAULT_SLOT_DURATION;
       const bufferMinutes = rule.buffer_minutes || DEFAULT_BUFFER_MINUTES;

@@ -95,6 +95,17 @@ export interface User {
   verification_documents?: Array<{ path: string; original_name: string; uploaded_at: string }> | null;
   /** False for a Google account that has never set a real password - see routes/auth.ts. */
   has_password?: boolean;
+  /** When this user last accepted the terms. */
+  terms_accepted_at?: string | null;
+  /** Which version of the terms they accepted, e.g. '2026-08-10'. */
+  terms_version?: string | null;
+  /**
+   * Whether the terms have changed since they last accepted. Decided server-side - the
+   * client can't be the judge of what the current version is.
+   */
+  terms_acceptance_required?: boolean;
+  /** The version currently in force, per the server. */
+  current_terms_version?: string;
 }
 
 const authService = {
@@ -153,6 +164,17 @@ const authService = {
 
   async changePassword(data: { currentPassword?: string; newPassword: string }): Promise<void> {
     await apiClient.post<{ success: boolean }>(API_CONFIG.ENDPOINTS.AUTH.CHANGE_PASSWORD, data);
+  },
+
+  /**
+   * Records acceptance of the current terms and returns the refreshed user.
+   *
+   * Sends no version - the server stamps whichever one it is serving, so a client
+   * cannot claim to have accepted a document it never showed.
+   */
+  async acceptTerms(): Promise<User> {
+    const resp = await apiClient.post<{ data: User }>(API_CONFIG.ENDPOINTS.AUTH.ACCEPT_TERMS, {});
+    return resp.data;
   },
 
   setToken(token: string | null) {

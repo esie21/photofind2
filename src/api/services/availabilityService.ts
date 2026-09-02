@@ -222,9 +222,18 @@ const availabilityService = {
     return resp.data;
   },
 
-  async getAvailableSlots(providerId: string, date: string): Promise<{
+  /**
+   * Slots for `date` and, when `days` > 1, the consecutive days after it.
+   *
+   * The window exists so a selection can run past midnight: with one day loaded the
+   * picker could never offer more than a single day's availability, which is what made
+   * a 24-hour booking impossible regardless of how the provider's schedule was set up.
+   */
+  async getAvailableSlots(providerId: string, date: string, days: number = 1): Promise<{
     provider_id: string;
     date: string;
+    days?: number;
+    end_date?: string;
     slots: Array<{
       id: string;
       start: string;
@@ -232,8 +241,9 @@ const availabilityService = {
       status: string;
     }>;
   }> {
-    const resp = await apiClient.get<{ data: { provider_id: string; date: string; slots: any[] } }>(
-      `/availability/providers/${providerId}/timeslots?date=${date}`
+    const query = `date=${encodeURIComponent(date)}${days > 1 ? `&days=${days}` : ''}`;
+    const resp = await apiClient.get<{ data: { provider_id: string; date: string; days?: number; end_date?: string; slots: any[] } }>(
+      `/availability/providers/${providerId}/timeslots?${query}`
     );
     return resp.data;
   },

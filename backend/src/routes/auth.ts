@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { isValidEmail, isStrongPassword, setSecureCookie, clearSecureCookie, logSecurityEvent, passwordResetLimiter, loginLimiter } from '../middleware/security';
 import { verifyToken } from '../middleware/auth';
+import { CURRENT_TERMS_VERSION, needsTermsAcceptance } from '../config/termsConfig';
 import { JWT_SECRET } from '../config/authConfig';
 
 const router = Router();
@@ -268,10 +269,10 @@ router.post('/google', async (req: Request, res: Response) => {
       // "current password" later.
       const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
       const created = await pool.query(
-        `INSERT INTO users (email, name, password_hash, role, google_id, profile_image, terms_accepted_at)
-         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+        `INSERT INTO users (email, name, password_hash, role, google_id, profile_image, terms_accepted_at, terms_version)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, $7)
          RETURNING id, email, name, role`,
-        [email, name, passwordHash, role, googleId, picture]
+        [email, name, passwordHash, role, googleId, picture, CURRENT_TERMS_VERSION]
       );
 
       return sendAuthResponse(res.status(201), created.rows[0]);
@@ -375,8 +376,8 @@ router.post('/signup', async (req: AuthRequest, res: Response) => {
     // stamped here too - this password was chosen and typed by the person creating the
     // account, unlike the random one Google sign-up generates.
     const result = await pool.query(
-      'INSERT INTO users (email, name, password_hash, role, terms_accepted_at, password_set_at) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id, email, role, name',
-      [email.toLowerCase().trim(), name.trim(), passwordHash, userRole]
+      'INSERT INTO users (email, name, password_hash, role, terms_accepted_at, terms_version, password_set_at) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5, CURRENT_TIMESTAMP) RETURNING id, email, role, name',
+      [email.toLowerCase().trim(), name.trim(), passwordHash, userRole, CURRENT_TERMS_VERSION]
     );
 
     const user = result.rows[0];
@@ -429,6 +430,7 @@ router.get('/me', async (req: Request, res: Response) => {
 
     const result = await pool.query(
       `SELECT id, email, name, role, profile_image, portfolio_images, portfolio_meta, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents,
+              terms_accepted_at, terms_version,
               (password_set_at IS NOT NULL) as has_password
        FROM users WHERE id = $1`,
       [decoded.userId]
@@ -438,7 +440,15 @@ router.get('/me', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.json(result.rows[0]);
+    // Answered here rather than left to the client to work out by comparing version
+    // strings: the current version lives on the server, and a client deciding for itself
+    // whether it is up to date would go stale the moment a deploy changed it.
+    const me = result.rows[0];
+    res.json({
+      ...me,
+      terms_acceptance_required: needsTermsAcceptance(me.terms_version),
+      current_terms_version: CURRENT_TERMS_VERSION,
+    });
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ error: 'Failed to get user' });
@@ -773,6 +783,50 @@ router.get('/verify-reset-token', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Verify reset token error:', error);
     return res.status(500).json({ valid: false, error: 'Failed to verify token' });
+  }
+});
+
+/**
+ * Records that the signed-in user has accepted the current version of the terms.
+ *
+ * Deliberately takes no version from the request body. A client that could name the
+ * version it was accepting could claim to have accepted one it never displayed - or an
+ * old one, to dodge a prompt - so the server stamps whichever version it is actually
+ * serving.
+ */
+router.post('/accept-terms', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const result = await pool.query(
+      `UPDATE users
+       SET terms_accepted_at = CURRENT_TIMESTAMP,
+           terms_version = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $1 AND deleted_at IS NULL
+       RETURNING id, email, name, role, profile_image, portfolio_images, portfolio_meta, bio,
+                 years_experience, location, category, title, is_verified, verification_status,
+                 verification_documents, terms_accepted_at, terms_version,
+                 (password_set_at IS NOT NULL) as has_password`,
+      [userId, CURRENT_TERMS_VERSION]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const user = result.rows[0];
+    return res.json({
+      data: {
+        ...user,
+        terms_acceptance_required: needsTermsAcceptance(user.terms_version),
+        current_terms_version: CURRENT_TERMS_VERSION,
+      },
+    });
+  } catch (error) {
+    console.error('Accept terms error:', error);
+    return res.status(500).json({ error: 'Failed to record terms acceptance' });
   }
 });
 

@@ -369,6 +369,41 @@ async function getIdForForeignKey(userId: string, columnName: string, targetTabl
   return userId;
 }
 
+/**
+ * Every Manila calendar date a [start, end) booking window touches, as 'YYYY-MM-DD'.
+ *
+ * Two things were wrong with the `start.toISOString().split('T')[0]` this replaces.
+ * It read the *UTC* date, and Manila is UTC+8, so any booking starting before 08:00
+ * local resolved to the previous calendar day - a block the provider set on the day of
+ * the shoot was checked against the day before and never matched, while a block on the
+ * preceding day rejected a booking that had nothing to do with it. And it only ever
+ * looked at the start day, so a booking spanning several days sailed straight through
+ * blocks on every day but the first - which matters far more now that bookings can run
+ * past midnight at all.
+ *
+ * The end instant is exclusive: a booking finishing exactly at midnight occupies none
+ * of the following day, and including it would let an unrelated block reject it.
+ */
+function manilaDatesInRange(start: Date, end: Date): string[] {
+  const toManilaDateStr = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+
+  const dates: string[] = [];
+  const lastInstant = new Date(end.getTime() - 1);
+  const lastDateStr = toManilaDateStr(lastInstant >= start ? lastInstant : start);
+
+  // Step in whole days from the start instant; the date string is what's compared, so
+  // the exact time of day carried along is irrelevant.
+  const cursor = new Date(start.getTime());
+  for (let guard = 0; guard < 400; guard++) {
+    const dateStr = toManilaDateStr(cursor);
+    dates.push(dateStr);
+    if (dateStr >= lastDateStr) break;
+    cursor.setTime(cursor.getTime() + 24 * 60 * 60 * 1000);
+  }
+
+  return dates;
+}
+
 // Get provider record ID from user ID
 async function getProviderIdFromUserId(userId: string): Promise<string> {
   return getIdForForeignKey(userId, 'provider_id', 'providers');
@@ -714,14 +749,16 @@ router.post('/', verifyToken, async (req: Request & { userId?: string }, res: Re
       // prevent. The same lock guards the cancel path further down this file.
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [providerIdStr]);
 
-      // Check if the provider has blocked this date
-      const bookingDate = start.toISOString().split('T')[0]; // YYYY-MM-DD
+      // Check the provider hasn't blocked any date this booking runs across.
+      const bookingDates = manilaDatesInRange(start, end);
       const blockedCheck = await client.query(
-        `SELECT id, reason FROM availability_overrides
+        `SELECT id, reason, override_date FROM availability_overrides
          WHERE provider_id::text = $1
-           AND override_date = $2::date
-           AND is_available = FALSE`,
-        [providerUserIdStr, bookingDate]
+           AND override_date = ANY($2::date[])
+           AND is_available = FALSE
+         ORDER BY override_date
+         LIMIT 1`,
+        [providerUserIdStr, bookingDates]
       );
 
       if (blockedCheck.rows[0]) {
@@ -1771,14 +1808,23 @@ router.put('/:id/reschedule', verifyToken, async (req: Request & { userId?: stri
       await dbClient.query('BEGIN');
       await dbClient.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [String(booking.provider_id)]);
 
-      // Check the provider hasn't blocked the new date
-      const newDateStr = newStartDate.toISOString().split('T')[0];
+      // Check the provider hasn't blocked any date the new window runs across.
+      //
+      // availability_overrides.provider_id is a users.id, unlike bookings.provider_id,
+      // which on this deployment is a row id in the separate providers table - passing
+      // it straight through meant this WHERE clause matched nothing and a reschedule
+      // onto a blocked date was never actually refused. The conflict check just below
+      // is the one that legitimately uses bookings.provider_id.
+      const rescheduleProviderUserId = await resolveProviderUserId(String(booking.provider_id));
+      const newDateStrs = manilaDatesInRange(newStartDate, newEndDate);
       const blockedCheck = await dbClient.query(
-        `SELECT id, reason FROM availability_overrides
+        `SELECT id, reason, override_date FROM availability_overrides
          WHERE provider_id::text = $1
-           AND override_date = $2::date
-           AND is_available = FALSE`,
-        [String(booking.provider_id), newDateStr]
+           AND override_date = ANY($2::date[])
+           AND is_available = FALSE
+         ORDER BY override_date
+         LIMIT 1`,
+        [rescheduleProviderUserId, newDateStrs]
       );
       if (blockedCheck.rows[0]) {
         await dbClient.query('ROLLBACK');

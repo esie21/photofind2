@@ -10,6 +10,7 @@ import { PaymentCallbackPage } from './components/PaymentCallbackPage';
 import { ClientDashboard } from './components/ClientDashboard';
 import { ProviderDashboard } from './components/ProviderDashboard';
 import { ProviderProfilePage } from './components/ProviderProfilePage';
+import { TermsUpdateModal } from './components/TermsUpdateModal';
 import { BookingFlow } from './components/BookingFlow';
 import { AdminDashboard } from './components/AdminDashboard';
 import { ChatInterface } from './components/ChatInterface';
@@ -342,6 +343,7 @@ export default function App() {
         {currentView === 'landing' && (
           <LandingPage
             onViewChange={handleViewChange}
+            onViewProvider={handleViewProviderProfile}
             onSearch={(query) => {
               setLandingSearchQuery(query);
               setLandingCategory(undefined);
@@ -419,6 +421,14 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Asks for agreement again when the terms have changed since this user last
+          accepted. Renders nothing unless the server says re-acceptance is due, and
+          sits outside the view switch so it is reachable from wherever they happen to
+          be. Kept below AuthModal in the tree so a signup in progress isn't covered by
+          it - a brand-new account is stamped with the current version anyway and never
+          triggers this. */}
+      <TermsUpdateModal />
 
       {showAuthModal && (
         <AuthModal

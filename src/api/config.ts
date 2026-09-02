@@ -8,14 +8,14 @@ const API_BASE = import.meta.env.PROD
 // Direct backend URL for file uploads (bypasses Vercel's 4.5MB body size limit).
 // Only production needs to skip the rewrite - the dev proxy streams uploads fine.
 const DIRECT_BACKEND_URL = import.meta.env.PROD
-  ? 'https://photofind2-production.up.railway.app/api'
+  ? 'https://photofind2.onrender.com/api'
   : (import.meta.env.VITE_API_URL || '/api');
 
 // Static files URL (for uploaded images, evidence photos, etc.)
 // Production points straight at the backend to avoid Vercel proxy issues with static
 // files; development goes through the dev-server proxy.
 const STATIC_BASE_URL = import.meta.env.PROD
-  ? 'https://photofind2-production.up.railway.app/uploads'
+  ? 'https://photofind2.onrender.com/uploads'
   : '/uploads';
 
 // Origin for Socket.IO connections. Callers used to derive this by stripping "/api" off
@@ -28,7 +28,7 @@ const SOCKET_BASE_URL = import.meta.env.PROD
 
 /**
  * Get the full URL for an uploaded file
- * Works in both development (localhost) and production (Railway)
+ * Works in both development (localhost) and production (Render)
  * @param filePath - The file path stored in database (e.g., "bookings/uuid/filename.png" or just "filename.png")
  * @returns Full URL to the file
  */
@@ -88,6 +88,7 @@ export const API_CONFIG = {
       ME: '/auth/me',
       GOOGLE: '/auth/google',
       CHANGE_PASSWORD: '/auth/change-password',
+      ACCEPT_TERMS: '/auth/accept-terms',
     },
     // Users endpoints
     USERS: {
