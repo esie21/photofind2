@@ -53,18 +53,26 @@ export function extensionFor(mimetype: string): string {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A database created from database.sql keys these tables by uuid, but one that
+// initializeTables built from nothing is SERIAL-keyed: it only chooses uuid when an
+// existing users table already uses it, so a fresh deploy gets integers. Both shapes
+// are supported by initializeTables, so both have to be accepted here - requiring a
+// uuid rejected every upload on an integer-keyed database with 'Invalid identifier'.
+const NUMERIC_ID_RE = /^[1-9][0-9]*$/;
 
 /**
  * Guards a value that is about to become a directory name.
  *
- * Every id used this way is a uuid column (users, bookings, support_tickets, chats), so
- * requiring a well-formed UUID rejects traversal without excluding anything legitimate.
- * Express decodes %2F in route params, so without this a request to
- * `/api/users/..%2F..%2Fx/upload/profile` writes outside the uploads directory.
+ * Every id used this way is a primary key - a uuid or a positive integer depending on
+ * how the deployment's database was created - so accepting exactly those two shapes
+ * rejects traversal without excluding anything legitimate. Neither can contain a path
+ * separator or a dot, which is the property that matters: Express decodes %2F in route
+ * params, so without this a request to `/api/users/..%2F..%2Fx/upload/profile` writes
+ * outside the uploads directory.
  */
 export function safeSegment(value: unknown): string {
   const str = String(value ?? '').trim();
-  if (!UUID_RE.test(str)) {
+  if (!UUID_RE.test(str) && !NUMERIC_ID_RE.test(str)) {
     throw new Error('Invalid identifier');
   }
   return str;

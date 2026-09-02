@@ -275,10 +275,14 @@ router.get('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    // users.id is a uuid column; a malformed value makes Postgres throw, which would
-    // surface as a 500 for what is really just a bad URL.
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!UUID_RE.test(String(id || ''))) {
+    // users.id is a uuid column on a database created from database.sql and a SERIAL
+    // integer on one initializeTables built from nothing, so a legitimate id is either
+    // shape. Screening for both still keeps a malformed value away from Postgres, which
+    // would throw and surface as a 500 for what is really just a bad URL - but assuming
+    // uuid alone 404'd every provider on an integer-keyed database, including ones the
+    // list endpoint had just returned.
+    const ID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[1-9][0-9]*)$/i;
+    if (!ID_RE.test(String(id || ''))) {
       return res.status(404).json({ error: 'Provider not found' });
     }
 

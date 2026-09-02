@@ -123,8 +123,9 @@ const makeUserStorage = (folderOf: (file: Express.Multer.File) => string, prefix
   multer.diskStorage({
     destination: (req: ExpressRequest, file: any, cb: (e: any, p: string) => void) => {
       try {
-        // safeSegment rejects anything that isn't a UUID, and resolveInsideRoot refuses a
-        // result outside the uploads tree. Without these, '..%2F..' in the URL escaped it.
+        // safeSegment rejects anything that isn't a bare id - a uuid or a positive
+        // integer - and resolveInsideRoot refuses a result outside the uploads tree.
+        // Without these, '..%2F..' in the URL escaped it.
         const userId = safeSegment((req as any).params.id);
         const uploadPath = resolveInsideRoot(UPLOADS_ROOT, 'users', userId, folderOf(file));
         fs.mkdirSync(uploadPath, { recursive: true });
