@@ -916,23 +916,6 @@ export async function initializeTables() {
       await client.query(`ALTER TABLE transactions ADD CONSTRAINT fk_transactions_payout FOREIGN KEY (payout_id) REFERENCES payouts(id) ON DELETE SET NULL;`);
     }
 
-    // Audit actions are dotted ('dispute.resolve', 'user.delete'). Two writes in
-    // bookings.ts used to bypass auditService and insert snake_case names instead, so
-    // history contains both styles and filtering by 'dispute.' missed the real dispute
-    // resolutions. Rename the legacy rows so past and future agree. Idempotent.
-    try {
-      const renames: Array<[string, string]> = [
-        ['dispute_resolved', 'dispute.resolve'],
-        ['dispute_auto_resolved', 'dispute.auto_resolve'],
-      ];
-      for (const [from, to] of renames) {
-        const r = await client.query('UPDATE audit_logs SET action = $1 WHERE action = $2', [to, from]);
-        if (r.rowCount) console.log(`Renamed ${r.rowCount} audit_logs row(s) from '${from}' to '${to}'.`);
-      }
-    } catch (e) {
-      console.log('audit action rename skipped (non-fatal):', (e as Error).message);
-    }
-
     // One providers row per user.
     //
     // providers.user_id had no unique constraint, and the "create the row on first use"
@@ -944,41 +927,50 @@ export async function initializeTables() {
     //
     // Fold every duplicate onto the oldest row, then add the constraint so it can't
     // recur. Both steps are idempotent and no-op once the data is clean.
-    try {
-      const dupes = await client.query(`
-        SELECT user_id, COUNT(*) AS n FROM providers GROUP BY user_id HAVING COUNT(*) > 1
-      `);
-      for (const row of dupes.rows) {
-        const all = await client.query(
-          `SELECT id FROM providers WHERE user_id = $1 ORDER BY created_at ASC, id ASC`,
-          [row.user_id]
-        );
-        const keep = all.rows[0].id;
-        const drop = all.rows.slice(1).map((r: any) => String(r.id));
-        for (const table of ['services', 'bookings', 'reviews', 'portfolio']) {
-          await client.query(
-            `UPDATE ${table} SET provider_id = $1 WHERE provider_id::text = ANY($2::text[])`,
-            [keep, drop]
+    //
+    // Only applicable where a separate providers table exists at all - database.sql
+    // creates one, this function never has, and a user with role='provider' is the
+    // provider there. Checked the same way as the join in the bookings query further
+    // down. Without the check both blocks below threw on every boot, and the second
+    // reported that some user had duplicate rows in a table that does not exist.
+    const providersTableCheck = await client.query(`SELECT to_regclass('public.providers') as exists`);
+    if (providersTableCheck.rows[0].exists) {
+      try {
+        const dupes = await client.query(`
+          SELECT user_id, COUNT(*) AS n FROM providers GROUP BY user_id HAVING COUNT(*) > 1
+        `);
+        for (const row of dupes.rows) {
+          const all = await client.query(
+            `SELECT id FROM providers WHERE user_id = $1 ORDER BY created_at ASC, id ASC`,
+            [row.user_id]
+          );
+          const keep = all.rows[0].id;
+          const drop = all.rows.slice(1).map((r: any) => String(r.id));
+          for (const table of ['services', 'bookings', 'reviews', 'portfolio']) {
+            await client.query(
+              `UPDATE ${table} SET provider_id = $1 WHERE provider_id::text = ANY($2::text[])`,
+              [keep, drop]
+            );
+          }
+          await client.query(`DELETE FROM providers WHERE id::text = ANY($1::text[])`, [drop]);
+          console.log(
+            `Merged ${drop.length} duplicate providers row(s) for user ${row.user_id} into ${keep}.`
           );
         }
-        await client.query(`DELETE FROM providers WHERE id::text = ANY($1::text[])`, [drop]);
-        console.log(
-          `Merged ${drop.length} duplicate providers row(s) for user ${row.user_id} into ${keep}.`
+      } catch (e) {
+        console.error('providers de-duplication skipped (non-fatal):', (e as Error).message);
+      }
+
+      try {
+        await client.query(`
+          CREATE UNIQUE INDEX IF NOT EXISTS providers_user_id_unique ON providers (user_id);
+        `);
+      } catch (e) {
+        console.error(
+          'Could not create providers_user_id_unique - a user still has more than one ' +
+          'providers row, so services and bookings may be split across them:', (e as Error).message
         );
       }
-    } catch (e) {
-      console.error('providers de-duplication skipped (non-fatal):', (e as Error).message);
-    }
-
-    try {
-      await client.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS providers_user_id_unique ON providers (user_id);
-      `);
-    } catch (e) {
-      console.error(
-        'Could not create providers_user_id_unique - a user still has more than one ' +
-        'providers row, so services and bookings may be split across them:', (e as Error).message
-      );
     }
 
     // Payment system indexes
@@ -1625,6 +1617,27 @@ export async function initializeTables() {
     // whole function is one try block, everything after it - including seeding the admin
     // user - was silently skipped. It belongs here, after the table is guaranteed.
     await client.query(`ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS details JSONB;`);
+
+    // Audit actions are dotted ('dispute.resolve', 'user.delete'). Two writes in
+    // bookings.ts used to bypass auditService and insert snake_case names instead, so
+    // history contains both styles and filtering by 'dispute.' missed the real dispute
+    // resolutions. Rename the legacy rows so past and future agree. Idempotent.
+    //
+    // Sat ~700 lines earlier, before audit_logs is created, so on a database built from
+    // nothing it could only ever fail. Harmless there - there are no legacy rows to
+    // rename - but it logged an error on every single boot.
+    try {
+      const renames: Array<[string, string]> = [
+        ['dispute_resolved', 'dispute.resolve'],
+        ['dispute_auto_resolved', 'dispute.auto_resolve'],
+      ];
+      for (const [from, to] of renames) {
+        const r = await client.query('UPDATE audit_logs SET action = $1 WHERE action = $2', [to, from]);
+        if (r.rowCount) console.log(`Renamed ${r.rowCount} audit_logs row(s) from '${from}' to '${to}'.`);
+      }
+    } catch (e) {
+      console.log('audit action rename skipped (non-fatal):', (e as Error).message);
+    }
 
     // ==================== SUPPORT TICKETS TABLE ====================
     const supportTicketsExist = await client.query(`SELECT to_regclass('public.support_tickets') as exists`);
