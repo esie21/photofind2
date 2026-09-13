@@ -114,8 +114,11 @@ router.get('/provider/:providerId', verifyToken, async (req: Request & { userId?
 router.get('/transactions', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   const providerId = req.userId;
   const role = (req as any).role;
-  const limit = parseInt(req.query.limit as string) || 50;
-  const offset = parseInt(req.query.offset as string) || 0;
+  // Clamped. Unbounded, `?limit=1000000` was a request to serialise a provider's entire
+  // ledger into one response - and `parseInt('abc')` is NaN, which Postgres rejects as a
+  // LIMIT, turning a typo in a query string into a 500.
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
+  const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
 
   if (!providerId) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -203,7 +206,9 @@ router.post('/adjust', verifyToken, async (req: Request & { userId?: string }, r
   try {
     await dbClient.query('BEGIN');
 
-    const walletId = await ensureProviderWallet(provider_id);
+    // dbClient, not the pool: this is inside a transaction, and reaching for a second
+    // connection from in here is what could deadlock the pool. See ensureProviderWallet.
+    const walletId = await ensureProviderWallet(provider_id, dbClient);
 
     const walletRes = await dbClient.query(
       'SELECT * FROM wallets WHERE id::text = $1 FOR UPDATE',

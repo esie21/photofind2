@@ -6,8 +6,28 @@ import type { PoolClient } from 'pg';
 // provider), ON CONFLICT DO NOTHING lets the loser's INSERT succeed as a no-op
 // instead of throwing a unique-constraint error, then falls back to reading the
 // winner's row.
-export async function ensureProviderWallet(providerId: string): Promise<string> {
-  const inserted = await pool.query(
+//
+// `dbClient` MUST be passed by every caller that is already inside a transaction.
+//
+// This used to always use the shared pool, even when called from inside one - and both
+// settlement functions below do exactly that, while holding a connection of their own. So
+// each in-flight settlement needed a SECOND connection just to get here, out of a pool of
+// ten. Eleven concurrent settlements and every one of them is holding a connection while
+// waiting for a connection that only another of them can release: a deadlock that no
+// amount of waiting clears, and which before the connectionTimeoutMillis added in
+// config/database.ts would have hung every request forever rather than failing.
+//
+// It was also wrong in a quieter way. An INSERT on the pool commits immediately, outside
+// the caller's transaction, so a settlement that rolled back still left a wallet row
+// behind - and the row the caller then locked FOR UPDATE was not one its own transaction
+// could see consistently.
+export async function ensureProviderWallet(
+  providerId: string,
+  dbClient?: PoolClient
+): Promise<string> {
+  const db = dbClient ?? pool;
+
+  const inserted = await db.query(
     `INSERT INTO wallets (provider_id) VALUES ($1)
      ON CONFLICT (provider_id) DO NOTHING
      RETURNING id`,
@@ -18,7 +38,7 @@ export async function ensureProviderWallet(providerId: string): Promise<string> 
     return inserted.rows[0].id;
   }
 
-  const existing = await pool.query(
+  const existing = await db.query(
     'SELECT id FROM wallets WHERE provider_id::text = $1',
     [providerId]
   );
@@ -64,7 +84,7 @@ export async function settlePaymentSuccess(
     [payment.booking_id]
   );
 
-  const walletId = await ensureProviderWallet(String(payment.provider_id));
+  const walletId = await ensureProviderWallet(String(payment.provider_id), dbClient);
 
   // Lock the wallet row to prevent races with any other payment settling concurrently
   // for the same provider.
@@ -166,9 +186,12 @@ export async function releaseEscrow(
     [newPending, newAvailable, String(wallet.id)]
   );
 
+  // 'escrow_released', not 'payment_received': this is the SAME money the client already
+  // paid, moving from pending to available now that the booking is done. Recording it as a
+  // second payment made every completed job show up twice in the provider's ledger.
   await dbClient.query(
     `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
-     VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
+     VALUES ($1, $2, 'escrow_released', $3, $4, $5, $6)`,
     [String(wallet.id), opts.paymentId, released, newAvailable, opts.referenceId, opts.description]
   );
 
@@ -218,7 +241,7 @@ export async function settleCashPayment(
     [payment.booking_id]
   );
 
-  const walletId = await ensureProviderWallet(String(payment.provider_id));
+  const walletId = await ensureProviderWallet(String(payment.provider_id), dbClient);
 
   const walletLockRes = await dbClient.query(
     `SELECT id, available_balance FROM wallets WHERE id::text = $1 FOR UPDATE`,

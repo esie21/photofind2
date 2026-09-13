@@ -21,7 +21,15 @@ export interface Transaction {
   wallet_id: string;
   payment_id?: string;
   payout_id?: string;
-  type: 'payment_received' | 'commission_deducted' | 'payout_requested' | 'payout_completed' | 'payout_cancelled' | 'refund' | 'adjustment';
+  /**
+   * Mirrors the CHECK constraint on transactions.type in the backend schema.
+   *
+   * 'escrow_released' is the completed booking's funds moving from pending_balance to
+   * available_balance. It is deliberately distinct from 'payment_received', which is the
+   * client's money arriving in escrow in the first place - the two used to share a type,
+   * so every booking appeared to pay the provider twice.
+   */
+  type: 'payment_received' | 'escrow_released' | 'commission_deducted' | 'payout_requested' | 'payout_completed' | 'payout_cancelled' | 'refund' | 'adjustment';
   amount: number;
   balance_after: number;
   reference_id?: string;

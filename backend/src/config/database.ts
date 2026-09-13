@@ -17,7 +17,25 @@ const poolConfig = process.env.DATABASE_URL
       database: process.env.DB_NAME || 'photofind',
     };
 
-export const pool = new Pool(poolConfig);
+/**
+ * Connection pool limits.
+ *
+ * `max` was never set, so it took pg's default of 10 - a number nothing in this codebase
+ * had chosen or checked against the database's own connection limit. Stating it makes the
+ * ceiling visible and tunable per environment.
+ *
+ * `connectionTimeoutMillis` is the important one. Without it, a request that asks for a
+ * connection when all of them are checked out waits FOREVER. That turns a transient
+ * saturation into a permanently hung request, and since each hung request is itself
+ * holding an Express handler open, the failure spreads rather than clearing. Ten seconds
+ * then a clean error lets the route return a 500 the caller can retry.
+ */
+export const pool = new Pool({
+  ...poolConfig,
+  max: parseInt(process.env.DB_POOL_MAX || '10', 10),
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 10_000,
+});
 
 // The app's business timezone is Asia/Manila (see loadEnv.ts and the availability
 // slot-generation logic), but the DB server's own default session timezone is
@@ -781,6 +799,29 @@ export async function initializeTables() {
     // be the only one allowed to credit. This column is the single source of truth.
     await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS wallet_credited_at TIMESTAMP;`);
 
+    // The PayMongo client key for this row's payment intent.
+    //
+    // create-intent's "reuse the still-open attempt" branch has always returned
+    // `payment.paymongo_client_key` - but nothing ever created this column or wrote to
+    // it, so SELECT * handed back undefined and the reuse response carried no client key
+    // at all. PaymentSummary needs it to attach a payment method, so a client who closed
+    // the payment modal and reopened it got a form that could never be submitted. Stored
+    // rather than re-fetched so reopening the modal costs no PayMongo round trip; rows
+    // created before this column existed have NULL and are healed by a live read.
+    await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS paymongo_client_key VARCHAR(255);`);
+
+    // How many payment intents this booking has been through.
+    //
+    // `unique_booking_payment` and the UNIQUE on idempotency_key together mean a booking
+    // gets exactly one payments row, for its whole life. create-intent used to respond to
+    // a failed attempt by INSERTing a second row, which violated both constraints and
+    // returned 500 - so a client whose card was declined could never pay for that booking
+    // again. The row is now updated in place instead, and this counts the attempts so each
+    // retry can derive its own idempotency key: reusing the first one would make PayMongo
+    // hand back the intent that already failed rather than opening a fresh one.
+    await client.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 1;`);
+    await client.query(`UPDATE payments SET attempt_count = 1 WHERE attempt_count IS NULL;`);
+
     // Widen the payments status constraint to allow partial refunds (older databases
     // may still have the constraint from before 'partially_refunded' was supported).
     try {
@@ -998,6 +1039,26 @@ export async function initializeTables() {
         'Investigate before relying on this guard:', (e as Error).message
       );
     }
+    // Give releasing escrow its own transaction type.
+    //
+    // It was writing 'payment_received' - the same type the original escrow credit uses -
+    // so every online booking produced two "payment received" rows for the same money: one
+    // when the client paid, another when the booking completed and the funds moved from
+    // pending to available. A provider reading their ledger saw each job paid to them
+    // twice, and the totals beside it disagreed with that for no visible reason.
+    try {
+      await client.query(`ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_type_check;`);
+      await client.query(`
+        ALTER TABLE transactions ADD CONSTRAINT transactions_type_check
+        CHECK (type IN ('payment_received', 'escrow_released', 'commission_deducted',
+                        'payout_requested', 'payout_completed', 'payout_cancelled',
+                        'refund', 'adjustment'));
+      `);
+      console.log('Updated transactions type constraint to include escrow_released.');
+    } catch (e) {
+      console.log('Could not update transactions type constraint (may already be correct):', (e as Error).message);
+    }
+
     await client.query(`CREATE INDEX IF NOT EXISTS idx_wallets_provider ON wallets (provider_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_transactions_wallet ON transactions (wallet_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_transactions_created ON transactions (created_at DESC);`);

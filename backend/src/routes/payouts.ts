@@ -60,11 +60,13 @@ router.post('/request', verifyToken, async (req: Request & { userId?: string }, 
 
   const dbClient = await pool.connect();
   try {
+    await dbClient.query('BEGIN');
+
     // GET /wallet/my creates the wallet on demand but this route only looked one up, so
     // a provider who reached the form without it having loaded hit a dead-end 404.
-    await ensureProviderWallet(providerId);
-
-    await dbClient.query('BEGIN');
+    // Inside the transaction and on its connection, so a request that fails below leaves
+    // no wallet row behind and no second connection is checked out while this one is held.
+    await ensureProviderWallet(providerId, dbClient);
 
     // Get wallet with lock
     const walletRes = await dbClient.query(
@@ -178,8 +180,8 @@ router.post('/request', verifyToken, async (req: Request & { userId?: string }, 
 router.get('/my', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   const providerId = req.userId;
   const role = (req as any).role;
-  const limit = parseInt(req.query.limit as string) || 50;
-  const offset = parseInt(req.query.offset as string) || 0;
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
+  const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
   const status = req.query.status as string;
 
   if (!providerId) {
@@ -279,8 +281,8 @@ router.get('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
 router.get('/', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   const userId = req.userId;
   const role = (req as any).role;
-  const limit = parseInt(req.query.limit as string) || 50;
-  const offset = parseInt(req.query.offset as string) || 0;
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
+  const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
   const status = req.query.status as string;
 
   if (!userId || role !== 'admin') {
@@ -479,22 +481,19 @@ router.patch('/:id/status', verifyToken, async (req: Request & { userId?: string
     } else if (status === 'completed') {
       updates += `, completed_at = CURRENT_TIMESTAMP`;
 
-      // Record completion transaction - balance doesn't change since it was already deducted at request time
-      // The balance_after should reflect the current available balance
-      if (wallet) {
-        await dbClient.query(
-          `INSERT INTO transactions (wallet_id, payout_id, type, amount, balance_after, reference_id, description)
-           VALUES ($1, $2, 'payout_completed', $3, $4, $5, $6)`,
-          [
-            String(wallet.id),
-            payout.id,
-            -parseFloat(payout.amount),
-            parseFloat(wallet.available_balance), // Balance unchanged - already deducted at request
-            `payout_completed_${payout.id}`,
-            `Payout of ${payout.amount} PHP completed via ${payout.payout_method}`
-          ]
-        );
-      }
+      // Deliberately no ledger row here.
+      //
+      // There used to be one, of type 'payout_completed' and amount -payout.amount. But
+      // the money left available_balance at REQUEST time, recorded then as
+      // 'payout_requested' with the same negative amount - so writing it again on
+      // completion put the same withdrawal in the provider's ledger twice, reading as if
+      // they had been debited double. (The balances themselves were always right; only the
+      // list disagreed with them, which is arguably worse - it looks like the books are
+      // wrong rather than the display.)
+      //
+      // Completion is a status change, not a balance movement, and the payouts list on the
+      // same page already shows each payout's status and completed_at. The ledger is for
+      // movements.
     } else if (status === 'failed') {
       // CRITICAL FIX: Check if original deduction exists before refunding
       const originalDeductionRes = await dbClient.query(
