@@ -1,7 +1,6 @@
 import { Request, Response, NextFunction, RequestHandler } from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
-import xss from 'xss';
 import { discardUploads } from '../services/uploadService';
 
 // ==============================================
@@ -127,7 +126,9 @@ export const helmetMiddleware = helmet({
   hsts: {
     maxAge: 31536000, // 1 year
     includeSubDomains: true,
-    preload: true,
+    // No 'preload': that flag is a declaration of intent to submit the domain to the
+    // browser preload list, and this host is a subdomain of onrender.com - not a domain
+    // this project can submit. Claiming it changes nothing and misleads the next reader.
   },
   noSniff: true,
   xssFilter: true,
@@ -136,46 +137,31 @@ export const helmetMiddleware = helmet({
 });
 
 // ==============================================
-// XSS SANITIZATION
+// OUTPUT ENCODING, NOT INPUT MANGLING
 // ==============================================
-
-const xssOptions = {
-  whiteList: {}, // No HTML tags allowed
-  stripIgnoreTag: true,
-  stripIgnoreTagBody: ['script', 'style'],
-};
-
-// Recursively sanitize an object
-function sanitizeValue(value: any): any {
-  if (typeof value === 'string') {
-    return xss(value, xssOptions);
-  }
-  if (Array.isArray(value)) {
-    return value.map(sanitizeValue);
-  }
-  if (value !== null && typeof value === 'object') {
-    const sanitized: any = {};
-    for (const key of Object.keys(value)) {
-      sanitized[key] = sanitizeValue(value[key]);
-    }
-    return sanitized;
-  }
-  return value;
-}
-
-// XSS sanitization middleware
-export const xssSanitizer: RequestHandler = (req: Request, res: Response, next: NextFunction): void => {
-  if (req.body && typeof req.body === 'object') {
-    req.body = sanitizeValue(req.body);
-  }
-  if (req.query && typeof req.query === 'object') {
-    req.query = sanitizeValue(req.query);
-  }
-  if (req.params && typeof req.params === 'object') {
-    req.params = sanitizeValue(req.params);
-  }
-  next();
-};
+//
+// There used to be an `xssSanitizer` here, applied to req.body, req.query and req.params
+// of every request. It ran `xss()` with `whiteList: {}` and `stripIgnoreTag: true`, which
+// does not escape markup - it DELETES it, and it decides what a tag is by looking for a
+// '<' and the next '>'. Ordinary writing is full of those:
+//
+//     "is the price < 5000 or > 5000?"  ->  "is the price  5000?"
+//     "Rate: 5/10 <3"                   ->  "Rate: 5/10 "
+//
+// Everything between the two angle brackets was silently destroyed, in the request, before
+// it was stored - so the damage was permanent and invisible to whoever typed it. That is a
+// data-loss bug being paid for as if it bought safety, and it did not buy any:
+//
+//  - The frontend is React. JSX escapes interpolated strings on render, so a stored
+//    "<script>" is displayed as text, never executed. The one dangerouslySetInnerHTML in
+//    the codebase (components/ui/chart.tsx) injects CSS built from developer-supplied
+//    chart config, never from user input.
+//  - The one place user content really is interpolated into markup is the password-reset
+//    email in routes/auth.ts, which is a backend template. That is escaped at the point of
+//    use - where the context is actually known - rather than by mangling every string in
+//    the system on the chance that one of them ends up in HTML.
+//
+// Sanitise on output, in the encoding the destination needs. Store what the user typed.
 
 // ==============================================
 // CSRF PROTECTION (Double Submit Cookie Pattern)
@@ -192,10 +178,16 @@ export function generateCsrfToken(): string {
   return crypto.randomBytes(CSRF_TOKEN_LENGTH).toString('hex');
 }
 
-// Middleware to set CSRF token cookie
+// Middleware to set CSRF token cookie.
+//
+// Issues one only when the caller does not already have one. It used to mint a fresh token
+// on EVERY GET, which is the one thing a double-submit token must not do: the browser reads
+// the cookie when it builds a request, and any GET landing in between (a poll, a prefetch,
+// a second tab) rotated the cookie out from under it, so the header and cookie disagreed
+// and the request would be rejected. It also meant a Set-Cookie on every single GET
+// response for a value nothing was checking.
 export const csrfTokenSetter: RequestHandler = (req: Request, res: Response, next: NextFunction): void => {
-  // Only set for GET requests (setting up the token)
-  if (req.method === 'GET') {
+  if (req.method === 'GET' && !req.cookies?.[CSRF_COOKIE_NAME]) {
     const token = generateCsrfToken();
     res.cookie(CSRF_COOKIE_NAME, token, {
       httpOnly: false, // Client needs to read this
@@ -208,7 +200,23 @@ export const csrfTokenSetter: RequestHandler = (req: Request, res: Response, nex
   next();
 };
 
-// CSRF validation middleware for state-changing requests
+/**
+ * CSRF validation for state-changing requests. Deliberately NOT mounted - see below.
+ *
+ * Sessions here are bearer tokens: apiClient reads the JWT out of localStorage and sends
+ * it as an Authorization header, and middleware/auth.ts's verifyToken reads that header and
+ * nothing else. A cross-site request cannot set that header, and the browser will not add
+ * it on its own, so there is no CSRF to protect against on any route as things stand.
+ *
+ * routes/auth.ts does also drop the same JWT into an `auth_token` cookie on login, which
+ * looks like the missing half of a CSRF hole - but nothing ever reads that cookie back, and
+ * it is sameSite: 'strict', so the browser would not attach it to a cross-site request even
+ * if something did. It is inert either way.
+ *
+ * The moment any route starts accepting that cookie as proof of identity, this must be
+ * mounted on every non-GET route. Keeping it here, working and tested, is cheaper than
+ * rediscovering it then.
+ */
 export const csrfProtection: RequestHandler = (req: Request, res: Response, next: NextFunction): void => {
   // Skip for safe methods
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
@@ -224,8 +232,16 @@ export const csrfProtection: RequestHandler = (req: Request, res: Response, next
     return;
   }
 
-  // Constant-time comparison to prevent timing attacks
-  if (!crypto.timingSafeEqual(Buffer.from(cookieToken), Buffer.from(headerToken))) {
+  // Constant-time comparison to prevent timing attacks.
+  //
+  // The length check is not an optimisation: timingSafeEqual THROWS on buffers of different
+  // lengths, so a caller sending a header of the wrong size would have crashed this
+  // middleware into a 500 instead of being turned away with a 403. Lengths are not secret -
+  // the token length is a constant in this file - so comparing them openly leaks nothing.
+  const cookieBuf = Buffer.from(String(cookieToken), 'utf8');
+  const headerBuf = Buffer.from(String(headerToken), 'utf8');
+
+  if (cookieBuf.length !== headerBuf.length || !crypto.timingSafeEqual(cookieBuf, headerBuf)) {
     res.status(403).json({ error: 'CSRF token invalid' });
     return;
   }
@@ -234,66 +250,37 @@ export const csrfProtection: RequestHandler = (req: Request, res: Response, next
 };
 
 // ==============================================
-// SQL INJECTION PREVENTION (Input Validation)
+// WHY THERE IS NO SQL "INJECTION PREVENTION" MIDDLEWARE HERE
 // ==============================================
-
-// Regex patterns for common SQL injection attempts
-const SQL_INJECTION_PATTERNS = [
-  /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|UNION|ALTER|CREATE|TRUNCATE)\b)/gi,
-  /(--)|(\/\*)|(\*\/)/g,
-  /(;|\||`)/g,
-  /(\bOR\b\s+\d+\s*=\s*\d+)/gi,
-  /(\bAND\b\s+\d+\s*=\s*\d+)/gi,
-  /(\'|\")(\s*)(OR|AND)(\s*)(\'|\"|\d)/gi,
-];
-
-// Check if a string contains potential SQL injection
-function containsSqlInjection(value: string): boolean {
-  return SQL_INJECTION_PATTERNS.some(pattern => pattern.test(value));
-}
-
-// Validate and sanitize input for SQL safety
-function validateInput(value: any, path: string = ''): { valid: boolean; message?: string } {
-  if (typeof value === 'string') {
-    if (containsSqlInjection(value)) {
-      return { valid: false, message: `Potentially malicious input detected in ${path}` };
-    }
-  } else if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      const result = validateInput(value[i], `${path}[${i}]`);
-      if (!result.valid) return result;
-    }
-  } else if (value !== null && typeof value === 'object') {
-    for (const key of Object.keys(value)) {
-      const result = validateInput(value[key], path ? `${path}.${key}` : key);
-      if (!result.valid) return result;
-    }
-  }
-  return { valid: true };
-}
-
-// SQL injection prevention middleware
-export const sqlInjectionPrevention: RequestHandler = (req: Request, res: Response, next: NextFunction): void => {
-  const bodyResult = validateInput(req.body, 'body');
-  if (!bodyResult.valid) {
-    res.status(400).json({ error: 'Invalid input detected', details: bodyResult.message });
-    return;
-  }
-
-  const queryResult = validateInput(req.query, 'query');
-  if (!queryResult.valid) {
-    res.status(400).json({ error: 'Invalid input detected', details: queryResult.message });
-    return;
-  }
-
-  const paramsResult = validateInput(req.params, 'params');
-  if (!paramsResult.valid) {
-    res.status(400).json({ error: 'Invalid input detected', details: paramsResult.message });
-    return;
-  }
-
-  next();
-};
+//
+// A `sqlInjectionPrevention` middleware used to sit on /api/auth, /api/payments,
+// /api/wallet, /api/payouts and /api/admin. It rejected any request whose body, query or
+// params contained a ';', a '|', a backtick, a '--', or one of SELECT/INSERT/UPDATE/
+// DELETE/DROP/UNION/ALTER/CREATE/TRUNCATE as a whole word. It was removed, for two
+// separate reasons.
+//
+// The first is that it did not work reliably. Its patterns were module-level regexes
+// carrying the /g flag, and it tested them with `pattern.test(value)`. A /g regex keeps
+// `lastIndex` between calls, so each test resumed from wherever the previous request's
+// string happened to leave off - on a shared, long-lived object. The same input was
+// therefore accepted or rejected depending on what had been sent just before it, by
+// anyone. A security control that fails open half the time is not a security control, and
+// one that fails closed half the time is an outage.
+//
+// The second is that it was defending a door that is not there. Every query in this
+// codebase is parameterised - values travel as $1, $2, ... and are never concatenated into
+// SQL. The only interpolation into a query string anywhere is an identifier chosen from a
+// fixed whitelist in this repo (routes/admin.ts's sort column and direction, its INTERVAL
+// literal from a switch, config/database.ts's column names from a hardcoded migration
+// list). None of those can be reached by anything a request carries.
+//
+// What it did do was reject ordinary writing. An admin could not decline a payout with the
+// reason "account details are incorrect; please update and resubmit" - two separate hits -
+// and a password containing ';' could not be used to sign up. Those were real, reported-as-
+// broken behaviours bought in exchange for nothing.
+//
+// If a query ever does need to interpolate something a user supplied, fix it there, with a
+// whitelist or a parameter. Not with a blocklist over every string in the system.
 
 // ==============================================
 // SECURE COOKIE CONFIGURATION
@@ -367,38 +354,23 @@ export function isValidNumericId(id: string): boolean {
 // COMBINED SECURITY MIDDLEWARE
 // ==============================================
 
-// Apply all security middleware for sensitive routes
-export const fullSecurityStack = [
-  xssSanitizer,
-  sqlInjectionPrevention,
-];
+// Per-area rate limiting. These used to also carry xssSanitizer and
+// sqlInjectionPrevention; both were removed for the reasons set out above, which leaves
+// the limiter as the thing each of these stacks is actually for. They stay as named
+// stacks rather than collapsing to bare limiters at the mount points, so there is still
+// one place to add a real per-area control when one is needed.
 
 // Security middleware for auth routes
-export const authSecurityStack = [
-  authLimiter,
-  xssSanitizer,
-  sqlInjectionPrevention,
-];
+export const authSecurityStack = [authLimiter];
 
 // Security middleware for payment routes
-export const paymentSecurityStack = [
-  paymentLimiter,
-  xssSanitizer,
-  sqlInjectionPrevention,
-];
+export const paymentSecurityStack = [paymentLimiter];
 
 // Security middleware for chat routes
-export const chatSecurityStack = [
-  chatLimiter,
-  xssSanitizer,
-];
+export const chatSecurityStack = [chatLimiter];
 
 // Security middleware for admin routes
-export const adminSecurityStack = [
-  adminLimiter,
-  xssSanitizer,
-  sqlInjectionPrevention,
-];
+export const adminSecurityStack = [adminLimiter];
 
 // ==============================================
 // SECURITY LOGGING

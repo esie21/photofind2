@@ -5,6 +5,7 @@ import cookieParser from 'cookie-parser';
 import { testConnection, initializeTables } from './config/database';
 import { pool } from './config/database';
 import { JWT_SECRET } from './config/authConfig';
+import { isAccountActive } from './middleware/auth';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
 import debugRoutes from './routes/debug';
@@ -36,7 +37,6 @@ import {
   paymentSecurityStack,
   chatSecurityStack,
   adminSecurityStack,
-  xssSanitizer,
   csrfTokenSetter,
 } from './middleware/security';
 
@@ -53,25 +53,50 @@ app.get('/health', (req: Request, res: Response) => {
 // ==============================================
 // CORS CONFIGURATION
 // ==============================================
+// Extra origins for environments this list can't know about - a Vercel preview
+// deployment, a staging frontend, a teammate's tunnel. Comma-separated.
+//
+// An env var rather than a `*.vercel.app` wildcard: anyone can deploy to vercel.app, so
+// that pattern would readmit the whole internet through the side door this is closing.
+const EXTRA_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 const ALLOWED_ORIGINS = [
   'https://photofind2.vercel.app',
   'http://localhost:3000',
   'http://localhost:5173',
+  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL.replace(/\/$/, '')] : []),
+  ...EXTRA_ALLOWED_ORIGINS,
 ];
 
-// Simple, unified CORS - handles both preflight and actual requests
+// Simple, unified CORS - handles both preflight and actual requests.
+//
+// An unrecognised origin is now refused. It used to be logged and then allowed anyway
+// ("Allow anyway for now - debug mode"), alongside credentials: true - which is to say
+// every site on the internet was permitted to make credentialed requests to this API and
+// read the responses. The allowlist existed but decided nothing.
+//
+// Closing it is safe for the normal path because production does not use CORS at all:
+// the frontend calls a relative /api, which Vercel rewrites to this backend server-side,
+// so those requests arrive with no Origin header. What genuinely is cross-origin is the
+// browser talking to this host directly - direct uploads (see DIRECT_UPLOAD_URL, which
+// skips the rewrite to dodge Vercel's 4.5MB body limit) and the Socket.IO connection -
+// and both come from the Vercel domain, which is on the list.
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (direct browser, mobile apps, curl, etc.)
+    // No Origin header: same-origin navigations, server-to-server calls (including
+    // Vercel's rewrite and PayMongo's webhook), curl, native apps. There is no browser
+    // making a cross-site request to protect here.
     if (!origin) return callback(null, true);
 
     if (ALLOWED_ORIGINS.includes(origin)) {
-      callback(null, origin);
-    } else {
-      // Log rejected origins for debugging
-      console.log(`CORS: Rejected origin ${origin}`);
-      callback(null, true); // Allow anyway for now - debug mode
+      return callback(null, origin);
     }
+
+    console.warn(`CORS: rejected origin ${origin}`);
+    return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -84,18 +109,37 @@ app.use(cors({
 // SECURITY MIDDLEWARE
 // ==============================================
 
-// Helmet disabled for now - was interfering with CORS
-// app.use(helmetMiddleware);
+// Re-enabled. It was turned off with "was interfering with CORS", which two of its
+// defaults will do: Cross-Origin-Resource-Policy defaults to same-origin, which blocks the
+// Vercel frontend from loading portfolio images off this host, and Cross-Origin-Embedder-
+// Policy breaks embedding them. Both are already overridden in helmetMiddleware
+// (crossOriginResourcePolicy: 'cross-origin', crossOriginEmbedderPolicy: false), so the
+// conflict that justified disabling it is gone - and disabling the whole thing also gave
+// up HSTS, nosniff, frameguard and the referrer policy, which had nothing to do with CORS.
+//
+// Mounted after CORS so the CORS headers are already on the response, including on the
+// preflight short-circuit.
+app.use(helmetMiddleware);
 
 // Cookie parser for CSRF tokens
 app.use(cookieParser());
 
+// The PayMongo webhook must keep its raw bytes: the signature is an HMAC over the exact
+// payload PayMongo sent, so the body has to be verified before anything re-serialises it.
+//
+// This has to be mounted HERE, ahead of express.json below, not just on the route.
+// body-parser sets req._body once it has parsed a request, and every later parser -
+// including the express.raw() on the webhook route itself - returns immediately when it
+// sees that flag. So express.json won the race, req.body arrived at the route as a parsed
+// object, and `req.body.toString()` produced the literal string "[object Object]". The
+// computed HMAC could never match and every webhook was rejected with 400: any payment
+// that settles asynchronously (GCash, Maya, a 3DS card) was only ever credited if the
+// browser happened to stay open long enough to complete POST /payments/confirm.
+app.use('/api/payments/webhook', express.raw({ type: 'application/json', limit: '1mb' }));
+
 // Body parser with size limits
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// XSS sanitization for all requests
-app.use(xssSanitizer);
 
 // CSRF token setter for GET requests
 app.use(csrfTokenSetter);
@@ -274,20 +318,37 @@ function removeSupportPresence(ticketId: string, userId: string) {
   if (set.size === 0) supportPresence.delete(ticketId);
 }
 
-io.use((socket: Socket, next: (err?: Error) => void) => {
+io.use(async (socket: Socket, next: (err?: Error) => void) => {
   const token =
     (socket.handshake.auth as any)?.token ||
     socket.handshake.headers.authorization?.toString().split(' ')[1];
 
   if (!token) return next(new Error('Unauthorized'));
 
+  let decoded: any;
   try {
-    const decoded: any = jwt.verify(token, JWT_SECRET);
-    (socket.data as any).userId = String(decoded.userId);
-    next();
+    decoded = jwt.verify(token, JWT_SECRET);
   } catch (_e) {
-    next(new Error('Unauthorized'));
+    return next(new Error('Unauthorized'));
   }
+
+  const userId = String(decoded.userId);
+
+  // Same check verifyToken makes on the HTTP side. Without it a deactivated account could
+  // still open a socket and keep receiving chat, support and notification traffic in real
+  // time - the one surface where being shut out is most obvious if it works, and least
+  // obvious if it doesn't.
+  try {
+    if (!(await isAccountActive(userId))) {
+      return next(new Error('Unauthorized'));
+    }
+  } catch (e) {
+    console.error('Socket auth: could not check account status:', e);
+    return next(new Error('Unauthorized'));
+  }
+
+  (socket.data as any).userId = userId;
+  next();
 });
 
 io.on('connection', (socket: Socket) => {
