@@ -36,3 +36,7 @@ coverage/
 
 # Misc
 *.tsbuildinfo
+
+# Scratch files some tools drop in the project root. Fifteen of these were committed
+# before this rule existed; they are working-directory markers, not project files.
+tmpclaude-*

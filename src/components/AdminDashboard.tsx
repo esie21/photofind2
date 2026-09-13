@@ -579,12 +579,18 @@ export function AdminDashboard() {
           // 'disputes' here is the count of bookings with dispute_raised, which is the
           // Booking Disputes panel - not the separate 'disputes' table behind the
           // Disputes tab. Two different systems, easy to wire to the wrong one.
-          const pending: Array<{ count: number; label: string; tab: TabType }> = [
+          // The annotation goes on the literal, not on the result of .filter(). Written
+          // the other way round, TypeScript widened each `tab` to plain `string` while
+          // building the array and only then compared it to the declared type - so the
+          // whole expression failed to check, and a mistyped tab name ('provider' for
+          // 'providers') would have produced a button that silently switches to nothing.
+          const pendingActions: Array<{ count: number; label: string; tab: TabType }> = [
             { count: metrics.pendingActions.verifications, label: 'verifications', tab: 'providers' },
             { count: metrics.pendingActions.disputes, label: 'disputes', tab: 'booking_disputes' },
             { count: metrics.pendingActions.reviews, label: 'reviews', tab: 'reviews' },
             { count: metrics.pendingActions.supportTickets, label: 'support tickets', tab: 'support' },
-          ].filter((item) => item.count > 0);
+          ];
+          const pending = pendingActions.filter((item) => item.count > 0);
 
           if (pending.length === 0) return null;
 
