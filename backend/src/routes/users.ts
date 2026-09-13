@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
-import { verifyToken, checkRole } from '../middleware/auth';
+import { verifyToken, checkRole, invalidateUserAccessCache } from '../middleware/auth';
 import multer from 'multer';
 import { Request as ExpressRequest } from 'express';
 import path from 'path';
@@ -555,10 +555,33 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
 });
 
 // Delete user - admin only
+// Deactivate a user. A soft delete, like DELETE /admin/users/:id, which is the route the
+// admin UI actually calls.
+//
+// This one used to be a real `DELETE FROM users`. users.id is the target of ON DELETE
+// CASCADE from bookings, payments, wallets and transactions, so removing a provider took
+// their entire financial history with it - every payment row, every ledger entry, escrow
+// balances and all - while the money those rows accounted for had already moved through
+// PayMongo and could no longer be reconciled against anything. There is no undo for that,
+// and nothing in the UI warned it was different from the admin route beside it.
 router.delete('/:id', verifyToken, checkRole('admin'), async (req: any, res: Response) => {
   try {
     const userId = req.params.id as string;
-    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+    const result = await pool.query(
+      `UPDATE users
+       SET deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $1
+       RETURNING id`,
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Ends the session of anyone signed in as them right now - see middleware/auth.ts.
+    invalidateUserAccessCache(userId);
+
     res.json({ success: true });
   } catch (error) {
     console.error('Delete user error:', error);
@@ -648,21 +671,44 @@ router.post('/:id/upload/portfolio',
 
     const urls = files.map(f => `users/${userId}/portfolio/${f.filename}`);
 
-    // Append to existing portfolio_images
-    const existingRes = await pool.query('SELECT portfolio_images FROM users WHERE id = $1', [userId]);
-    const existing: string[] = existingRes.rows[0]?.portfolio_images || [];
-    const newArr = [...existing, ...urls];
+    // Append in one statement, rather than SELECT the array, concatenate in JS and write
+    // the whole thing back.
+    //
+    // That read-modify-write had no lock and no transaction, so two uploads overlapping -
+    // or one upload landing while the editor saved a reorder - each read the same starting
+    // array and each wrote its own version. The second write replaced the first outright,
+    // so one upload's images vanished from the profile while their files sat on disk
+    // forever, referenced by nothing. array_cat does the append inside the database, where
+    // the row is locked for the duration of the UPDATE and no interleaving is possible.
+    //
+    // The limit is enforced in the same statement for the same reason: checked in JS
+    // beforehand, two uploads could both look at 20 items, both decide 4 more was fine and
+    // between them store 28. A no-op UPDATE (no row returned) means the cap was hit.
+    const appended = await pool.query(
+      `UPDATE users
+       SET portfolio_images = array_cat(COALESCE(portfolio_images, '{}'::text[]), $1::text[]),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $2
+         AND COALESCE(array_length(portfolio_images, 1), 0) + $3 <= $4
+       RETURNING array_length(portfolio_images, 1) AS total`,
+      [urls, userId, urls.length, MAX_PORTFOLIO_FILES]
+    );
 
-    // Check total count doesn't exceed limit
-    if (newArr.length > MAX_PORTFOLIO_FILES) {
-      // Delete the just-uploaded files since we're rejecting
+    if (appended.rows.length === 0) {
+      // Either the cap would have been exceeded or the user is gone. Nothing was stored,
+      // so the files just written are unreferenced and have to be cleaned up here.
       files.forEach(f => deleteUploadSafe(f.path));
+      const countRes = await pool.query(
+        `SELECT COALESCE(array_length(portfolio_images, 1), 0) AS total FROM users WHERE id::text = $1`,
+        [userId]
+      );
+      if (countRes.rows.length === 0) {
+        return res.status(404).json({ error: 'User not found' });
+      }
       return res.status(400).json({
-        error: `Portfolio limit exceeded. Maximum ${MAX_PORTFOLIO_FILES} images allowed. You have ${existing.length}.`
+        error: `Portfolio limit exceeded. Maximum ${MAX_PORTFOLIO_FILES} images allowed. You have ${countRes.rows[0].total}.`
       });
     }
-
-    await pool.query('UPDATE users SET portfolio_images = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newArr, userId]);
 
     const result = await pool.query(`SELECT ${USER_COLUMNS} FROM users WHERE id = $1`, [userId]);
 

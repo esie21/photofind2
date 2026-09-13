@@ -40,6 +40,24 @@ interface AuthRequest extends Request {
 // Token cookie name
 const AUTH_COOKIE_NAME = 'auth_token';
 
+/**
+ * Escapes a value for interpolation into an HTML email body.
+ *
+ * The password-reset email is the only place in this backend where something a user typed
+ * is written into markup, and a display name is entirely under that user's control. While
+ * a blanket input sanitiser was mangling every request body this was hidden behind it;
+ * with that gone (see middleware/security.ts) the escaping belongs here, at the point
+ * where the output format is actually known.
+ */
+function escapeHtml(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // A real bcrypt hash (same cost factor as real password hashing) with no matching
 // plaintext. Compared against when the email isn't found, so that path takes about as
 // long as a real wrong-password compare - without it, a nonexistent email returned
@@ -408,32 +426,37 @@ router.post('/signup', async (req: AuthRequest, res: Response) => {
         role: user.role,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
+    // The "is this email taken?" check above is a separate statement from the INSERT, so
+    // two signups for the same address can both pass it and race to the INSERT. The loser
+    // hit the UNIQUE index on users.email and was told "Signup failed" with a 500 - an
+    // outcome that reads as a broken server when it is really the ordinary, expected answer
+    // the check exists to give. The database has the last word; report what it means.
+    if (error?.code === '23505') {
+      return res.status(409).json({ error: 'Email already registered' });
+    }
     console.error('Signup error:', error);
     res.status(500).json({ error: 'Signup failed' });
   }
 });
 
-// Get current user endpoint
-router.get('/me', async (req: Request, res: Response) => {
+// Get current user endpoint.
+//
+// Uses verifyToken rather than picking the header apart again. The hand-rolled version let
+// jwt.verify throw into the generic catch below, which answered an EXPIRED SESSION WITH A
+// 500 - and apiClient only clears a stored token on a 401, so the one request whose whole
+// job is to say "you are signed out" instead told the client the server was broken and left
+// the dead token in place. Every subsequent request then failed too, with no way out but
+// clearing site data by hand. verifyToken answers 401, and also checks the account has not
+// been deactivated, which this never did.
+router.get('/me', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ error: 'No token provided' });
-    }
-
-    const token = authHeader.split(' ')[1];
-    const decoded: any = jwt.verify(
-      token,
-      JWT_SECRET
-    );
-
     const result = await pool.query(
       `SELECT id, email, name, role, profile_image, portfolio_images, portfolio_meta, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents,
               terms_accepted_at, terms_version,
               (password_set_at IS NOT NULL) as has_password
-       FROM users WHERE id = $1`,
-      [decoded.userId]
+       FROM users WHERE id::text = $1`,
+      [req.userId]
     );
 
     if (result.rows.length === 0) {
@@ -610,7 +633,7 @@ router.post('/forgot-password', passwordResetLimiter, async (req: Request, res: 
           html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
               <h2 style="color: #7c3aed;">Reset Your Password</h2>
-              <p>Hi ${user.name || 'there'},</p>
+              <p>Hi ${escapeHtml(user.name || 'there')},</p>
               <p>You requested to reset your password for your PhotoFind account.</p>
               <p>Click the button below to reset your password. This link will expire in 1 hour.</p>
               <div style="text-align: center; margin: 30px 0;">
@@ -681,9 +704,14 @@ router.post('/reset-password', async (req: Request, res: Response) => {
     // Hash the provided token to compare with stored hash
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-    // Find valid reset token
+    // Find valid reset token.
+    //
+    // deleted_at is selected so a deactivated account can be refused below. /forgot-password
+    // already refuses to send a link to one, but a link issued before deactivation stays
+    // usable for an hour, and nothing here looked - so an admin could deactivate an account
+    // and its owner could still reset its password afterwards.
     const tokenResult = await pool.query(
-      `SELECT prt.id, prt.user_id, prt.expires_at, u.email, u.name
+      `SELECT prt.id, prt.user_id, prt.expires_at, u.email, u.name, u.deleted_at
        FROM password_reset_tokens prt
        JOIN users u ON u.id = prt.user_id
        WHERE prt.token_hash = $1 AND prt.used_at IS NULL`,
@@ -701,6 +729,24 @@ router.post('/reset-password', async (req: Request, res: Response) => {
     }
 
     const resetToken = tokenResult.rows[0];
+
+    // Burn the token rather than just refusing: this link is no longer good for anything,
+    // and the same generic message as an invalid token avoids confirming to whoever holds
+    // it that the address belongs to a real, deactivated account.
+    if (resetToken.deleted_at) {
+      await pool.query(
+        'UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = $1',
+        [resetToken.id]
+      );
+      logSecurityEvent({
+        type: 'auth_failure',
+        ip: req.ip || 'unknown',
+        userId: String(resetToken.user_id),
+        path: req.path,
+        details: 'Password reset attempted on deactivated account',
+      });
+      return res.status(400).json({ error: 'Invalid or expired reset link. Please request a new one.' });
+    }
 
     // Check if token is expired
     if (new Date(resetToken.expires_at) < new Date()) {
