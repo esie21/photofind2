@@ -49,6 +49,19 @@
         '@': path.resolve(__dirname, './src'),
       },
     },
+    // Strips console.log/info/debug/trace from production builds while KEEPING
+    // console.error and console.warn - the error boundary's componentDidCatch relies on
+    // console.error surviving, and it is the one message worth having in the console of a
+    // user who is about to describe a problem to support. `drop: ['console']` would have
+    // taken that with it.
+    //
+    // `pure` marks these as side-effect-free so minification can eliminate them, which
+    // means it only applies to `vite build`; the dev server does not minify, so logs stay
+    // visible while developing. This is the part that makes the deletions below stick: a
+    // console.log added in six months never reaches production either.
+    esbuild: {
+      pure: ['console.log', 'console.info', 'console.debug', 'console.trace'],
+    },
     build: {
       target: 'esnext',
       outDir: 'dist',
@@ -56,6 +69,13 @@
       minify: 'esbuild',
       rollupOptions: {
         output: {
+          // Only genuinely shared, always-needed packages belong here. Do NOT add a
+          // lazily-reached library (recharts was tried): naming a package in this object
+          // forces its chunk into the entry's static import graph, so Vite emits a
+          // <link rel="modulepreload"> for it in index.html and every visitor downloads
+          // it up front. Pinning recharts here cost the landing page 420 kB / 112 kB gzip
+          // for a library only the admin dashboard uses. Left unlisted, it folds into the
+          // lazy AdminDashboard chunk and is fetched only by admins, which is the point.
           manualChunks: {
             vendor: ['react', 'react-dom'],
             ui: ['lucide-react', '@radix-ui/react-dialog', '@radix-ui/react-popover'],

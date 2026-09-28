@@ -772,7 +772,7 @@ export function SupportChat({ mode, ticketId, onTicketCreated, onActivity, class
                 >
                   {msg.content && <p className="text-sm whitespace-pre-wrap break-words">{renderContentWithLinks(msg.content)}</p>}
                   {attachmentUrl && msg.attachment_type === 'image' && (
-                    <img src={attachmentUrl} alt={msg.attachment_name || 'attachment'} className="support-chat__media mt-2" />
+                    <img src={attachmentUrl} alt={msg.attachment_name || 'attachment'} loading="lazy" decoding="async" className="support-chat__media mt-2" />
                   )}
                   {attachmentUrl && msg.attachment_type === 'video' && (
                     <video src={attachmentUrl} controls className="support-chat__media--video mt-2" />

@@ -1,0 +1,17 @@
+{
+  "name": "PhotoFind",
+  "short_name": "PhotoFind",
+  "description": "Book verified photographers, videographers, makeup artists and designers near you.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#a855f7",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

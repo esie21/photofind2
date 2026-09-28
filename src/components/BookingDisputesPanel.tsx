@@ -130,6 +130,8 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 <img
                   src={getEvidenceUrl(e.file_url)}
                   alt={e.caption || e.evidence_type}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-32 object-cover rounded-lg bg-gray-100"
                   onError={(ev) => {
                     const target = ev.currentTarget;
@@ -313,6 +315,8 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                           <img
                             src={getEvidenceUrl(e.file_url)}
                             alt={e.evidence_type}
+                            loading="lazy"
+                            decoding="async"
                             className="w-20 h-20 object-cover rounded-lg bg-gray-100"
                             onError={(ev) => {
                               const target = ev.currentTarget;

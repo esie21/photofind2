@@ -46,6 +46,8 @@ function AdminAvatar({ src, name, className, textClassName }: {
         <img
           src={resolved}
           alt=""
+          loading="lazy"
+          decoding="async"
           className="w-full h-full object-cover"
           onError={() => setFailed(true)}
         />

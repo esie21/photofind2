@@ -1,27 +1,59 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { Header } from './components/Header';
 import { useAuth } from './context/AuthContext';
 import { useToast } from './context/ToastContext';
 import { LandingPage } from './components/LandingPage';
-import { AuthModal } from './components/AuthModal';
-import { ForgotPasswordModal } from './components/ForgotPasswordModal';
-import { ResetPasswordPage } from './components/ResetPasswordPage';
-import { PaymentCallbackPage } from './components/PaymentCallbackPage';
-import { ClientDashboard } from './components/ClientDashboard';
-import { ProviderDashboard } from './components/ProviderDashboard';
-import { ProviderProfilePage } from './components/ProviderProfilePage';
-import { TermsUpdateModal } from './components/TermsUpdateModal';
-import { BookingFlow } from './components/BookingFlow';
-import { AdminDashboard } from './components/AdminDashboard';
-import { ChatInterface } from './components/ChatInterface';
-import { MessagesPage } from './components/MessagesPage';
-import { SettingsPage } from './components/SettingsPage';
-import { HelpSupportPage } from './components/HelpSupportPage';
-import { TermsPage } from './components/TermsPage';
-import { BookingsPage } from './components/BookingsPage';
 import { AccountMenuTarget } from './components/UserAccountMenu';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Notification } from './api/services/notificationService';
-import chatService from './api/services/chatService';
+
+// Every view and modal below is code-split.
+//
+// These used to be static imports, which meant one chunk held the lot - the admin
+// dashboard, Recharts, the wallet, the whole booking flow - and every first-time
+// visitor downloaded all of it before the landing page could paint, despite a given
+// session rendering one or two of these screens.
+//
+// Header and LandingPage stay static deliberately: they are what an anonymous visitor
+// sees first, so splitting them would only add a network round-trip before first paint.
+//
+// The .then() remap is because lazy() wants a module whose *default* export is the
+// component, and these are all named exports.
+const lazyNamed = <T extends Record<string, any>, K extends keyof T>(
+  loader: () => Promise<T>,
+  name: K,
+) => lazy(() => loader().then((m) => ({ default: m[name] })));
+
+const ResetPasswordPage = lazyNamed(() => import('./components/ResetPasswordPage'), 'ResetPasswordPage');
+const PaymentCallbackPage = lazyNamed(() => import('./components/PaymentCallbackPage'), 'PaymentCallbackPage');
+const ClientDashboard = lazyNamed(() => import('./components/ClientDashboard'), 'ClientDashboard');
+const ProviderDashboard = lazyNamed(() => import('./components/ProviderDashboard'), 'ProviderDashboard');
+const ProviderProfilePage = lazyNamed(() => import('./components/ProviderProfilePage'), 'ProviderProfilePage');
+const BookingFlow = lazyNamed(() => import('./components/BookingFlow'), 'BookingFlow');
+const AdminDashboard = lazyNamed(() => import('./components/AdminDashboard'), 'AdminDashboard');
+const MessagesPage = lazyNamed(() => import('./components/MessagesPage'), 'MessagesPage');
+const SettingsPage = lazyNamed(() => import('./components/SettingsPage'), 'SettingsPage');
+const HelpSupportPage = lazyNamed(() => import('./components/HelpSupportPage'), 'HelpSupportPage');
+const TermsPage = lazyNamed(() => import('./components/TermsPage'), 'TermsPage');
+const BookingsPage = lazyNamed(() => import('./components/BookingsPage'), 'BookingsPage');
+const AuthModal = lazyNamed(() => import('./components/AuthModal'), 'AuthModal');
+const ForgotPasswordModal = lazyNamed(() => import('./components/ForgotPasswordModal'), 'ForgotPasswordModal');
+const ChatInterface = lazyNamed(() => import('./components/ChatInterface'), 'ChatInterface');
+const TermsUpdateModal = lazyNamed(() => import('./components/TermsUpdateModal'), 'TermsUpdateModal');
+
+// Matches the loading state AdminDashboard already renders, so a view arriving over the
+// network looks like a view fetching its data rather than like a different kind of wait.
+const ModalFallback = () => (
+  <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
+    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div>
+  </div>
+);
+
+const ViewFallback = () => (
+  <div className="flex justify-center py-20">
+    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600"></div>
+  </div>
+);
 
 type ProviderTab = 'overview' | 'profile' | 'availability' | 'bookings' | 'wallet' | 'reviews';
 
@@ -179,9 +211,6 @@ export default function App() {
 
   // Handle notification click navigation
   const handleNotificationNavigate = async (notification: Notification) => {
-    console.log('=== NOTIFICATION CLICK HANDLER STARTED ===');
-    console.log('Raw notification:', notification);
-
     try {
       // Parse data if it's a string (backwards compatibility for old double-stringified data)
       let data = notification.data || {};
@@ -199,8 +228,6 @@ export default function App() {
         }
       }
 
-      console.log('Notification click:', { type: notification.type, data, rawData: notification.data });
-
     // For message notifications, open the chat
     if (notification.type === 'new_message') {
       const senderName = data.sender_name || 'User';
@@ -217,14 +244,11 @@ export default function App() {
       // Extract booking_id - check multiple possible locations
       let bookingId: number | undefined = toValidNumber(data.booking_id);
 
-      console.log('New message notification - initial:', { senderId, chatId, bookingId, rawBookingId: data.booking_id, data });
-
       // Always try to get fresh booking_id from chat if we have chatId
       if (chatId) {
-        console.log('Fetching booking_id from chat_id:', chatId);
         try {
+          const { default: chatService } = await import('./api/services/chatService');
           const chatInfo = await chatService.getChatInfo(chatId);
-          console.log('Chat info received:', chatInfo);
           if (chatInfo.booking_id) {
             const fetchedId = toValidNumber(chatInfo.booking_id);
             if (fetchedId) {
@@ -236,15 +260,12 @@ export default function App() {
         }
       }
 
-      console.log('Final bookingId for chat:', bookingId);
-
       if (senderId) {
         const context = {
           recipientId: String(senderId),
           recipientName: senderName,
           bookingId,
         };
-        console.log('Setting chatContext:', context);
         setChatContext(context);
       } else {
         console.error('No senderId in notification data');
@@ -332,94 +353,102 @@ export default function App() {
       />
 
       <main>
-        {currentView === 'reset-password' && <ResetPasswordPage />}
-        {currentView === 'payment-callback' && (
-          <PaymentCallbackPage onDone={() => handleAccountMenuNavigate('bookings')} />
-        )}
-        {currentView === 'settings' && <SettingsPage onGoToTerms={() => navigateTo('terms')} />}
-        {currentView === 'bookings' && <BookingsPage />}
-        {currentView === 'help' && <HelpSupportPage onGoToBookings={() => handleAccountMenuNavigate('bookings')} />}
-        {currentView === 'terms' && <TermsPage />}
-        {currentView === 'landing' && (
-          <LandingPage
-            onViewChange={handleViewChange}
-            onViewProvider={handleViewProviderProfile}
-            onSearch={(query) => {
-              setLandingSearchQuery(query);
-              setLandingCategory(undefined);
-              setDashboardKey((k) => k + 1);
-              handleViewChange('client');
-            }}
-            onCategorySelect={(category) => {
-              setLandingCategory(category);
-              setLandingSearchQuery(undefined);
-              setDashboardKey((k) => k + 1);
-            }}
-          />
-        )}
-        {currentView === 'client' && <ClientDashboard
-          key={dashboardKey}
-          initialSearchQuery={landingSearchQuery}
-          initialCategory={landingCategory}
-          onContactSupport={() => navigateTo('help')}
-          onStartBooking={(provider?: unknown) => {
-            if (!user) {
-              setAuthMode('login');
-              setShowAuthModal(true);
-              return;
-            }
-            if (provider) {
-              setBookingContext({
-                providerId: String((provider as any).id),
-                providerName: (provider as any).name,
-                providerImage: (provider as any).profile_image || (provider as any).image,
-              });
-            } else {
-              setBookingContext(null);
-            }
-            navigateTo('booking');
-          }}
-          onViewProvider={handleViewProviderProfile}
-        />}
-        {currentView === 'provider' && (
-          <ProviderDashboard
-            initialTab={providerTabRequest?.tab}
-            tabRequestId={providerTabRequest?.requestId}
-          />
-        )}
-        {currentView === 'messages' && <MessagesPage />}
-        {currentView === 'booking' && (
-          <BookingFlow
-            onComplete={() => {
-              setDashboardKey(k => k + 1);
-              navigateTo('client');
-            }}
-            providerId={bookingContext?.providerId}
-            providerName={bookingContext?.providerName}
-            providerImage={bookingContext?.providerImage}
-          />
-        )}
-        {currentView === 'admin' && <AdminDashboard />}
-        {currentView === 'provider-profile' && viewingProviderId && (
-          <ProviderProfilePage
-            providerId={viewingProviderId}
-            onStartBooking={(provider, service) => {
-              if (!user) {
-                setAuthMode('login');
-                setShowAuthModal(true);
-                return;
-              }
-              setBookingContext({
-                providerId: String(provider.id),
-                providerName: provider.name,
-                providerImage: provider.profile_image || provider.image,
-                serviceId: service?.id ? String(service.id) : undefined,
-              });
-              navigateTo('booking');
-            }}
-            onBack={() => navigateTo('client')}
-          />
-        )}
+        {/* Keyed on currentView so that navigating away clears a caught error: React
+            never resets a boundary on its own, and without the key a single failed
+            screen would leave every later screen showing that same stale error.
+            onGoHome gives a way out when the broken screen is the one they are on. */}
+        <ErrorBoundary key={currentView} variant="inline" onGoHome={() => navigateTo('landing')}>
+          <Suspense fallback={<ViewFallback />}>
+            {currentView === 'reset-password' && <ResetPasswordPage />}
+            {currentView === 'payment-callback' && (
+              <PaymentCallbackPage onDone={() => handleAccountMenuNavigate('bookings')} />
+            )}
+            {currentView === 'settings' && <SettingsPage onGoToTerms={() => navigateTo('terms')} />}
+            {currentView === 'bookings' && <BookingsPage />}
+            {currentView === 'help' && <HelpSupportPage onGoToBookings={() => handleAccountMenuNavigate('bookings')} />}
+            {currentView === 'terms' && <TermsPage />}
+            {currentView === 'landing' && (
+              <LandingPage
+                onViewChange={handleViewChange}
+                onViewProvider={handleViewProviderProfile}
+                onSearch={(query) => {
+                  setLandingSearchQuery(query);
+                  setLandingCategory(undefined);
+                  setDashboardKey((k) => k + 1);
+                  handleViewChange('client');
+                }}
+                onCategorySelect={(category) => {
+                  setLandingCategory(category);
+                  setLandingSearchQuery(undefined);
+                  setDashboardKey((k) => k + 1);
+                }}
+              />
+            )}
+            {currentView === 'client' && <ClientDashboard
+              key={dashboardKey}
+              initialSearchQuery={landingSearchQuery}
+              initialCategory={landingCategory}
+              onContactSupport={() => navigateTo('help')}
+              onStartBooking={(provider?: unknown) => {
+                if (!user) {
+                  setAuthMode('login');
+                  setShowAuthModal(true);
+                  return;
+                }
+                if (provider) {
+                  setBookingContext({
+                    providerId: String((provider as any).id),
+                    providerName: (provider as any).name,
+                    providerImage: (provider as any).profile_image || (provider as any).image,
+                  });
+                } else {
+                  setBookingContext(null);
+                }
+                navigateTo('booking');
+              }}
+              onViewProvider={handleViewProviderProfile}
+            />}
+            {currentView === 'provider' && (
+              <ProviderDashboard
+                initialTab={providerTabRequest?.tab}
+                tabRequestId={providerTabRequest?.requestId}
+              />
+            )}
+            {currentView === 'messages' && <MessagesPage />}
+            {currentView === 'booking' && (
+              <BookingFlow
+                onComplete={() => {
+                  setDashboardKey(k => k + 1);
+                  navigateTo('client');
+                }}
+                providerId={bookingContext?.providerId}
+                providerName={bookingContext?.providerName}
+                providerImage={bookingContext?.providerImage}
+              />
+            )}
+            {currentView === 'admin' && <AdminDashboard />}
+            {currentView === 'provider-profile' && viewingProviderId && (
+              <ProviderProfilePage
+                providerId={viewingProviderId}
+                onStartBooking={(provider, service) => {
+                  if (!user) {
+                    setAuthMode('login');
+                    setShowAuthModal(true);
+                    return;
+                  }
+                  setBookingContext({
+                    providerId: String(provider.id),
+                    providerName: provider.name,
+                    providerImage: provider.profile_image || provider.image,
+                    serviceId: service?.id ? String(service.id) : undefined,
+                  });
+                  navigateTo('booking');
+                }}
+                onBack={() => navigateTo('client')}
+              />
+            )}
+          </Suspense>
+        </ErrorBoundary>
       </main>
 
       {/* Asks for agreement again when the terms have changed since this user last
@@ -428,46 +457,54 @@ export default function App() {
           be. Kept below AuthModal in the tree so a signup in progress isn't covered by
           it - a brand-new account is stamped with the current version anyway and never
           triggers this. */}
-      <TermsUpdateModal />
+      <Suspense fallback={null}>
+        <TermsUpdateModal />
+      </Suspense>
 
-      {showAuthModal && (
-        <AuthModal
-          mode={authMode}
-          onClose={() => setShowAuthModal(false)}
-          onSuccess={(role) => {
-            setShowAuthModal(false);
-            navigateTo(role === 'provider' ? 'provider' : 'client');
-          }}
-          onForgotPassword={() => {
-            setShowAuthModal(false);
-            setShowForgotPasswordModal(true);
-          }}
-        />
-      )}
+      <Suspense fallback={<ModalFallback />}>
+        {showAuthModal && (
+          <AuthModal
+            mode={authMode}
+            onClose={() => setShowAuthModal(false)}
+            onSuccess={(role) => {
+              setShowAuthModal(false);
+              navigateTo(role === 'provider' ? 'provider' : 'client');
+            }}
+            onForgotPassword={() => {
+              setShowAuthModal(false);
+              setShowForgotPasswordModal(true);
+            }}
+          />
+        )}
+      </Suspense>
 
-      {showForgotPasswordModal && (
-        <ForgotPasswordModal
-          onClose={() => setShowForgotPasswordModal(false)}
-          onBackToLogin={() => {
-            setShowForgotPasswordModal(false);
-            setAuthMode('login');
-            setShowAuthModal(true);
-          }}
-        />
-      )}
+      <Suspense fallback={<ModalFallback />}>
+        {showForgotPasswordModal && (
+          <ForgotPasswordModal
+            onClose={() => setShowForgotPasswordModal(false)}
+            onBackToLogin={() => {
+              setShowForgotPasswordModal(false);
+              setAuthMode('login');
+              setShowAuthModal(true);
+            }}
+          />
+        )}
+      </Suspense>
 
       {/* Global Chat Modal - opened from notifications */}
-      {chatContext && (
-        <ChatInterface
-          provider={{
-            id: chatContext.recipientId,
-            name: chatContext.recipientName,
-            image: chatContext.recipientImage,
-          }}
-          bookingId={chatContext.bookingId}
-          onClose={() => setChatContext(null)}
-        />
-      )}
+      <Suspense fallback={null}>
+        {chatContext && (
+          <ChatInterface
+            provider={{
+              id: chatContext.recipientId,
+              name: chatContext.recipientName,
+              image: chatContext.recipientImage,
+            }}
+            bookingId={chatContext.bookingId}
+            onClose={() => setChatContext(null)}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

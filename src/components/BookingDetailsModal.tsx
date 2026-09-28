@@ -299,6 +299,8 @@ export function BookingDetailsModal({ booking, isProvider, onClose }: BookingDet
                           <img
                             src={getEvidenceUrl(e.file_url)}
                             alt={e.evidence_type}
+                            loading="lazy"
+                            decoding="async"
                             className="w-full h-20 object-cover rounded-lg bg-gray-100"
                           />
                         </button>
