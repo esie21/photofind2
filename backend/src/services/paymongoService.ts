@@ -23,6 +23,23 @@ export interface PayMongoResponse {
           url: string;
           return_url: string;
         };
+        // QR Ph. Field names confirmed against test mode on 2026-09-28, because the
+        // published reference pages for this shape are 404 at the time of writing:
+        //   { id, amount, label, test_url, image_url, expires_at }
+        // and next_action.type is "consume_qr" (NOT the "present_qr_code" the guides say).
+        // `image_url` is a base64 data URI - `data:image/png;base64,...`, ~14 kB - meant to
+        // go straight into an <img src>; there is nothing to fetch.
+        code?: {
+          id?: string;
+          amount?: number;
+          label?: string | null;
+          /** Test mode only: a hosted page that simulates the customer paying. */
+          test_url?: string;
+          image_url?: string;
+          /** RFC3339, with nanosecond precision. Date parses it, truncating to ms. */
+          expires_at?: string;
+          [key: string]: any;
+        };
       };
       last_payment_error?: {
         message?: string;

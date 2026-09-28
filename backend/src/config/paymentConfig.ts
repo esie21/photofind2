@@ -62,3 +62,48 @@ export function describePaymentWindow(): string {
 export const CASH_CONFIRM_GRACE_MINUTES = parseFloat(
   process.env.CASH_CONFIRM_GRACE_MINUTES || '30'
 );
+
+// The online payment methods offered to a client.
+//
+// QR Ph is the only one, by product decision. The card and e-wallet list is kept as a
+// break-glass fallback rather than deleted, because QR Ph being the sole method means a
+// PayMongo-side problem with it - an outage, the capability being deactivated on the
+// account - is a total stop on taking money. PAYMONGO_QRPH_ENABLED=false makes that an env
+// change and a restart instead of a code change and a deploy under pressure.
+//
+// This returns exactly one of the two lists and is never empty, which matters: PayMongo
+// validates payment_method_allowed when the intent is created, so an empty array does not
+// degrade to "no methods available", it fails intent creation and nobody can pay at all.
+// An earlier version of this switch removed 'qrph' from a combined list; once QR Ph became
+// the only method that would have left [].
+export const QRPH_ENABLED = (process.env.PAYMONGO_QRPH_ENABLED || 'true').toLowerCase() !== 'false';
+
+/** Only reachable via PAYMONGO_QRPH_ENABLED=false. Kept in step with what the UI can render. */
+const FALLBACK_METHODS = ['card', 'gcash', 'grab_pay', 'paymaya'];
+
+export function allowedPaymentMethods(): string[] {
+  return QRPH_ENABLED ? ['qrph'] : [...FALLBACK_METHODS];
+}
+
+/** True when QR Ph is the only thing on offer, i.e. normal operation. */
+export function isQrphOnly(): boolean {
+  return QRPH_ENABLED;
+}
+
+// How long a QR Ph code stays scannable, in seconds. PayMongo accepts 60-9000 and
+// defaults to 1800 (30 minutes).
+//
+// 900 (15 minutes) rather than the default: the code encodes one exact amount for one
+// booking, and the client is sitting on the payment screen waiting for it. Thirty minutes
+// of a live code is thirty minutes in which the intent cannot be retried with a different
+// method, because an attached payment method holds the intent until it expires. Fifteen is
+// long enough to open a banking app and finish, short enough that a client who gives up
+// can start again without a long wait.
+export const QRPH_EXPIRY_SECONDS = (() => {
+  const raw = parseInt(process.env.PAYMONGO_QRPH_EXPIRY_SECONDS || '900', 10);
+  if (!Number.isFinite(raw)) return 900;
+  // Clamped, not trusted: a value outside PayMongo's range is rejected at payment-method
+  // creation, which would surface to the client as a failed payment rather than as the
+  // configuration mistake it is.
+  return Math.min(9000, Math.max(60, raw));
+})();

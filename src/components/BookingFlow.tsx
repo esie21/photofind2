@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import { Check, Calendar as CalendarIcon, Clock, CreditCard, ChevronRight, MessageSquare, AlertCircle, Loader, Timer, Info, Ban, PhilippinePeso } from 'lucide-react';
+import { Check, Calendar as CalendarIcon, Clock, CreditCard, ChevronRight, MessageSquare, AlertCircle, Loader, Timer, Info, Ban, PhilippinePeso, QrCode } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import bookingService from '../api/services/bookingService';
 import serviceService, { Service } from '../api/services/serviceService';
@@ -886,7 +886,6 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
         payment_method: paymentMethod,
       };
 
-      console.log('Submitting booking:', bookingData);
       const created = await bookingService.createBooking(bookingData);
 
       // No payment here. The booking is only a request until the provider accepts
@@ -1912,7 +1911,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                             <span className="pay-method__icon"><CreditCard className="w-5 h-5" /></span>
                             <span>
                               <span className="pay-method__label">Pay online</span>
-                              <span className="pay-method__hint">Card, GCash or PayMaya after {providerName} accepts. We hold the money until the shoot is done.</span>
+                              <span className="pay-method__hint">Scan a QR Ph code with GCash, Maya or your bank&apos;s app once {providerName} accepts. We hold the money until the shoot is done.</span>
                             </span>
                           </button>
                           <button
@@ -1950,17 +1949,17 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                             <Check className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
                             <div className="text-sm text-green-800">
                               <p className="mb-1"><strong>You pay after the provider confirms</strong></p>
-                              <p>Sending this request doesn&apos;t charge you. Once {providerName} accepts, a &quot;Pay now&quot; button appears on your Bookings page. Payment is handled securely by PayMongo and your card details are never stored on our servers.</p>
+                              <p>Sending this request doesn&apos;t charge you. Once {providerName} accepts, a &quot;Pay now&quot; button appears on your Bookings page. Payment is handled securely by PayMongo - you pay by scanning a QR code in your own banking app, so no card or account details are entered here at all.</p>
                             </div>
                           </div>
                         </div>
 
                         <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
                           <div className="flex items-start gap-3">
-                            <CreditCard className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                            <QrCode className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
                             <div className="text-sm text-blue-800">
-                              <p className="mb-1"><strong>Payment Methods Accepted</strong></p>
-                              <p>Credit/Debit Cards (Visa, Mastercard), GCash, PayMaya, and more.</p>
+                              <p className="mb-1"><strong>How you&apos;ll pay: QR Ph</strong></p>
+                              <p>Scan one code with GCash, Maya, or any Philippine bank app that supports QR Ph - BPI, BDO, Metrobank, PNB, RCBC and others.</p>
                             </div>
                           </div>
                         </div>

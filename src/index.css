@@ -4696,3 +4696,119 @@ html {
   color: var(--color-gray-500);
   margin-bottom: 0.5rem;
 }
+
+/* ============================================================
+   QR Ph
+
+   Hand-written for the same reason as the cash block above: index.css is a prebuilt
+   snapshot of the utility classes this app used when it was generated, and there is no
+   Tailwind build step, so a new utility invented in JSX renders as nothing at all.
+
+   The panel is deliberately quiet. A QR code that someone has to point a phone at is the
+   one thing on the screen that matters, so everything around it stays out of its way and
+   the code itself gets a white card with real padding - a QR printed edge to edge on a
+   coloured ground is measurably harder for a camera to lock onto.
+   ============================================================ */
+
+.qrph {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1.25rem 1rem;
+  border: 1px solid var(--color-gray-200);
+  border-radius: 0.875rem;
+  background-color: var(--color-gray-50);
+  text-align: center;
+}
+
+.qrph__title {
+  font-weight: 600;
+  color: var(--color-gray-900);
+}
+
+.qrph__hint {
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  color: var(--color-gray-600);
+  max-width: 30rem;
+}
+
+.qrph__hint--small {
+  font-size: var(--text-xs);
+  color: var(--color-gray-500);
+  margin-top: -0.25rem;
+}
+
+/* The quiet zone. QR readers need clear margin around the symbol, and the spec asks for
+   four modules' worth - a code butted against a border or a tinted background is what
+   makes a scan take five attempts instead of one. */
+.qrph__frame {
+  padding: 0.75rem;
+  background-color: var(--color-white);
+  border: 1px solid var(--color-gray-200);
+  border-radius: 0.75rem;
+  margin: 0.25rem 0;
+}
+
+.qrph__image {
+  display: block;
+  width: 13.5rem;
+  height: 13.5rem;
+  /* PayMongo's QR is a bitmap. Scaling one smoothly turns crisp module edges into grey
+     mush, which is exactly what a decoder cannot read, so keep the pixels square. */
+  image-rendering: pixelated;
+}
+
+/* Small screens: let the code use the width it has rather than staying at a fixed size
+   that leaves it needlessly small on a phone, which is the device most likely to be
+   scanning it from a second handset. */
+@media (width < 24rem) {
+  .qrph__image {
+    width: 11rem;
+    height: 11rem;
+  }
+}
+
+.qrph__timer {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: var(--text-sm);
+  color: var(--color-gray-600);
+  /* Fixed-width digits, so a ticking countdown doesn't make the line jitter. */
+  font-variant-numeric: tabular-nums;
+}
+
+.qrph__timer--urgent {
+  color: var(--color-red-600);
+}
+
+.qrph__save {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-top: 0.25rem;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--color-purple-600);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.qrph__save:hover {
+  color: var(--color-purple-700);
+}
+
+.qrph__watching {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-top: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-gray-200);
+  width: 100%;
+  justify-content: center;
+  font-size: var(--text-sm);
+  color: var(--color-gray-500);
+}
