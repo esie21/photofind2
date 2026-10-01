@@ -7,6 +7,22 @@ import { discardUploads } from '../services/uploadService';
 // RATE LIMITING CONFIGURATION (3x multiplier for development)
 // ==============================================
 
+// PayMongo's webhook is exempt from the per-IP limiters below.
+//
+// Every delivery comes from PayMongo's handful of servers, so a per-IP bucket is one bucket
+// shared by every payment on the platform: a busy hour - or PayMongo retrying a backlog after
+// an outage on our side - got 429s, and each 429 delayed a client's booking being marked paid
+// until PayMongo's next retry. Rate limiting is also the wrong defence for this route. It is
+// authenticated by an HMAC over the body with a secret only PayMongo holds (see the webhook
+// handler), so a request that is not from PayMongo is refused at the signature check, cheaply,
+// without touching the database.
+//
+// originalUrl rather than path: the limiters are mounted at different prefixes, and path is
+// relative to whichever one matched.
+export function isPaymongoWebhook(req: Request): boolean {
+  return req.method === 'POST' && req.originalUrl.split('?')[0].replace(/\/+$/, '') === '/api/payments/webhook';
+}
+
 // General API rate limiter - 300 requests per 15 minutes
 export const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -15,6 +31,7 @@ export const generalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
+  skip: isPaymongoWebhook,
 });
 
 // Strict rate limiter for auth endpoints - 30 requests per 15 minutes
@@ -56,6 +73,7 @@ export const paymentLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
+  skip: isPaymongoWebhook,
 });
 
 // Chat rate limiter - 90 messages per minute
