@@ -23,6 +23,7 @@ import notificationsRoutes from './routes/notifications';
 import reviewsRoutes from './routes/reviews';
 import supportRoutes from './routes/support';
 import { notificationService } from './services/notificationService';
+import { reconcileOpenPayments } from './services/paymentSettlement';
 import path from 'path';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
@@ -555,6 +556,9 @@ async function startServer() {
 
     // Reminders before the expiry sweep, so a booking that is about to lapse gets its
     // warning rather than being cancelled in the same pass that would have warned it.
+    // Reconcile first: a payment that really succeeded while its webhook was lost must be
+    // recorded before the expiry sweep decides whether that booking was paid.
+    await reconcileOpenPayments().catch((err) => console.error('Initial payment reconciliation error:', err));
     await sendPaymentReminders();
     await expireUnpaidBookings();
     console.log('Initial unpaid-booking check complete.');
@@ -584,6 +588,8 @@ async function startServer() {
     // leaving it held for an hour after it lapsed defeats the point.
     setInterval(async () => {
       try {
+        // Own catch, so a PayMongo outage cannot stop unpaid bookings being released.
+        await reconcileOpenPayments().catch((err) => console.error('Payment reconciliation error:', err));
         await sendPaymentReminders();
         await expireUnpaidBookings();
       } catch (err) {

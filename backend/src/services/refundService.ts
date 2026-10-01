@@ -1,5 +1,8 @@
 import type { PoolClient } from 'pg';
+import { pool } from '../config/database';
 import { createRefund, paymongoRequest, PayMongoRefundReason } from './paymongoService';
+import { notificationService } from './notificationService';
+import { UNPAYABLE_BOOKING_STATUSES, LATE_PAYMENT_PREFIX } from './walletService';
 
 /**
  * Unwinding the money when a booking is cancelled.
@@ -338,4 +341,159 @@ async function lockOrCreateWallet(dbClient: PoolClient, providerUserId: string) 
     [providerUserId]
   );
   return reread.rows[0];
+}
+
+export type LatePaymentRefundOutcome = 'refunded' | 'not_needed' | 'failed';
+
+/**
+ * Sends back a payment that arrived after its booking was cancelled or rejected.
+ *
+ * settlePaymentSuccess refuses to credit such a payment and reports it as
+ * `bookingUnpayable`; this is what the caller does next. Refunding is the only sensible
+ * outcome - there is no booking left to deliver - and it is done automatically because the
+ * alternative is client money sitting with the platform until someone happens to notice.
+ *
+ * Opens its own transaction rather than joining the caller's, and must be called AFTER the
+ * caller has committed. The 'succeeded, uncredited' state has to be durable before the
+ * PayMongo call: if the refund then fails, the payment is still on record, still refusing
+ * to be credited, and findable for a retry - instead of rolled back to 'processing' as if
+ * the money had never come in.
+ *
+ * Never throws. A failure is logged loudly, admins are told (unless `alertAdmins` is false,
+ * for a retry loop that has already told them), and 'failed' is returned.
+ */
+export async function refundLatePayment(
+  paymentId: string,
+  opts: { alertAdmins?: boolean } = {}
+): Promise<LatePaymentRefundOutcome> {
+  const alertAdmins = opts.alertAdmins !== false;
+  const dbClient = await pool.connect();
+  let context: { bookingId?: string; clientId?: string; gross?: number } = {};
+
+  try {
+    await dbClient.query('BEGIN');
+
+    // Re-checked under the lock, not trusted from the caller: by now another path may have
+    // refunded it already, or (in principle) the booking may have been reinstated.
+    const res = await dbClient.query(
+      `SELECT p.id, p.booking_id, p.client_id, p.status, p.wallet_credited_at, p.gross_amount, p.failure_reason,
+              p.paymongo_payment_id, p.paymongo_payment_intent_id, b.status AS booking_status
+       FROM payments p
+       LEFT JOIN bookings b ON b.id::text = p.booking_id::text
+       WHERE p.id::text = $1
+       FOR UPDATE OF p`,
+      [paymentId]
+    );
+    const row = res.rows[0];
+    const bookingDead = !row?.booking_status || UNPAYABLE_BOOKING_STATUSES.includes(String(row.booking_status));
+
+    // The LATE_PAYMENT tag is required, not just the shape: settlePaymentSuccess sets it when
+    // it refuses to credit a payment, so only payments this code saw arrive late qualify.
+    const taggedLate = String(row?.failure_reason || '').startsWith(LATE_PAYMENT_PREFIX);
+
+    if (!row || String(row.status) !== 'succeeded' || row.wallet_credited_at || !bookingDead || !taggedLate) {
+      await dbClient.query('ROLLBACK');
+      return 'not_needed';
+    }
+
+    const gross = round2(parseFloat(row.gross_amount) || 0);
+    context = { bookingId: String(row.booking_id), clientId: String(row.client_id), gross };
+
+    let paymongoPaymentId: string | null = row.paymongo_payment_id || null;
+    if (!paymongoPaymentId && row.paymongo_payment_intent_id) {
+      const intentRes = await paymongoRequest(`/payment_intents/${row.paymongo_payment_intent_id}`, 'GET');
+      paymongoPaymentId = intentRes.data.attributes.payments?.[0]?.id || null;
+    }
+    if (!paymongoPaymentId) {
+      throw new Error('No PayMongo payment ID could be found for this payment.');
+    }
+
+    // Keyed on our payment row: a retry - from the sweep, or a webhook redelivery racing a
+    // /confirm - gets back the refund PayMongo already made instead of refunding twice.
+    // Distinct from cancel_refund_<booking> so the two flows can never collide on a key.
+    const refundRes = await createRefund(
+      paymongoPaymentId,
+      Math.round(gross * 100),
+      'others',
+      `Booking #${row.booking_id} was ${row.booking_status || 'removed'} before this payment arrived`,
+      `late_payment_refund_${row.id}`
+    );
+
+    // No wallet movement: settlePaymentSuccess never credited this, so there is nothing in
+    // the provider's escrow to take back. Moving to 'refunded' is also what stops any later
+    // settle attempt - its claim requires status = 'succeeded'.
+    await dbClient.query(
+      `UPDATE payments
+       SET status = 'refunded',
+           paymongo_refund_id = $2,
+           refund_status = $3,
+           refunded_amount = $4,
+           refunded_at = CURRENT_TIMESTAMP,
+           failure_reason = $5,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $1`,
+      [
+        String(row.id),
+        refundRes.data.id,
+        refundRes.data.attributes.status,
+        gross,
+        'Paid after the booking was cancelled or rejected - refunded automatically',
+      ]
+    );
+    await dbClient.query(
+      `UPDATE bookings SET payment_status = 'refunded', updated_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
+      [String(row.booking_id)]
+    );
+
+    await dbClient.query('COMMIT');
+    console.log(`Late payment ${row.id} for booking ${row.booking_id} refunded (PHP ${gross}, refund ${refundRes.data.id}).`);
+
+    try {
+      await notificationService.notifySystem(
+        String(row.client_id),
+        'Payment refunded',
+        `Your payment of PHP ${gross.toLocaleString()} arrived after booking #${row.booking_id} was ` +
+          `no longer active, so it has been refunded in full. Refunds can take 5-10 banking days to appear.`,
+        { booking_id: row.booking_id, payment_id: row.id, amount: gross }
+      );
+    } catch (notifError) {
+      console.error('Failed to notify client of late-payment refund:', notifError);
+    }
+
+    return 'refunded';
+  } catch (error: any) {
+    try {
+      await dbClient.query('ROLLBACK');
+    } catch {
+      /* no transaction open */
+    }
+    // Keep the tag (so the sweep retries it) but record why the last attempt failed.
+    try {
+      await pool.query(
+        `UPDATE payments SET failure_reason = $2, updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $1 AND status = 'succeeded' AND failure_reason LIKE $3`,
+        [paymentId, `${LATE_PAYMENT_PREFIX}_REFUND_FAILED: ${String(error?.message || 'unknown').slice(0, 400)}`, `${LATE_PAYMENT_PREFIX}%`]
+      );
+    } catch {
+      /* the log line below is the record of last resort */
+    }
+    console.error(
+      `[refundLatePayment] FAILED to refund payment ${paymentId} (booking ${context.bookingId ?? 'unknown'}, ` +
+      `PHP ${context.gross ?? '?'}). The client has paid for a booking that no longer exists and has NOT ` +
+      `been refunded. Refund it from the PayMongo dashboard if it is not retried successfully. Cause: ${error?.message}`
+    );
+
+    if (alertAdmins) {
+      await notificationService.notifyAdmins(
+        'Late payment needs a manual refund',
+        `Payment ${paymentId} (PHP ${context.gross ?? '?'}) arrived for booking #${context.bookingId ?? '?'}, ` +
+          `which is no longer active. The automatic refund failed: ${error?.message}. ` +
+          'Refund it from the PayMongo dashboard.',
+        { payment_id: paymentId, booking_id: context.bookingId }
+      );
+    }
+    return 'failed';
+  } finally {
+    dbClient.release();
+  }
 }

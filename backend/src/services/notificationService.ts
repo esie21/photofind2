@@ -364,6 +364,19 @@ class NotificationService {
     });
   }
 
+  // A system notification to every active admin - for money problems that need a person.
+  // Never throws: the alert is secondary to whatever the caller was doing.
+  async notifyAdmins(title: string, message: string, data?: Record<string, any>) {
+    try {
+      const admins = await pool.query("SELECT id FROM users WHERE role = 'admin' AND deleted_at IS NULL");
+      for (const admin of admins.rows) {
+        await this.notifySystem(String(admin.id), title, message, data);
+      }
+    } catch (error) {
+      console.error(`Failed to alert admins ("${title}"):`, error);
+    }
+  }
+
   async notifySystem(
     userId: string | number,
     title: string,

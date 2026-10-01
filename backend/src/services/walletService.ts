@@ -61,18 +61,89 @@ export async function ensureProviderWallet(
 // claims a dedicated wallet_credited_at column with a single atomic UPDATE - Postgres
 // resolves the race via row locking, so exactly one caller gets `settled: true` no
 // matter which of the three code paths gets here first or how many call concurrently.
+//
+// The claim also requires the booking to still be live. A client can pay after their
+// booking stopped existing - a QR code scanned after the provider cancelled, or after the
+// unpaid-booking sweep released the slot - and PayMongo captures that money regardless.
+// Crediting it put the client's money in the provider's escrow for a shoot that was never
+// going to happen, where nothing would ever release or return it. Such a payment is left
+// 'succeeded' (the money really did arrive) but uncredited, and `bookingUnpayable` tells
+// the caller to refund it - see refundLatePayment in refundService.
+//
+// No lock is taken on the booking. Every path that cancels a booking with a payment on it
+// also locks the payment row (settleCancelledBooking, and the sweep's payments UPDATE), and
+// the caller already holds that lock, so the two serialise on the payment row; under READ
+// COMMITTED this read then sees whichever cancellation committed first. Locking the booking
+// here as well would take the two locks in the opposite order to settleCancelledBooking,
+// which can deadlock.
+export const UNPAYABLE_BOOKING_STATUSES = ['cancelled', 'rejected'];
+
+/** failure_reason prefix marking a payment detected as late, and so eligible for auto-refund. */
+export const LATE_PAYMENT_PREFIX = 'LATE_PAYMENT';
+
 export async function settlePaymentSuccess(
   dbClient: PoolClient,
   paymentId: string
-): Promise<{ settled: boolean; creditedAmount: number; bookingId?: string; providerId?: string; clientId?: string }> {
+): Promise<{
+  settled: boolean;
+  creditedAmount: number;
+  bookingId?: string;
+  providerId?: string;
+  clientId?: string;
+  /** Money arrived for a cancelled or rejected booking: not credited, needs refunding. */
+  bookingUnpayable?: boolean;
+}> {
   const claimRes = await dbClient.query(
-    `UPDATE payments
+    `UPDATE payments p
      SET wallet_credited_at = CURRENT_TIMESTAMP
-     WHERE id::text = $1 AND status = 'succeeded' AND wallet_credited_at IS NULL
-     RETURNING id, booking_id, provider_id, client_id, net_provider_amount, commission_rate`,
-    [paymentId]
+     FROM bookings b
+     WHERE p.id::text = $1
+       AND p.status = 'succeeded'
+       AND p.wallet_credited_at IS NULL
+       AND b.id::text = p.booking_id::text
+       AND b.status <> ALL($2::text[])
+     RETURNING p.id, p.booking_id, p.provider_id, p.client_id, p.net_provider_amount, p.commission_rate`,
+    [paymentId, UNPAYABLE_BOOKING_STATUSES]
   );
   if (!claimRes.rows[0]) {
+    // Nothing claimed. Usually that is the ordinary case - another path already credited
+    // it - but tell the caller apart from a payment that landed on a dead booking.
+    const stranded = await dbClient.query(
+      `SELECT p.booking_id, p.provider_id, p.client_id
+       FROM payments p
+       LEFT JOIN bookings b ON b.id::text = p.booking_id::text
+       WHERE p.id::text = $1
+         AND p.status = 'succeeded'
+         AND p.wallet_credited_at IS NULL
+         AND (b.id IS NULL OR b.status = ANY($2::text[]))`,
+      [paymentId, UNPAYABLE_BOOKING_STATUSES]
+    );
+    if (stranded.rows[0]) {
+      const row = stranded.rows[0];
+      // Tag it, in the caller's transaction, as a late payment this code detected. The tag is
+      // what refundLatePayment and the reconciliation sweep require before they will refund:
+      // older rows that merely look similar (paid, uncredited, booking since cancelled under
+      // the pre-refund cancellation flow) are history for a person to review, not something
+      // a background job should start sending money back for on the first deploy.
+      await dbClient.query(
+        `UPDATE payments
+         SET failure_reason = $2, updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $1 AND (failure_reason IS NULL OR failure_reason NOT LIKE $3)`,
+        [paymentId, `${LATE_PAYMENT_PREFIX}: arrived after the booking was cancelled or rejected; refund pending`, `${LATE_PAYMENT_PREFIX}%`]
+      );
+      console.error(
+        `[settlePaymentSuccess] Payment ${paymentId} succeeded for booking ${row.booking_id}, ` +
+        'which is cancelled, rejected or missing. NOT crediting the provider; it will be refunded.'
+      );
+      return {
+        settled: false,
+        creditedAmount: 0,
+        bookingUnpayable: true,
+        bookingId: String(row.booking_id),
+        providerId: String(row.provider_id),
+        clientId: String(row.client_id),
+      };
+    }
     return { settled: false, creditedAmount: 0 };
   }
   const payment = claimRes.rows[0];
