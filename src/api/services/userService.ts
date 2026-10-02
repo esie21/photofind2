@@ -107,12 +107,12 @@ const userService = {
     id: string,
     files: File[],
     onProgress?: (percent: number) => void
-  ): Promise<User> {
+  ): Promise<User & { added?: string[] }> {
     const fd = new FormData();
     files.forEach((f) => fd.append('images', f));
     // Use direct backend URL for file uploads (bypasses Vercel proxy limits)
     const directUrl = `${API_CONFIG.DIRECT_UPLOAD_URL}${API_CONFIG.ENDPOINTS.USERS.UPLOAD_PORTFOLIO(id)}`;
-    return postFormData<User>(directUrl, fd, onProgress);
+    return postFormData<User & { added?: string[] }>(directUrl, fd, onProgress);
   },
 
   /**

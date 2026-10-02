@@ -2,11 +2,30 @@ import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
 import { verifyToken, invalidateUserAccessCache } from '../middleware/auth';
 import { auditService } from '../services/auditService';
-import { parsePagination } from '../utils/validation';
+import { parsePagination, parseDateRange, DateRangeError } from '../utils/validation';
 import { notificationService } from '../services/notificationService';
 import { getSecurityEvents } from '../middleware/security';
 
 const router = express.Router();
+
+/**
+ * Payment statuses that represent money that was actually taken.
+ *
+ * 'succeeded' alone is wrong and was wrong everywhere it appeared. A refund does not leave
+ * a payment succeeded: refundService.ts:179 and :291 set status = 'refunded', and the
+ * dispute path at bookings.ts:4646 sets 'refunded' or 'partially_refunded' depending on the
+ * percentage - and those are the same statements that write refunded_amount. So filtering
+ * on 'succeeded' guaranteed refunded_amount was always 0 for every row examined, which made
+ * the refund subtraction and the commission proration unreachable code.
+ *
+ * The visible damage was in the other direction from the obvious one: a fully refunded
+ * payment nets zero either way, but a PARTIALLY refunded one was excluded from the window
+ * altogether, so a 10,000 booking refunded 2,000 contributed 0 to revenue instead of 8,000,
+ * and its commission vanished too. Revenue was understated and every refund total read zero.
+ *
+ * Passed as a parameter rather than interpolated so the query text stays static.
+ */
+const MONEY_BEARING_PAYMENT_STATUSES = ['succeeded', 'partially_refunded', 'refunded'];
 
 // Admin middleware - ensure user is admin
 const requireAdmin = async (req: Request & { userId?: string }, res: Response, next: Function) => {
@@ -85,8 +104,8 @@ router.get('/metrics/overview', async (req: Request & { userId?: string }, res: 
             commission_amount * (1 - LEAST(COALESCE(refunded_amount, 0) / NULLIF(gross_amount, 0), 1))
           ) FILTER (WHERE paid_at >= $1), 0) as this_month_commission,
           COALESCE(SUM(gross_amount - COALESCE(refunded_amount, 0)) FILTER (WHERE paid_at >= $2 AND paid_at < $3), 0) as last_month_revenue
-        FROM payments WHERE status = 'succeeded'
-      `, [thisMonth.toISOString(), lastMonth.toISOString(), thisMonth.toISOString()]),
+        FROM payments WHERE status = ANY($4)
+      `, [thisMonth.toISOString(), lastMonth.toISOString(), thisMonth.toISOString(), MONEY_BEARING_PAYMENT_STATUSES]),
 
       pool.query(`
         SELECT COUNT(DISTINCT client_id) + COUNT(DISTINCT provider_id) as active_users
@@ -1010,7 +1029,7 @@ router.get('/audit-logs', async (req: Request & { userId?: string }, res: Respon
 
 router.get('/bookings', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { status = 'all' } = req.query;
+    const { status = 'all', from, to } = req.query;
     const { limit, offset } = parsePagination(req.query);
 
     const conditions: string[] = ['b.deleted_at IS NULL'];
@@ -1021,6 +1040,28 @@ router.get('/bookings', async (req: Request & { userId?: string }, res: Response
       conditions.push(`b.status = $${paramIndex}`);
       params.push(status);
       paramIndex++;
+    }
+
+    // Optional as a PAIR - both or neither. parseDateRange requires both, so `?from=` alone
+    // is a 400 rather than a filter from that date; the comment here used to say "optional"
+    // flatly, which read as though one-sided worked. Erroring is the deliberate choice over
+    // silently ignoring a half-given filter: an admin who mistypes one bound should not be
+    // handed unfiltered figures that look filtered.
+    //
+    // A booking belongs to the day it was made; the date it is FOR lives in its own columns
+    // and answers a different question from "what came in this month".
+    if (from || to) {
+      try {
+        const range = parseDateRange(from, to);
+        conditions.push(`b.created_at >= $${paramIndex} AND b.created_at <= $${paramIndex + 1}`);
+        params.push(range.from.toISOString(), range.to.toISOString());
+        paramIndex += 2;
+      } catch (rangeError) {
+        if (rangeError instanceof DateRangeError) {
+          return res.status(400).json({ error: rangeError.message });
+        }
+        throw rangeError;
+      }
     }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
@@ -1059,7 +1100,7 @@ router.get('/bookings', async (req: Request & { userId?: string }, res: Response
 
 router.get('/payments', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { status } = req.query;
+    const { status, from, to } = req.query;
     const { limit, offset } = parsePagination(req.query);
 
     const conditions: string[] = [];
@@ -1070,6 +1111,30 @@ router.get('/payments', async (req: Request & { userId?: string }, res: Response
       conditions.push(`p.status = $${paramIndex}`);
       params.push(status);
       paramIndex++;
+    }
+
+    // COALESCE(paid_at, created_at), so this table agrees with the summary below rather
+    // than quietly disagreeing with it. The summary measures revenue by paid_at (as the
+    // overview metrics do), so a payment settled in April belongs to April even if it was
+    // started in March. Filtering on created_at alone would list it under March and make
+    // the rows fail to add up to the total printed above them. paid_at alone would be
+    // worse still: it is NULL for failed and pending attempts, so they would vanish from
+    // a report whose whole job is showing what happened.
+    if (from || to) {
+      try {
+        const range = parseDateRange(from, to);
+        conditions.push(
+          `COALESCE(p.paid_at, p.created_at) >= $${paramIndex} ` +
+          `AND COALESCE(p.paid_at, p.created_at) <= $${paramIndex + 1}`
+        );
+        params.push(range.from.toISOString(), range.to.toISOString());
+        paramIndex += 2;
+      } catch (rangeError) {
+        if (rangeError instanceof DateRangeError) {
+          return res.status(400).json({ error: rangeError.message });
+        }
+        throw rangeError;
+      }
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -1099,6 +1164,120 @@ router.get('/payments', async (req: Request & { userId?: string }, res: Response
   } catch (error) {
     console.error('Error fetching payments:', error);
     return res.status(500).json({ error: 'Failed to fetch payments' });
+  }
+});
+
+// ==================== REPORTS ====================
+
+/**
+ * Totals for one reporting window.
+ *
+ * The revenue arithmetic is lifted from /metrics/overview deliberately, expression for
+ * expression, rather than written afresh. Overview learned the hard way that summing
+ * gross_amount alone counts money refunded to a client as revenue the platform earned,
+ * and that commission has to be reduced *in proportion* to what was refunded rather than
+ * by the refund itself, or a half-refunded booking drives the commission total negative.
+ * A second, independently written query would be free to reintroduce either bug, and the
+ * failure would be a report that quietly disagrees with the dashboard above it - the one
+ * thing worse than no report at all. If the definition of revenue changes, it has to
+ * change in both places, which is why they are worded identically.
+ */
+router.get('/reports/summary', async (req: Request & { userId?: string }, res: Response) => {
+  try {
+    let range;
+    try {
+      range = parseDateRange(req.query.from, req.query.to);
+    } catch (rangeError) {
+      if (rangeError instanceof DateRangeError) {
+        return res.status(400).json({ error: rangeError.message });
+      }
+      throw rangeError;
+    }
+
+    const fromIso = range.from.toISOString();
+    const toIso = range.to.toISOString();
+
+    const [moneyResult, statusResult, methodResult, bookingResult] = await Promise.all([
+      pool.query(`
+        SELECT
+          COALESCE(SUM(gross_amount), 0) AS gross,
+          COALESCE(SUM(COALESCE(refunded_amount, 0)), 0) AS refunded,
+          COALESCE(SUM(gross_amount - COALESCE(refunded_amount, 0)), 0) AS net,
+          COALESCE(SUM(
+            commission_amount * (1 - LEAST(COALESCE(refunded_amount, 0) / NULLIF(gross_amount, 0), 1))
+          ), 0) AS commission,
+          COUNT(*) AS count
+        FROM payments
+        WHERE status = ANY($3) AND paid_at >= $1 AND paid_at <= $2
+      `, [fromIso, toIso, MONEY_BEARING_PAYMENT_STATUSES]),
+
+      // Every attempt in the window, not just the settled ones - a report that hides
+      // failures cannot answer "why was this month low".
+      pool.query(`
+        SELECT status, COUNT(*) AS count
+        FROM payments
+        WHERE COALESCE(paid_at, created_at) >= $1 AND COALESCE(paid_at, created_at) <= $2
+        GROUP BY status
+      `, [fromIso, toIso]),
+
+      // Where the card-to-QR-Ph shift shows up. COALESCE because rows predating
+      // payment_method_type, and any attempt abandoned before a method was attached,
+      // have none - lumping those into 'card' would overstate card and is exactly the
+      // mislabelling the qrph work removed elsewhere.
+      pool.query(`
+        SELECT
+          COALESCE(NULLIF(payment_method_type, ''), 'unknown') AS method,
+          COUNT(*) AS count,
+          COALESCE(SUM(gross_amount - COALESCE(refunded_amount, 0)), 0) AS net
+        FROM payments
+        WHERE status = ANY($3) AND paid_at >= $1 AND paid_at <= $2
+        GROUP BY 1
+        ORDER BY net DESC
+      `, [fromIso, toIso, MONEY_BEARING_PAYMENT_STATUSES]),
+
+      pool.query(`
+        SELECT status, COUNT(*) AS count
+        FROM bookings
+        WHERE deleted_at IS NULL AND created_at >= $1 AND created_at <= $2
+        GROUP BY status
+      `, [fromIso, toIso]),
+    ]);
+
+    const money = moneyResult.rows[0];
+    const net = parseFloat(money.net) || 0;
+    const commission = parseFloat(money.commission) || 0;
+
+    const tally = (rows: Array<{ status: string; count: string }>) =>
+      rows.reduce<Record<string, number>>((acc, r) => {
+        acc[String(r.status)] = parseInt(r.count, 10) || 0;
+        return acc;
+      }, {});
+
+    return res.json({
+      data: {
+        range: { from: range.fromDate, to: range.toDate, timezone: 'Asia/Manila' },
+        revenue: {
+          gross: parseFloat(money.gross) || 0,
+          refunded: parseFloat(money.refunded) || 0,
+          net,
+          commission,
+          // What providers are owed out of it. Derived here so the UI cannot arrive at a
+          // different number by subtracting in a different order.
+          providerNet: Math.round((net - commission) * 100) / 100,
+          settledCount: parseInt(money.count, 10) || 0,
+        },
+        paymentsByStatus: tally(statusResult.rows),
+        byMethod: methodResult.rows.map((r) => ({
+          method: String(r.method),
+          count: parseInt(r.count, 10) || 0,
+          net: parseFloat(r.net) || 0,
+        })),
+        bookingsByStatus: tally(bookingResult.rows),
+      },
+    });
+  } catch (error) {
+    console.error('Error building report summary:', error);
+    return res.status(500).json({ error: 'Failed to build report summary' });
   }
 });
 

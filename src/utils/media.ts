@@ -222,3 +222,95 @@ export async function generatePoster(file: File): Promise<PosterResult | null> {
     return null;
   }
 }
+
+/** Longest edge of a compressed photo: sharp full-screen on a laptop, a fraction of the bytes. */
+export const COMPRESSED_MAX_EDGE = 2560;
+const COMPRESSED_QUALITY = 0.85;
+
+export interface CompressedPhoto {
+  file: File;
+  /** False when the original was kept - too small to bother, a GIF, or nothing was saved. */
+  compressed: boolean;
+}
+
+/** The same name with a new extension: "IMG_2041.HEIC.jpeg" -> "IMG_2041.HEIC.webp". */
+function renameExtension(name: string, ext: string): string {
+  const dot = name.lastIndexOf('.');
+  return `${dot > 0 ? name.slice(0, dot) : name || 'photo'}.${ext}`;
+}
+
+/**
+ * Re-encodes a large photo as WebP (JPEG where the browser cannot write WebP), at most
+ * COMPRESSED_MAX_EDGE on its longest side.
+ *
+ * Phone cameras produce 4-12MB photos, and the original was what the full-size viewer
+ * loaded - slow on mobile data, which is how most clients here browse. Re-encoding also
+ * drops the file's metadata, including any GPS location the camera stamped on it.
+ *
+ * The result is only used when it is actually smaller. GIFs are never touched, since
+ * re-encoding would flatten an animation to its first frame. Any failure - a format this
+ * browser cannot decode, a canvas it refuses to allocate - returns the original unchanged,
+ * and the server's own size limit is then the judge.
+ */
+export async function compressPhoto(file: File): Promise<CompressedPhoto> {
+  const unchanged = { file, compressed: false };
+  if (!file.type.startsWith('image/') || file.type === 'image/gif') return unchanged;
+
+  let source: ImageBitmap | HTMLImageElement | null = null;
+  let width = 0;
+  let height = 0;
+  let objectUrl = '';
+  try {
+    try {
+      // from-image applies the camera's EXIF rotation, so portrait phone photos stay upright.
+      const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      source = bitmap;
+      width = bitmap.width;
+      height = bitmap.height;
+    } catch {
+      objectUrl = URL.createObjectURL(file);
+      const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('Could not decode the image'));
+        el.src = objectUrl;
+      });
+      source = image;
+      width = image.naturalWidth;
+      height = image.naturalHeight;
+    }
+    if (!width || !height) return unchanged;
+
+    const scale = Math.min(1, COMPRESSED_MAX_EDGE / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return unchanged;
+
+    for (const [type, ext] of [['image/webp', 'webp'], ['image/jpeg', 'jpg']] as const) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // JPEG has no transparency; without a background a transparent PNG turns black.
+      if (type === 'image/jpeg') {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, COMPRESSED_QUALITY));
+      // A browser that cannot write WebP hands back a PNG instead of failing; that is not
+      // what was asked for, so move on to JPEG rather than keep it.
+      if (!blob || blob.type !== type) continue;
+      if (blob.size >= file.size) return unchanged;
+      return {
+        file: new File([blob], renameExtension(file.name, ext), { type, lastModified: file.lastModified }),
+        compressed: true,
+      };
+    }
+    return unchanged;
+  } catch {
+    return unchanged;
+  } finally {
+    if (source && 'close' in source) source.close();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+}

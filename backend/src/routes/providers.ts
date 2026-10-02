@@ -291,7 +291,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     // Deliberately narrower than the row we hold internally: this is unauthenticated, so
     // no email, verification documents or anything else a client has no business seeing.
     const result = await pool.query(
-      `SELECT id, name, profile_image, portfolio_images, portfolio_meta, portfolio_albums, bio, years_experience,
+      `SELECT id, name, profile_image, portfolio_images, portfolio_meta, portfolio_albums, portfolio_cover, bio, years_experience,
               location, category, title, rating, review_count, is_verified
        FROM users
        WHERE id = $1 AND role = 'provider'`,
@@ -322,6 +322,8 @@ router.get('/:id', async (req: Request, res: Response) => {
       portfolio_meta: r.portfolio_meta || {},
       // Keyed by album name, not by path - see users.portfolio_albums.
       portfolio_albums: r.portfolio_albums || {},
+      // A stored path, like the keys of portfolio_meta. '' means "choose automatically".
+      portfolio_cover: r.portfolio_cover || '',
       bio: r.bio || '',
       years_experience: r.years_experience || 0,
       location: r.location || '',

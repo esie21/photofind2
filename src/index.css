@@ -4159,6 +4159,329 @@ html {
   text-decoration: underline;
 }
 
+/* ---- Client-facing portfolio: cards, sheet, comparison, booking ------------------- */
+
+/* Room under the last row for the fixed booking bar, so it never covers work. */
+.pf-showcase {
+  padding-bottom: 5rem;
+}
+
+/* The brief on a card: three lines at most, the full text is in the sheet. */
+.pf-project-brief {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--color-gray-600);
+}
+
+.pf-project-tag--more {
+  color: var(--color-gray-600);
+  background-color: var(--color-gray-100);
+}
+
+.pf-project-cover__badge {
+  position: absolute;
+  left: 0.625rem;
+  bottom: 0.625rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #fff;
+  background-color: var(--color-purple-600);
+  border-radius: 999px;
+}
+
+/* One project: one wide card, cover beside the text, rather than a single tile stranded
+   in a three-column grid. Stacks again on a phone. */
+.pf-projects--single {
+  grid-template-columns: 1fr;
+}
+
+@media (width >= 40rem) {
+  .pf-projects--single {
+    grid-template-columns: 1fr;
+  }
+
+  .pf-projects--single .pf-project-card {
+    flex-direction: row;
+  }
+
+  .pf-projects--single .pf-project-cover {
+    flex: 0 0 55%;
+    aspect-ratio: 4 / 3;
+  }
+
+  .pf-projects--single .pf-project-body {
+    justify-content: center;
+    padding: 1.25rem 1.5rem;
+  }
+
+  .pf-projects--single .pf-project-brief {
+    -webkit-line-clamp: 6;
+  }
+}
+
+/* The optional details in the sheet, as label/value rows. */
+.pf-sheet-details {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding: 0.875rem 1rem;
+  background-color: var(--color-gray-50);
+  border-radius: var(--pf-radius-sm);
+}
+
+.pf-sheet-details__row {
+  display: grid;
+  grid-template-columns: minmax(7rem, 9rem) 1fr;
+  gap: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.pf-sheet-details__row dt {
+  color: var(--color-gray-500);
+}
+
+.pf-sheet-details__row dd {
+  margin: 0;
+  color: var(--color-gray-900);
+  overflow-wrap: anywhere;
+}
+
+@media (width < 30rem) {
+  .pf-sheet-details__row {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}
+
+.pf-sheet-pairs {
+  display: grid;
+  gap: 1rem;
+  /* One pair spans the sheet, capped so a landscape photo doesn't fill the screen. */
+  max-width: 44rem;
+  margin-bottom: 1rem;
+}
+
+/* Two columns only when there is more than one pair - a lone slider in a two-column
+   grid sat in the left half with nothing beside it. */
+@media (width >= 48rem) {
+  .pf-sheet-pairs--multi {
+    max-width: none;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.pf-sheet-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: var(--pf-border);
+}
+
+.pf-sheet-cta__text {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--color-gray-900);
+}
+
+/* ---- Before/after slider ---- */
+
+.pf-compare {
+  margin: 0;
+}
+
+.pf-compare__frame {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  background-color: var(--color-gray-100);
+  border-radius: var(--pf-radius-sm);
+  /* A vertical swipe still scrolls the page; only a horizontal drag moves the slider. */
+  touch-action: pan-y;
+  user-select: none;
+}
+
+.pf-compare__img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.pf-compare__label {
+  position: absolute;
+  top: 0.5rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #fff;
+  background-color: rgba(0, 0, 0, 0.6);
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.pf-compare__label--before { left: 0.5rem; }
+.pf-compare__label--after { right: 0.5rem; }
+
+.pf-compare__divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background-color: #fff;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.pf-compare__knob {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--color-gray-700);
+  background-color: #fff;
+  border-radius: 999px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+}
+
+/* The real control: transparent, covering the image, so a drag or tap anywhere moves it. */
+.pf-compare__range {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: ew-resize;
+}
+
+/* The range itself is invisible, so its focus ring is drawn on the knob instead. */
+.pf-compare__frame:has(.pf-compare__range:focus-visible) .pf-compare__knob {
+  outline: 3px solid var(--color-purple-600);
+  outline-offset: 2px;
+}
+
+.pf-compare__caption {
+  margin-top: 0.375rem;
+  font-size: 0.8125rem;
+  color: var(--color-gray-600);
+}
+
+/* ---- Lightbox ---- */
+
+/* Horizontal swipes come to the viewer; vertical ones still scroll a tall caption. */
+.pf-swipe {
+  touch-action: pan-y;
+}
+
+.pf-lightbox-role {
+  display: inline-block;
+  margin-right: 0.5rem;
+  padding: 0 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background-color: var(--color-purple-600);
+  border-radius: 999px;
+}
+
+/* ---- Booking ---- */
+
+.pf-book-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.5rem 1.25rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  background-color: var(--color-purple-600);
+  border-radius: 999px;
+  box-shadow: 0 4px 12px rgba(126, 34, 206, 0.3);
+  cursor: pointer;
+}
+
+.pf-book-button:hover {
+  background-color: var(--color-purple-700);
+}
+
+.pf-book-button:focus-visible {
+  outline: 3px solid var(--color-purple-300, var(--color-purple-500));
+  outline-offset: 2px;
+}
+
+/* Fixed to the bottom of the screen while the Portfolio tab is open. Below the viewer
+   (z 60) and the mobile menu (z 50); clear of a phone's home indicator. */
+.pf-book-bar {
+  position: fixed;
+  left: 50%;
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: min(36rem, calc(100% - 2rem));
+  padding: 0.5rem 0.5rem 0.5rem 1.25rem;
+  background-color: rgba(255, 255, 255, 0.96);
+  border: var(--pf-border);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  transform: translateX(-50%);
+  backdrop-filter: blur(6px);
+}
+
+.pf-book-bar__text {
+  min-width: 0;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-gray-900);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* pf-reduced-motion: the portfolio's hover lifts, image zooms and progress easing, off
+   for anyone who has asked their system for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .pf-project-card,
+  .pf-project-cover img,
+  .pf-project-cover video,
+  .pf-upload__fill,
+  .portfolio-actions {
+    transition: none;
+  }
+
+  .pf-project-card:hover,
+  .pf-project-card:hover .pf-project-cover img,
+  .pf-project-card:hover .pf-project-cover video {
+    transform: none;
+  }
+}
+
+/* A dialog focused from script shows no ring of its own; the content inside it does. */
+.modal-lightbox [role='dialog']:focus {
+  outline: none;
+}
+
 /* ---- Provider's project editor ----------------------------------------------- */
 
 .pf-editor-projects {
@@ -4313,10 +4636,12 @@ html {
   color: var(--color-gray-700);
 }
 
+/* gray-500, not gray-400: at this size gray-400 was 2.5:1 against the panel, well under
+   the 4.5:1 WCAG AA asks for. */
 .pf-field__count {
   font-size: 0.6875rem;
   font-weight: 400;
-  color: var(--color-gray-400);
+  color: var(--color-gray-500);
 }
 
 .pf-field__input {
@@ -4388,6 +4713,693 @@ html {
 .pf-cover-option:focus-visible {
   outline: 2px solid var(--color-purple-600);
   outline-offset: 2px;
+}
+
+/* ---- Project sections board ---------------------------------------------------- */
+
+/* Hidden but still read by screen readers. Defined here because the prebuilt Tailwind
+   snapshot has no sr-only utility. */
+.pf-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.pf-board {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.pf-board-drop {
+  border-radius: var(--pf-radius);
+}
+
+/* Files are being dragged in from outside the browser. */
+.pf-board-drop--active {
+  outline: 2px solid var(--color-purple-600);
+  outline-offset: 6px;
+}
+
+.pf-board-section__title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.625rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--color-gray-900);
+  overflow-wrap: anywhere;
+}
+
+.pf-board-section__count {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--color-gray-500);
+  white-space: nowrap;
+}
+
+/* An item being dragged is over this section. */
+.pf-board-section__grid--over {
+  outline: 2px dashed var(--color-purple-500);
+  outline-offset: 4px;
+}
+
+/* Fills a whole row of an empty section, so there is a real target to drop on. */
+.pf-board-empty {
+  grid-column: 1 / -1;
+  display: grid;
+  place-items: center;
+  min-height: 6rem;
+  padding: 1rem;
+  font-size: 0.8125rem;
+  text-align: center;
+  color: var(--color-gray-500);
+  background-color: var(--color-gray-50);
+  border: 2px dashed var(--color-gray-300);
+  border-radius: 0.75rem;
+}
+
+/* The drag handle. touch-action: none on the handle only: a finger on it drags at once,
+   a finger anywhere else on the tile still scrolls the page. 40px is a comfortable touch
+   target that still leaves the photo visible. */
+.pf-drag-handle {
+  position: absolute;
+  top: 0.375rem;
+  right: 0.375rem;
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  color: var(--color-gray-700);
+  background-color: rgba(255, 255, 255, 0.92);
+  border-radius: 999px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  cursor: grab;
+  touch-action: none;
+}
+
+.pf-drag-handle:active {
+  cursor: grabbing;
+}
+
+.pf-drag-handle:focus-visible {
+  outline: 2px solid var(--color-purple-600);
+  outline-offset: 2px;
+}
+
+/* The copy that follows the pointer while dragging. */
+.pf-tile-overlay {
+  width: 100%;
+  height: 100%;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.25);
+  cursor: grabbing;
+}
+
+.pf-cover-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--color-gray-500);
+}
+
+.pf-link-button {
+  padding: 0;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-purple-700);
+  text-decoration: underline;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.pf-link-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pf-editor-projects__titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.pf-new-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-purple-700);
+  background-color: var(--color-white);
+  border: 1px solid var(--color-purple-500);
+  border-radius: var(--pf-radius-sm);
+  cursor: pointer;
+}
+
+.pf-new-project:hover:not(:disabled) {
+  background-color: var(--color-purple-50);
+}
+
+.pf-new-project:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pf-new-project-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.pf-new-project-form .pf-field__input {
+  flex: 1 1 14rem;
+  width: auto;
+}
+
+.pf-editor-project__empty-icon {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  color: var(--color-gray-400);
+}
+
+.pf-icon-button--danger {
+  color: var(--color-red-600);
+}
+
+.pf-icon-button--danger:hover:not(:disabled) {
+  color: var(--color-red-700);
+  background-color: var(--color-red-50);
+}
+
+.pf-delete-project {
+  margin-top: 0.625rem;
+  padding: 0.75rem;
+  background-color: var(--color-red-50);
+  border: 1px solid var(--color-red-100);
+  border-radius: var(--pf-radius-sm);
+}
+
+.pf-delete-project__text {
+  font-size: 0.875rem;
+  color: var(--color-red-700);
+}
+
+.pf-delete-project__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/* ---- Item cards and the item dialog ------------------------------------------ */
+
+/* Bottom-right: before/after and tags. White on dark so it reads on any photo. */
+.pf-tile-info {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  display: flex;
+  flex-wrap: wrap-reverse;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  max-width: calc(100% - 4.5rem);
+  pointer-events: none;
+}
+
+.pf-tile-chip {
+  max-width: 100%;
+  padding: 0.0625rem 0.4375rem;
+  overflow: hidden;
+  font-size: 0.6875rem;
+  line-height: 1.125rem;
+  color: #fff;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  background-color: rgba(0, 0, 0, 0.68);
+  border-radius: 999px;
+}
+
+.pf-tile-chip--pair {
+  font-weight: 600;
+  background-color: var(--color-purple-600);
+}
+
+/* In edit mode the action bar owns the bottom edge, so the duration and the info row sit
+   just above it instead of underneath - on a touch screen the bar never hides, and the
+   duration used to be covered by it. */
+.portfolio-tile--editing .pf-tile-info,
+.portfolio-tile--editing .portfolio-duration {
+  bottom: 2.875rem;
+}
+
+.portfolio-tile--editing:hover .portfolio-duration {
+  opacity: 1;
+}
+
+/* The item dialog grows with alt text, tags and pairing - taller than a phone screen, and
+   the lightbox overlay itself does not scroll. Scroll the dialog, and give the photo less
+   of the height while editing. */
+.pf-detail-dialog {
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-top: 2.5rem;
+}
+
+.pf-detail-dialog .portfolio-detail-media img,
+.pf-detail-dialog .portfolio-detail-media video {
+  max-height: 40vh;
+}
+
+.pf-pair-none {
+  display: grid;
+  place-items: center;
+  height: 3.25rem;
+  padding: 0 0.75rem;
+  font-size: 0.75rem;
+  color: var(--color-gray-700);
+  background-color: var(--color-white);
+  border: 2px solid var(--color-gray-200);
+  border-radius: var(--pf-radius-sm);
+  cursor: pointer;
+}
+
+.pf-pair-none[aria-pressed='true'] {
+  border-color: var(--color-purple-600);
+}
+
+.pf-pair-none:focus-visible {
+  outline: 2px solid var(--color-purple-600);
+  outline-offset: 2px;
+}
+
+/* ---- Uploads --------------------------------------------------------------------- */
+
+.pf-uploads {
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background-color: var(--color-gray-50);
+  border: var(--pf-border);
+  border-radius: var(--pf-radius);
+}
+
+.pf-uploads__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.pf-uploads__summary {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-gray-700);
+}
+
+.pf-uploads__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+.pf-upload {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  background-color: var(--color-white);
+  border: var(--pf-border);
+  border-radius: var(--pf-radius-sm);
+}
+
+.pf-upload__icon {
+  flex-shrink: 0;
+  margin-top: 0.125rem;
+  color: var(--color-gray-500);
+}
+
+.pf-upload--done .pf-upload__icon {
+  color: oklch(0.55 0.15 150);
+}
+
+.pf-upload--failed {
+  border-color: var(--color-red-100);
+}
+
+.pf-upload--failed .pf-upload__icon {
+  color: var(--color-red-600);
+}
+
+.pf-upload__body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pf-upload__line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.pf-upload__name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.8125rem;
+  color: var(--color-gray-900);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pf-upload__status {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: var(--color-gray-500);
+  font-variant-numeric: tabular-nums;
+}
+
+.pf-upload--failed .pf-upload__status {
+  color: var(--color-red-700);
+  font-weight: 500;
+}
+
+.pf-upload__meta {
+  font-size: 0.6875rem;
+  color: var(--color-gray-500);
+}
+
+.pf-upload__error {
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-red-700);
+}
+
+.pf-upload__bar {
+  position: relative;
+  display: block;
+  height: 0.25rem;
+  margin-top: 0.375rem;
+  overflow: hidden;
+  background-color: var(--color-gray-200);
+  border-radius: 999px;
+}
+
+.pf-upload__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background-color: var(--color-purple-600);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+/* Preparing has no measurable progress, so a sliver slides along instead of sitting at 0%. */
+.pf-upload__fill--busy {
+  animation: pf-upload-busy 1.1s ease-in-out infinite;
+}
+
+@keyframes pf-upload-busy {
+  from { left: -30%; }
+  to { left: 100%; }
+}
+
+.pf-spin {
+  animation: pf-spin 0.9s linear infinite;
+}
+
+@keyframes pf-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pf-upload__fill--busy,
+  .pf-spin {
+    animation: none;
+  }
+}
+
+.pf-add-slot__title {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-gray-700);
+}
+
+.pf-add-slot__sub {
+  font-size: 0.6875rem;
+  color: var(--color-gray-500);
+}
+
+/* ---- Project details form (category-neutral fields) ----------------------- */
+
+.pf-field__hint {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-gray-500);
+}
+
+/* Past the suggested brief length: a heads-up, not an error - amber, like the nudges. */
+.pf-field__count--over {
+  font-weight: 500;
+  color: oklch(0.55 0.1 62.6);
+}
+
+.pf-field__input:disabled {
+  color: var(--color-gray-400);
+  background-color: var(--color-gray-50);
+  cursor: not-allowed;
+}
+
+/* Chips and the text box share one bordered box, so it reads as a single field. */
+.pf-tags-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 2.5rem;
+  padding: 0.375rem 0.5rem;
+  background-color: var(--color-white);
+  border: 1px solid var(--color-gray-300);
+  border-radius: var(--pf-radius-sm);
+  cursor: text;
+}
+
+.pf-tags-box:focus-within {
+  border-color: var(--color-purple-500);
+  box-shadow: 0 0 0 2px var(--color-purple-100);
+}
+
+.pf-tags-box__input {
+  flex: 1 1 8rem;
+  min-width: 6rem;
+  padding: 0.125rem 0.25rem;
+  font-size: 0.875rem;
+  color: var(--color-gray-900);
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+.pf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 100%;
+  padding: 0.1875rem 0.25rem 0.1875rem 0.625rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-purple-700);
+  background-color: var(--color-purple-50);
+  border-radius: 999px;
+  overflow-wrap: anywhere;
+}
+
+/* 24px target: small enough to sit in the chip, large enough to hit on a phone. */
+.pf-chip__remove {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 1.5rem;
+  height: 1.5rem;
+  color: var(--color-purple-700);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pf-chip__remove:hover {
+  background-color: var(--color-purple-100);
+}
+
+.pf-chip__remove:focus-visible,
+.pf-suggestion:focus-visible,
+.pf-more-toggle:focus-visible,
+.pf-add-prompt:focus-visible {
+  outline: 2px solid var(--color-purple-600);
+  outline-offset: 2px;
+}
+
+.pf-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-top: 0.5rem;
+}
+
+.pf-suggestion {
+  min-height: 2rem;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--color-gray-700);
+  background-color: var(--color-white);
+  border: 1px dashed var(--color-gray-300);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pf-suggestion:hover {
+  color: var(--color-purple-700);
+  border-color: var(--color-purple-500);
+  background-color: var(--color-purple-50);
+}
+
+.pf-more-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  align-self: flex-start;
+  min-height: 2.25rem;
+  padding: 0.25rem 0;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-purple-700);
+  background: none;
+  border: none;
+  border-radius: var(--pf-radius-sm);
+  cursor: pointer;
+}
+
+.pf-more-toggle__hint {
+  font-weight: 400;
+  color: var(--color-gray-500);
+}
+
+.pf-more {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background-color: var(--color-white);
+  border: var(--pf-border);
+  border-radius: var(--pf-radius-sm);
+}
+
+/* A real checkbox, styled only by its surroundings, so it keeps native keyboard and
+   screen-reader behaviour. */
+.pf-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  cursor: pointer;
+}
+
+.pf-switch input {
+  flex-shrink: 0;
+  width: 1.125rem;
+  height: 1.125rem;
+  margin-top: 0.125rem;
+  accent-color: var(--color-purple-600);
+  cursor: pointer;
+}
+
+.pf-switch__label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-gray-900);
+}
+
+.pf-switch__hint {
+  display: block;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-gray-500);
+}
+
+/* "3 of 5 details added" - a thin bar and a line of text under the project name. */
+.pf-completeness {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.375rem;
+}
+
+.pf-completeness__bar {
+  position: relative;
+  flex-shrink: 0;
+  width: 3.5rem;
+  height: 0.375rem;
+  overflow: hidden;
+  background-color: var(--color-gray-200);
+  border-radius: 999px;
+}
+
+.pf-completeness__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background-color: var(--color-purple-600);
+  border-radius: 999px;
+}
+
+.pf-completeness__text {
+  min-width: 0;
+  font-size: 0.75rem;
+  color: var(--color-gray-600);
+}
+
+.pf-completeness__missing {
+  color: var(--color-gray-500);
+}
+
+.pf-add-prompt {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 2rem;
+  margin-top: 0.375rem;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-purple-700);
+  background-color: var(--color-purple-50);
+  border: 1px dashed var(--color-purple-300, var(--color-purple-500));
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pf-add-prompt:hover {
+  background-color: var(--color-purple-100);
 }
 
 /* One item at full size is not a reading layout: it wants the viewport, not the sheet's
@@ -4812,3 +5824,133 @@ html {
   font-size: var(--text-sm);
   color: var(--color-gray-500);
 }
+
+/* ============================================================
+   Admin tables
+
+   `min-w-[800px]` was used on the admin tables and does not exist in this stylesheet -
+   there is no Tailwind build here to generate an arbitrary-value class, and no other
+   arbitrary-value class is present either, so it resolved to nothing. The tables sat
+   inside `overflow-x-auto` with no minimum width, which means they never overflowed:
+   instead of scrolling, seven columns of names, amounts and statuses squeezed themselves
+   into a phone's width and wrapped into unreadable slivers.
+
+   Named semantically rather than re-creating the Tailwind spelling by hand, to match how
+   the rest of this file's hand-written components are named.
+   ============================================================ */
+
+.admin-table {
+  width: 100%;
+  min-width: 50rem;
+}
+
+/* ============================================================
+   Arbitrary-value utilities the snapshot did not capture
+
+   index.css is a checked-in Tailwind build OUTPUT with no Tailwind step behind it, so it
+   contains exactly the classes that existed when it was generated - including some
+   arbitrary-value ones such as `.min-w-\[600px\]`. Classes added to the JSX afterwards were
+   never generated and resolve to nothing at all, silently.
+
+   Written in the same escaped form as the rest of the snapshot rather than converted to
+   semantic classes, so the fix is CSS-only and the fifteen call sites stay untouched.
+
+   These are the ones reachable in the running app. The rest of the misses are inside
+   src/components/ui/* components that nothing imports (command, sidebar, drawer, dialog,
+   sheet, accordion, navigation-menu, tooltip, scroll-area, slider, chart), where generating
+   CSS for shadcn's data-attribute selectors would be effort spent on dead code.
+   ============================================================ */
+
+/* Toasts. Without this the container had NO z-index while modals sit at z-50, so a toast
+   raised from inside a modal - "Payment failed", "Booking confirmed" - rendered behind it
+   and the user got no feedback at all. */
+.z-\[200\] { z-index: 200; }
+
+/* Notification bell badge. Both spans were unsized: the ping ring collapsed to 0x0 so the
+   animation was invisible, and the count lost its height and minimum width, so a single
+   digit rendered as a squashed pill instead of a circle. */
+.w-\[18px\] { width: 18px; }
+.h-\[18px\] { height: 18px; }
+.min-w-\[18px\] { min-width: 18px; }
+
+/* The coloured accent down the left of an unread notification. Border-style and colour were
+   applied, width was not, and a border with no width draws nothing. */
+.border-l-\[3px\] { border-left-width: 3px; }
+
+/* Small captions on calendar cells, time slots and evidence thumbnails, which were falling
+   back to the inherited size. None of these elements carries a competing text-* class, so
+   this only ever makes them the 10px they ask for. */
+.text-\[10px\] { font-size: 10px; }
+
+/* Admin filter rows. These wrap, and the minimums are what stop a date input or a select
+   collapsing to its placeholder before the row wraps. */
+.min-w-\[150px\] { min-width: 150px; }
+.min-w-\[160px\] { min-width: 160px; }
+.min-w-\[200px\] { min-width: 200px; }
+
+/* Truncation and scroll caps that were doing nothing: an over-long email in the admin list,
+   a chat bubble that should not span the full width, and a list that should scroll at 400px
+   rather than growing without limit. */
+.max-w-\[120px\] { max-width: 120px; }
+.max-w-\[140px\] { max-width: 140px; }
+.max-w-\[60\%\] { max-width: 60%; }
+.max-h-\[400px\] { max-height: 400px; }
+
+/* --- Finishing the notification bell badge ------------------------------------------
+   The two spans of the unread badge needed more than their sizes. Every class below was
+   also absent, which between them meant: neither span was pulled to the bell's top-right
+   corner (both sat at the wrapper's own top-left), the ping ring had no colour and no
+   animation to run, and the count had no horizontal padding so a two-digit number touched
+   its own edges. Sizing them without these would have produced a differently wrong badge.
+
+   `px-1` is here because it genuinely is not in the snapshot - a reminder that the missing
+   classes are not only exotic ones. The same applies to the remove button on a dispute
+   evidence thumbnail, which uses the 1.5 offsets. */
+
+.-top-0\.5 { top: -0.125rem; }
+.-right-0\.5 { right: -0.125rem; }
+.-top-1\.5 { top: -0.375rem; }
+.-right-1\.5 { right: -0.375rem; }
+
+.px-1 { padding-inline: 0.25rem; }
+.p-1 { padding: 0.25rem; }
+
+.bg-red-400 { background-color: var(--color-red-400, oklch(0.704 0.191 22.216)); }
+
+/* Matches the shape of the existing spin declaration above. */
+@keyframes ping {
+  75%, 100% { transform: scale(2); opacity: 0; }
+}
+.animate-ping { animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite; }
+
+/* --- Toasts -------------------------------------------------------------------------
+   The toast subsystem had a cluster of these, and they interact, so they are fixed
+   together rather than one at a time.
+
+   `pointer-events-none` on the container is the important one. It was dead, so the fixed
+   container - up to max-w-sm wide and w-full - was swallowing clicks in its region. That
+   was survivable only because `z-[200]` was dead too and it sat low in the stack; giving it
+   a z-index without this would have raised an invisible click-blocker over the whole app.
+   The matching `pointer-events-auto` did not exist in the JSX at all (the container's
+   children inherit none), so it is added to the toast element in Toast.tsx - without it the
+   dismiss button would stop responding the moment the container started working.
+
+   `bottom-4` was dead, so `fixed` had no vertical offset and toasts appeared wherever the
+   container fell in normal flow rather than bottom-right. `top-3`/`right-3` were dead on the
+   dismiss button, so it was not positioned in the corner it reserves `pr-10` for. */
+
+.pointer-events-none { pointer-events: none; }
+.pointer-events-auto { pointer-events: auto; }
+
+.bottom-0 { bottom: 0; }
+.bottom-4 { bottom: 1rem; }
+.top-3 { top: 0.75rem; }
+.right-3 { right: 0.75rem; }
+.pr-10 { padding-right: 2.5rem; }
+
+/* Hex-with-alpha to match the existing .bg-black\/50 rule rather than introducing a
+   second idiom for the same thing. 0d = 5% of 255. */
+.hover\:bg-black\/5:hover { background-color: #0000000d; }
+
+.duration-100 { transition-duration: 100ms; }
+.ease-linear { transition-timing-function: linear; }

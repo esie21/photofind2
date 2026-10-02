@@ -7,6 +7,14 @@ import path from 'path';
 import fs from 'fs';
 import { CATEGORY_OPTIONS } from '../constants/categories';
 import {
+  validateProjectExtras,
+  validateItemExtras,
+  pastCalendarDate,
+  prunePairings,
+  type ProjectExtras,
+  type ItemExtras,
+} from '../utils/portfolioSchema';
+import {
   UPLOADS_ROOT,
   MAX_FILE_SIZE,
   safeSegment,
@@ -43,7 +51,7 @@ const MAX_ALBUM_LENGTH = 60;
  * dimensions - and is written only by the preview endpoint. PUT /users/:id carries
  * those through untouched rather than accepting them from the client.
  */
-interface PortfolioEntry {
+interface PortfolioEntry extends ItemExtras {
   caption?: string;
   album?: string;
   poster?: string;
@@ -64,9 +72,13 @@ const MAX_PROJECT_LOCATION = 120;
  *
  * Everything here is the provider's to edit, unlike PortfolioEntry, which is half
  * file-derived. `cover` is a stored path that must be a member of this album;
- * `order` positions the project on the public grid.
+ * `order` positions the project on the public grid. The optional fields added for
+ * category-neutral projects (tags, services, date range, ...) are in ProjectExtras.
+ *
+ * `category` is legacy: it is still accepted and shown, but new projects use free-form
+ * `tags`, because the category list only fits some of the trades on the platform.
  */
-interface PortfolioAlbum {
+interface PortfolioAlbum extends ProjectExtras {
   description?: string;
   category?: string;
   location?: string;
@@ -82,7 +94,7 @@ type PortfolioAlbums = Record<string, PortfolioAlbum>;
 // there are five of them, and a column added to only four is how a field ends up
 // mysteriously undefined on exactly one screen.
 const USER_COLUMNS =
-  'id, email, name, role, profile_image, portfolio_images, portfolio_meta, portfolio_albums, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents';
+  'id, email, name, role, profile_image, portfolio_images, portfolio_meta, portfolio_albums, portfolio_cover, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents';
 
 // Stored image paths are relative to the uploads root ("users/<id>/avatar/x.png").
 // Clients that post back a *display* URL instead ("/uploads/users/...") used to have it
@@ -214,7 +226,7 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
-    const { name, bio, years_experience, location, category, title, profile_image, portfolio_images, portfolio_meta, portfolio_albums } = req.body;
+    const { name, bio, years_experience, location, category, title, profile_image, portfolio_images, portfolio_meta, portfolio_albums, portfolio_cover } = req.body;
 
     // Validate before touching the database. Without this, values that simply don't fit
     // the column (a name over 100 chars, a location over 255, a years_experience outside
@@ -268,6 +280,10 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
       }
     }
 
+    if (portfolio_cover !== undefined && portfolio_cover !== null && typeof portfolio_cover !== 'string') {
+      return res.status(400).json({ error: 'portfolio_cover must be the path of a portfolio item' });
+    }
+
     // Captions and albums arrive as a path -> { caption, album } map. Validate every
     // entry rather than trusting the shape: this lands in a JSONB column that both the
     // dashboard and the public profile render.
@@ -293,11 +309,14 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
         if (album.length > MAX_ALBUM_LENGTH) {
           return res.status(400).json({ error: `Album names must be ${MAX_ALBUM_LENGTH} characters or fewer` });
         }
-        // An entry with neither is just noise - don't persist it.
-        if (!caption && !album) continue;
+        const extras = validateItemExtras(value, normaliseStoredPath);
+        if (!extras.ok) return res.status(400).json({ error: extras.error });
+        // An entry with nothing set is just noise - don't persist it.
+        if (!caption && !album && Object.keys(extras.value).length === 0) continue;
         incomingMeta[normaliseStoredPath(key)] = {
           ...(caption ? { caption } : {}),
           ...(album ? { album } : {}),
+          ...extras.value,
         };
       }
     }
@@ -344,33 +363,18 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
         }
 
         // A date is a credibility signal, so it has to be a real one. A future date on
-        // finished work is either a typo or a claim about work that hasn't happened.
-        let doneOn = '';
-        if (value.done_on != null && String(value.done_on).trim() !== '') {
-          doneOn = String(value.done_on).trim();
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(doneOn)) {
-            return res.status(400).json({ error: 'Project dates must look like YYYY-MM-DD' });
-          }
-          const parsed = new Date(`${doneOn}T00:00:00Z`);
-          if (isNaN(parsed.getTime())) {
-            return res.status(400).json({ error: 'That project date is not a real date' });
-          }
-          // One full day of slack, not "end of today in UTC".
-          //
-          // done_on is a plain calendar date with no timezone, and the date picker offers
-          // the provider's *local* today. Anywhere ahead of UTC that is a day ahead of the
-          // UTC date for part of every day - in Manila (UTC+8) between midnight and 8am,
-          // local today is tomorrow in UTC - so an end-of-UTC-today ceiling rejected a
-          // date the picker had just offered, with "cannot be in the future" for a job
-          // finished yesterday. The furthest-ahead zone is UTC+14, so 24 hours covers
-          // every one of them and still blocks a date genuinely days out.
-          if (parsed.getTime() > Date.now() + 24 * 60 * 60 * 1000) {
-            return res.status(400).json({ error: 'A project date cannot be in the future' });
-          }
-        }
+        // finished work is either a typo or a claim about work that hasn't happened - see
+        // pastCalendarDate for the one-day slack on "not in the future". This used to accept
+        // 2026-02-30, which Date silently rolls over into March, and store it as typed.
+        const doneOnCheck = pastCalendarDate(value.done_on, 'The project date');
+        if (!doneOnCheck.ok) return res.status(400).json({ error: doneOnCheck.error });
+        const doneOn = doneOnCheck.value;
 
         const order = Number.isFinite(Number(value.order)) ? Math.trunc(Number(value.order)) : undefined;
         const cover = value.cover == null ? '' : normaliseStoredPath(value.cover);
+
+        const extras = validateProjectExtras(value, doneOn);
+        if (!extras.ok) return res.status(400).json({ error: extras.error });
 
         const entry: PortfolioAlbum = {
           ...(description ? { description } : {}),
@@ -379,9 +383,12 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
           ...(doneOn ? { done_on: doneOn } : {}),
           ...(cover ? { cover } : {}),
           ...(order !== undefined ? { order } : {}),
+          ...extras.value,
         };
-        // An entry with nothing in it is noise - the album still renders from its images.
-        if (Object.keys(entry).length > 0) incomingAlbums[name] = entry;
+        // Kept even when empty: a project can now exist before anything is in it (the
+        // provider creates it, then drags work in), and its entry here is the only record
+        // that it exists at all.
+        incomingAlbums[name] = entry;
       }
     }
 
@@ -392,15 +399,23 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
     let droppedPosters: string[] = [];
     let metaToWrite: PortfolioMeta | undefined;
     let albumsToWrite: PortfolioAlbums | undefined;
+    // undefined = leave the column alone; null = clear it.
+    let coverToWrite: string | null | undefined;
 
-    if (Array.isArray(portfolio_images) || incomingMeta !== undefined || incomingAlbums !== undefined) {
+    if (
+      Array.isArray(portfolio_images) ||
+      incomingMeta !== undefined ||
+      incomingAlbums !== undefined ||
+      portfolio_cover !== undefined
+    ) {
       const before = await pool.query(
-        'SELECT portfolio_images, portfolio_meta, portfolio_albums FROM users WHERE id = $1',
+        'SELECT portfolio_images, portfolio_meta, portfolio_albums, portfolio_cover FROM users WHERE id = $1',
         [userId]
       );
       const previousImages: string[] = before.rows[0]?.portfolio_images || [];
       const previousMeta: PortfolioMeta = before.rows[0]?.portfolio_meta || {};
       const previousAlbums: PortfolioAlbums = before.rows[0]?.portfolio_albums || {};
+      const previousCover: string = before.rows[0]?.portfolio_cover || '';
 
       // Whether the client sent metadata or not, what gets stored is pruned to the items
       // that remain. Otherwise a caption for a deleted photo would sit in the column
@@ -421,6 +436,9 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
         const entry: PortfolioEntry = {
           ...(submitted.caption ? { caption: submitted.caption } : {}),
           ...(submitted.album ? { album: submitted.album } : {}),
+          ...(submitted.alt ? { alt: submitted.alt } : {}),
+          ...(submitted.tags?.length ? { tags: submitted.tags } : {}),
+          ...(submitted.before ? { before: submitted.before } : {}),
           // Everything below is written by the preview endpoint, which validates the file
           // and the path it belongs to. A profile save must not be able to set, change
           // or - as it previously would have - silently drop them.
@@ -432,11 +450,14 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
         if (Object.keys(entry).length > 0) metaToWrite[path] = entry;
       }
 
+      // The order the items will be stored in - what decides a contested pairing.
+      const finalOrder: string[] = (Array.isArray(portfolio_images) ? portfolio_images : previousImages)
+        .map((v: any) => normaliseStoredPath(v));
+      prunePairings(metaToWrite, finalOrder);
+
       // Prune projects against the images that actually survived, the same way metadata
       // above is pruned against portfolio_images. Two separate things can go stale here:
       //
-      //  - A project whose last image was deleted. Left alone it would sit in the column
-      //    forever and spring back into the grid, empty, if that album name were reused.
       //  - A cover pointing at an image that was deleted or moved to another project.
       //    The grid would render a broken tile, so it falls back to "no cover set" and
       //    the helper picks the project's first image instead.
@@ -454,14 +475,34 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
         }
 
         albumsToWrite = {};
+        // A project with no items is kept. It used to be pruned, on the grounds that it would
+        // otherwise spring back into the grid empty - but projects are now created before
+        // anything is put in them, and the public grid is built from items, so an empty one
+        // never shows to a client. Deleting a project is an explicit action now, not a side
+        // effect of moving its last photo out.
         for (const [name, entry] of Object.entries(albumSource)) {
-          const members = membersByAlbum.get(name);
-          if (!members || members.size === 0) continue;
-
+          const members = membersByAlbum.get(name) || new Set<string>();
           const cover = entry.cover ? normaliseStoredPath(entry.cover) : '';
           const { cover: _discarded, ...rest } = entry;
-          const kept: PortfolioAlbum = cover && members.has(cover) ? { ...rest, cover } : rest;
-          if (Object.keys(kept).length > 0) albumsToWrite[name] = kept;
+          albumsToWrite[name] = cover && members.has(cover) ? { ...rest, cover } : rest;
+        }
+      }
+
+      // The main profile cover: the image across the top of the public profile. Must be one
+      // of the provider's own items - it is rendered as an <img> on a public page, and an
+      // arbitrary path would let a provider point it at anything under /uploads.
+      {
+        const finalSet = new Set(finalOrder);
+        if (portfolio_cover !== undefined) {
+          const wanted = portfolio_cover ? normaliseStoredPath(portfolio_cover) : '';
+          if (wanted && !finalSet.has(wanted)) {
+            return res.status(400).json({ error: 'The profile cover must be one of your portfolio items' });
+          }
+          coverToWrite = wanted || null;
+        } else if (previousCover && !finalSet.has(normaliseStoredPath(previousCover))) {
+          // Its item was just removed. Clearing it falls back to the automatic choice,
+          // rather than leaving the profile header pointing at a deleted file.
+          coverToWrite = null;
         }
       }
 
@@ -519,6 +560,10 @@ router.put('/:id', verifyToken, async (req: any, res: Response) => {
     if (albumsToWrite !== undefined) {
       updates.push(`portfolio_albums = $${idx++}`);
       values.push(JSON.stringify(albumsToWrite));
+    }
+    if (coverToWrite !== undefined) {
+      updates.push(`portfolio_cover = $${idx++}`);
+      values.push(coverToWrite);
     }
     if (category !== undefined) {
       updates.push(`category = $${idx++}`);
@@ -713,7 +758,10 @@ router.post('/:id/upload/portfolio',
     const result = await pool.query(`SELECT ${USER_COLUMNS} FROM users WHERE id = $1`, [userId]);
 
     console.log('Portfolio images uploaded:', urls.length, 'files');
-    res.json(result.rows[0]);
+    // `added` names exactly what this request appended, in order. The client attaches each
+    // file's thumbnail to it; inferring it by diffing the list before and after would be
+    // wrong the moment anything else changed the portfolio in between.
+    res.json({ ...result.rows[0], added: urls });
   } catch (err) {
     console.error('Upload portfolio error', err);
     res.status(500).json({ error: 'Failed to upload portfolio images' });
@@ -887,9 +935,14 @@ router.delete('/:id/portfolio/:imagePath(*)', verifyToken, async (req: any, res:
     }
 
     // Get current portfolio images and metadata
-    const result = await pool.query('SELECT portfolio_images, portfolio_meta FROM users WHERE id = $1', [userId]);
+    const result = await pool.query(
+      'SELECT portfolio_images, portfolio_meta, portfolio_albums, portfolio_cover FROM users WHERE id = $1',
+      [userId]
+    );
     const existing: string[] = result.rows[0]?.portfolio_images || [];
     const existingMeta: PortfolioMeta = result.rows[0]?.portfolio_meta || {};
+    const existingAlbums: PortfolioAlbums = result.rows[0]?.portfolio_albums || {};
+    const existingCover: string = result.rows[0]?.portfolio_cover || '';
 
     // Find and remove the image
     const fullPath = `users/${userId}/portfolio/${imagePath}`;
@@ -908,6 +961,24 @@ router.delete('/:id/portfolio/:imagePath(*)', verifyToken, async (req: any, res:
     const newMeta = { ...existingMeta };
     delete newMeta[removed];
     delete newMeta[removedKey];
+    // Anything that pointed at this item points at nothing now: an "after" paired with it,
+    // a project cover, the profile cover.
+    for (const [key, entry] of Object.entries(newMeta)) {
+      if (entry.before && normaliseStoredPath(entry.before) === removedKey) {
+        const { before: _gone, ...rest } = entry;
+        newMeta[key] = rest;
+      }
+    }
+    const newAlbums: PortfolioAlbums = {};
+    for (const [albumName, entry] of Object.entries(existingAlbums)) {
+      if (entry.cover && normaliseStoredPath(entry.cover) === removedKey) {
+        const { cover: _gone, ...rest } = entry;
+        newAlbums[albumName] = rest;
+      } else {
+        newAlbums[albumName] = entry;
+      }
+    }
+    const newCover = existingCover && normaliseStoredPath(existingCover) === removedKey ? null : existingCover || null;
 
     // Delete from filesystem - the original, and any derived poster/thumbnail, which are
     // just as orphaned as the original once the item is gone.
@@ -921,12 +992,21 @@ router.delete('/:id/portfolio/:imagePath(*)', verifyToken, async (req: any, res:
 
     // Update database
     await pool.query(
-      'UPDATE users SET portfolio_images = $1, portfolio_meta = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
-      [newArr, JSON.stringify(newMeta), userId]
+      `UPDATE users
+       SET portfolio_images = $1, portfolio_meta = $2, portfolio_albums = $3, portfolio_cover = $4,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5`,
+      [newArr, JSON.stringify(newMeta), JSON.stringify(newAlbums), newCover, userId]
     );
 
     console.log('Portfolio image deleted:', fullPath);
-    res.json({ success: true, portfolio_images: newArr, portfolio_meta: newMeta });
+    res.json({
+      success: true,
+      portfolio_images: newArr,
+      portfolio_meta: newMeta,
+      portfolio_albums: newAlbums,
+      portfolio_cover: newCover,
+    });
   } catch (err) {
     console.error('Delete portfolio image error', err);
     res.status(500).json({ error: 'Failed to delete portfolio image' });

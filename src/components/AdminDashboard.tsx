@@ -11,11 +11,13 @@ import adminService, {
 } from '../api/services/adminService';
 import { Users, PhilippinePeso, TrendingUp, AlertCircle, Search, Filter, Eye, X, CheckCircle, XCircle, Clock, Shield, FileText, Download, MessageSquare } from 'lucide-react';
 import { BookingDisputesPanel } from './BookingDisputesPanel';
+import { AdminReportsPanel } from './AdminReportsPanel';
+import { csvDocument, downloadCsvFile } from '../utils/csv';
 import { SupportChat } from './SupportChat';
 import { getUploadUrl, API_CONFIG } from '../api/config';
 import { io as createSocket } from 'socket.io-client';
 
-type TabType = 'overview' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit' | 'support';
+type TabType = 'overview' | 'reports' | 'users' | 'providers' | 'reviews' | 'booking_disputes' | 'disputes' | 'audit' | 'support';
 
 /**
  * A user's avatar, falling back to their initial.
@@ -290,24 +292,20 @@ export function AdminDashboard() {
         }
       }
 
-      const escape = (v: any) => {
-        const str = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-        return `"${str.replace(/"/g, '""')}"`;
-      };
+      // Shared helpers rather than a local escape: audit rows carry user names and the
+      // old/new value blobs of whatever was edited, so any of those beginning with '=' was
+      // handed to the admin's spreadsheet as a live formula. The helper also adds the UTF-8
+      // BOM this export never had, which is why accented names opened as mojibake in Excel.
       const header = ['Timestamp', 'User', 'Email', 'Action', 'Entity Type', 'Entity ID', 'IP Address', 'Old Values', 'New Values', 'Metadata'];
-      const csvRows = rows.map(l => [
+      const csv = csvDocument(header, rows.map(l => [
         l.created_at, l.user_name || 'System', l.user_email || '', l.action,
         l.entity_type, l.entity_id || '', l.ip_address || '',
         l.old_values, l.new_values, l.metadata || (l as any).details,
-      ].map(escape).join(','));
-      const csv = [header.map(escape).join(','), ...csvRows].join('\r\n');
-
-      const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `audit-logs-${new Date().toISOString().slice(0, 10)}${truncated ? '-partial' : ''}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+      ]));
+      downloadCsvFile(
+        `audit-logs-${new Date().toISOString().slice(0, 10)}${truncated ? '-partial' : ''}.csv`,
+        csv,
+      );
 
       if (truncated) {
         setError(`Export stopped at ${MAX_EXPORT_ROWS} rows - narrow the filters (date range, action, or user) to get a complete export of a larger match.`);
@@ -467,37 +465,14 @@ export function AdminDashboard() {
       return;
     }
 
-    // Get headers from first object
+    // Through the shared helper now. This built its own rows and had three problems the
+    // reports work turned up: it quoted a value only when it happened to contain a comma,
+    // quote or newline, so it never guarded a cell beginning with '=' - an exported user
+    // whose name started with one became a live formula in the admin's spreadsheet. It also
+    // joined rows with a bare LF instead of CRLF, and emitted no UTF-8 BOM, so accented
+    // names arrived as mojibake in Excel.
     const headers = Object.keys(data[0]);
-
-    // Create CSV content
-    const csvContent = [
-      headers.join(','), // Header row
-      ...data.map(row =>
-        headers.map(header => {
-          const value = row[header];
-          // Handle null/undefined
-          if (value === null || value === undefined) return '';
-          // Escape quotes and wrap in quotes if contains comma, quote, or newline
-          const stringValue = String(value);
-          if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
-            return `"${stringValue.replace(/"/g, '""')}"`;
-          }
-          return stringValue;
-        }).join(',')
-      )
-    ].join('\n');
-
-    // Create blob and download
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    link.setAttribute('href', url);
-    link.setAttribute('download', filename);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadCsvFile(filename, csvDocument(headers, data.map(row => headers.map(h => row[h]))));
   };
 
   const handleExportUsers = () => {
@@ -773,7 +748,7 @@ export function AdminDashboard() {
       {/* Users Table */}
       <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[800px]">
+          <table className="admin-table">
             <thead className="bg-gray-50">
               <tr>
                 <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">User</th>
@@ -1281,7 +1256,7 @@ export function AdminDashboard() {
 
       <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[700px]">
+          <table className="admin-table">
             <thead className="bg-gray-50">
               <tr>
                 <th className="text-left py-4 px-6 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Timestamp</th>
@@ -1511,6 +1486,7 @@ export function AdminDashboard() {
 
   const tabs: { id: TabType; label: string }[] = [
     { id: 'overview', label: 'Overview' },
+    { id: 'reports', label: 'Reports' },
     { id: 'users', label: 'Users' },
     { id: 'providers', label: 'Verifications' },
     { id: 'reviews', label: 'Reviews' },
@@ -1558,6 +1534,9 @@ export function AdminDashboard() {
         ) : (
           <>
             {activeTab === 'overview' && renderOverview()}
+            {/* Loads its own data, like BookingDisputesPanel: the date range driving it is
+                not shared with any other tab, so it has no case in loadTabData. */}
+            {activeTab === 'reports' && <AdminReportsPanel />}
             {activeTab === 'users' && renderUsers()}
             {activeTab === 'providers' && renderProviders()}
             {activeTab === 'reviews' && renderReviews()}

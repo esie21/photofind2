@@ -207,12 +207,36 @@ export interface AdminPayment {
   commission_amount: number;
   net_provider_amount: number;
   status: string;
-  stripe_payment_intent_id: string;
+  /** Money sent back to the client. Subtracted from revenue everywhere it is reported. */
+  refunded_amount: number | null;
+  /** 'qrph' in normal operation; 'card' and the e-wallets only on historic rows. */
+  payment_method_type: string | null;
+  /**
+   * Was `stripe_payment_intent_id`, which is not a column on this table - a leftover from
+   * before PayMongo. Nothing read it, so it returned undefined rather than failing.
+   */
+  paymongo_payment_intent_id: string | null;
   paid_at: string | null;
   created_at: string;
   client_name: string;
   provider_name: string;
   service_title: string | null;
+}
+
+/** Totals for one reporting window, from GET /admin/reports/summary. */
+export interface ReportSummary {
+  range: { from: string; to: string; timezone: string };
+  revenue: {
+    gross: number;
+    refunded: number;
+    net: number;
+    commission: number;
+    providerNet: number;
+    settledCount: number;
+  };
+  paymentsByStatus: Record<string, number>;
+  byMethod: Array<{ method: string; count: number; net: number }>;
+  bookingsByStatus: Record<string, number>;
 }
 
 export interface AuditLog {
@@ -398,6 +422,9 @@ const adminService = {
   // Bookings
   async getBookings(params: {
     status?: string;
+    /** YYYY-MM-DD. Interpreted as Asia/Manila days by the server, inclusive of both ends. */
+    from?: string;
+    to?: string;
     limit?: number;
     offset?: number;
   } = {}): Promise<PaginatedResponse<AdminBooking>> {
@@ -411,6 +438,9 @@ const adminService = {
   // Payments
   async getPayments(params: {
     status?: string;
+    /** YYYY-MM-DD, Asia/Manila, inclusive. Matched on paid_at, falling back to created_at. */
+    from?: string;
+    to?: string;
     limit?: number;
     offset?: number;
   } = {}): Promise<PaginatedResponse<AdminPayment>> {
@@ -419,6 +449,14 @@ const adminService = {
       if (value !== undefined) searchParams.append(key, String(value));
     });
     return apiClient.get<PaginatedResponse<AdminPayment>>(`/admin/payments?${searchParams.toString()}`);
+  },
+
+  // Reports
+  async getReportSummary(from: string, to: string): Promise<ReportSummary> {
+    const resp = await apiClient.get<{ data: ReportSummary }>(
+      `/admin/reports/summary?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+    );
+    return resp.data;
   },
 
   // Audit Logs

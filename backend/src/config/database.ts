@@ -122,6 +122,10 @@ export async function initializeTables() {
     // entry here still renders: it just has no context line and falls back to its first
     // image as the cover.
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_albums JSONB DEFAULT '{}'::jsonb;`);
+    // The image across the top of the public profile, as a stored path. NULL means choose
+    // automatically (the leading project's cover), which is what every portfolio did before
+    // this column existed - so no backfill is needed.
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_cover TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS years_experience INTEGER DEFAULT 0;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);`);

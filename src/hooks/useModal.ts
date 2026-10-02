@@ -22,6 +22,11 @@ import { useEffect, useRef } from 'react';
 const modalStack: symbol[] = [];
 let restoreBodyOverflow: string | null = null;
 
+// What can take keyboard focus inside a dialog.
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+  'textarea:not([disabled]), video[controls], [tabindex]:not([tabindex="-1"])';
+
 interface UseModalOptions {
   /**
    * Whether the modal is currently open. Defaults to true, for components that only
@@ -41,6 +46,16 @@ interface UseModalOptions {
   labelledBy?: string;
   /** Used when there is no visible title to point at. */
   label?: string;
+  /**
+   * Keyboard focus handling: move focus into the dialog when it opens, keep Tab inside it
+   * while it is open, and hand focus back to whatever opened it when it closes.
+   *
+   * Opt-in, because this hook is shared by every modal in the app and turning it on
+   * everywhere at once is a change to test modal by modal. Without it a keyboard user is
+   * left on the page behind the overlay - Tab walks the hidden page - and lands back at the
+   * top of the document when the modal closes.
+   */
+  manageFocus?: boolean;
 }
 
 export function useModal(onClose: () => void, options: UseModalOptions = {}) {
@@ -51,7 +66,11 @@ export function useModal(onClose: () => void, options: UseModalOptions = {}) {
     lockScroll = true,
     labelledBy,
     label,
+    manageFocus = false,
   } = options;
+
+  const overlayRef = useRef<HTMLElement | null>(null);
+  const cardRef = useRef<HTMLElement | null>(null);
 
   // Held in refs so the effect below can run once, on mount. Callers pass inline
   // arrows for onClose, which change identity every render - as an effect
@@ -82,8 +101,49 @@ export function useModal(onClose: () => void, options: UseModalOptions = {}) {
     };
     document.addEventListener('keydown', onKeyDown);
 
+    // Focus management (see manageFocus).
+    const opener = manageFocus ? (document.activeElement as HTMLElement | null) : null;
+    let frame = 0;
+    const onTab = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || modalStack[modalStack.length - 1] !== id) return;
+      const root = overlayRef.current;
+      if (!root) return;
+      const items = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+        (el) => el.offsetParent !== null || el === document.activeElement
+      );
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (!active || !root.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    if (manageFocus) {
+      document.addEventListener('keydown', onTab);
+      // After the dialog has rendered. Left alone if something inside already took focus,
+      // so an autoFocus field in the dialog keeps it.
+      frame = requestAnimationFrame(() => {
+        const card = cardRef.current;
+        if (card && !card.contains(document.activeElement)) card.focus();
+      });
+    }
+
     return () => {
       document.removeEventListener('keydown', onKeyDown);
+      if (manageFocus) {
+        document.removeEventListener('keydown', onTab);
+        cancelAnimationFrame(frame);
+        // Back to whatever opened it, if that is still on the page.
+        if (opener && document.contains(opener)) opener.focus();
+      }
       const at = modalStack.indexOf(id);
       if (at !== -1) modalStack.splice(at, 1);
       if (lockScroll && modalStack.length === 0) {
@@ -91,11 +151,12 @@ export function useModal(onClose: () => void, options: UseModalOptions = {}) {
         restoreBodyOverflow = null;
       }
     };
-  }, [enabled, lockScroll]);
+  }, [enabled, lockScroll, manageFocus]);
 
   return {
     /** Spread onto the .modal-overlay element. */
     overlayProps: {
+      ...(manageFocus ? { ref: (el: HTMLElement | null) => { overlayRef.current = el; } } : {}),
       onClick: (e: React.MouseEvent) => {
         // Only a click on the dim area itself, not one that bubbled up from the card.
         if (!closeOnBackdrop) return;
@@ -107,6 +168,11 @@ export function useModal(onClose: () => void, options: UseModalOptions = {}) {
     cardProps: {
       role: 'dialog' as const,
       'aria-modal': true,
+      // Focusable from script only (tabIndex -1), so the dialog itself can receive focus
+      // when it opens without becoming an extra Tab stop.
+      ...(manageFocus
+        ? { ref: (el: HTMLElement | null) => { cardRef.current = el; }, tabIndex: -1 }
+        : {}),
       ...(labelledBy ? { 'aria-labelledby': labelledBy } : {}),
       ...(label ? { 'aria-label': label } : {}),
     },

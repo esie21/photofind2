@@ -452,7 +452,7 @@ router.post('/signup', async (req: AuthRequest, res: Response) => {
 router.get('/me', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   try {
     const result = await pool.query(
-      `SELECT id, email, name, role, profile_image, portfolio_images, portfolio_meta, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents,
+      `SELECT id, email, name, role, profile_image, portfolio_images, portfolio_meta, portfolio_albums, portfolio_cover, bio, years_experience, location, category, title, is_verified, verification_status, verification_documents,
               terms_accepted_at, terms_version,
               (password_set_at IS NOT NULL) as has_password
        FROM users WHERE id::text = $1`,
@@ -851,7 +851,7 @@ router.post('/accept-terms', verifyToken, async (req: Request & { userId?: strin
            terms_version = $2,
            updated_at = CURRENT_TIMESTAMP
        WHERE id::text = $1 AND deleted_at IS NULL
-       RETURNING id, email, name, role, profile_image, portfolio_images, portfolio_meta, bio,
+       RETURNING id, email, name, role, profile_image, portfolio_images, portfolio_meta, portfolio_albums, portfolio_cover, bio,
                  years_experience, location, category, title, is_verified, verification_status,
                  verification_documents, terms_accepted_at, terms_version,
                  (password_set_at IS NOT NULL) as has_password`,
