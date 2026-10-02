@@ -1,3 +1,4 @@
+import { formatMoney } from '../utils/currency';
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Upload, Calendar, PhilippinePeso, Star, TrendingUp, CheckCircle, XCircle, MessageSquare, Users, Camera, Edit, Plus, Trash2, Wallet, Tag, RefreshCw, AlertCircle, ShieldCheck, FileText } from 'lucide-react';
 import { CATEGORY_OPTIONS } from '../constants/categories';
@@ -235,7 +236,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
 
     return [
       { label: 'Upcoming Bookings', value: String(upcomingBookings), change: `${pendingBookings} pending`, icon: Calendar, color: 'purple' },
-      { label: 'Earnings (30d)', value: `₱${recentEarnings.toLocaleString()}`, change: 'Last 30 days', icon: PhilippinePeso, color: 'green' },
+      { label: 'Earnings (30d)', value: `₱${formatMoney(recentEarnings)}`, change: 'Last 30 days', icon: PhilippinePeso, color: 'green' },
       { label: 'Completed Bookings', value: String(completedBookings), change: 'All time', icon: TrendingUp, color: 'blue' },
       { label: 'Total Bookings', value: String(providerBookings.length), change: 'All statuses', icon: Star, color: 'yellow' },
     ];
@@ -1559,7 +1560,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                           <div className="flex items-center gap-2">
                             {pkg.enable_hourly && pkg.hourly_rate && (
                               <span className="text-blue-600 font-semibold">
-                                ₱{pkg.hourly_rate.toLocaleString()}/hr
+                                ₱{formatMoney(pkg.hourly_rate)}/hr
                               </span>
                             )}
                             {pkg.enable_hourly && pkg.hourly_rate && pkg.enable_package && pkg.package_price && (
@@ -1567,7 +1568,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                             )}
                             {pkg.enable_package && pkg.package_price && (
                               <span className="text-green-600 font-semibold">
-                                ₱{pkg.package_price.toLocaleString()}
+                                ₱{formatMoney(pkg.package_price)}
                               </span>
                             )}
                           </div>
@@ -1800,14 +1801,14 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                           {pkg.enable_hourly && pkg.hourly_rate && (
                             <span className="inline-flex items-center px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded-full">
                               <PhilippinePeso className="w-3 h-3 mr-1" />
-                              ₱{pkg.hourly_rate.toLocaleString()}/hr
+                              ₱{formatMoney(pkg.hourly_rate)}/hr
                             </span>
                           )}
                           {pkg.enable_package && pkg.package_price && (
                             <>
                               <span className="inline-flex items-center px-2 py-1 text-xs bg-green-100 text-green-700 rounded-full">
                                 <PhilippinePeso className="w-3 h-3 mr-1" />
-                                ₱{pkg.package_price.toLocaleString()} package
+                                ₱{formatMoney(pkg.package_price)} package
                               </span>
                               {pkg.duration_minutes && (
                                 <span className="inline-flex items-center px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded-full">
@@ -2049,7 +2050,7 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                                 <span>{booking.date}</span>
                               </div>
                               <span>{booking.time}</span>
-                              <span className="text-purple-600 font-medium">₱{booking.amount?.toLocaleString()}</span>
+                              <span className="text-purple-600 font-medium">₱{formatMoney(booking.amount)}</span>
                             </div>
                             <div className="flex flex-wrap gap-2">
                               {booking.status === 'pending' && (

@@ -1,3 +1,4 @@
+import { formatMoney } from '../utils/currency';
 import { useEffect, useMemo, useState } from 'react';
 import { Calendar, Clock, PhilippinePeso, MessageSquare, RefreshCw, AlertCircle, Star, Info, Check } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -484,7 +485,7 @@ export function BookingsPage() {
                           </span>
                           <span className="flex items-center gap-2">
                             <PhilippinePeso className="w-4 h-4" />
-                            {booking.price.toLocaleString()}
+                            {formatMoney(booking.price)}
                           </span>
                         </div>
 

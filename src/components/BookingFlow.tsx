@@ -1,5 +1,6 @@
+import { formatMoney } from '../utils/currency';
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import { Check, Calendar as CalendarIcon, Clock, CreditCard, ChevronRight, MessageSquare, AlertCircle, Loader, Timer, Info, Ban, PhilippinePeso, QrCode } from 'lucide-react';
+import { Check, Calendar as CalendarIcon, Clock, CreditCard, ChevronLeft, ChevronRight, MessageSquare, AlertCircle, Loader, Timer, Info, Ban, PhilippinePeso, QrCode } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import bookingService from '../api/services/bookingService';
 import serviceService, { Service } from '../api/services/serviceService';
@@ -1081,12 +1082,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                 {/* Show available pricing badges */}
                                 {service.has_hourly && (
                                   <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-700">
-                                    ⏱️ ₱{service.hourly_rate?.toLocaleString()}/hr
+                                    ⏱️ ₱{formatMoney(service.hourly_rate)}/hr
                                   </span>
                                 )}
                                 {service.has_package && (
                                   <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-700">
-                                    📦 ₱{service.package_price?.toLocaleString()}
+                                    📦 ₱{formatMoney(service.package_price)}
                                   </span>
                                 )}
                                 {service.duration_minutes && service.has_package && (
@@ -1147,7 +1148,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       <div className="p-3 bg-blue-100 rounded-lg">
                         <div className="flex items-center justify-between">
                           <span className="text-sm text-blue-700">Hourly Rate</span>
-                          <span className="text-xl font-bold text-blue-600">₱{selectedServiceData.hourly_rate?.toLocaleString()}/hr</span>
+                          <span className="text-xl font-bold text-blue-600">₱{formatMoney(selectedServiceData.hourly_rate)}/hr</span>
                         </div>
                         <p className="text-xs text-blue-600 mt-1">+ 15% platform fee</p>
                       </div>
@@ -1187,7 +1188,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       <div className="p-3 bg-green-100 rounded-lg">
                         <div className="flex items-center justify-between">
                           <span className="text-sm text-green-700">Package Price</span>
-                          <span className="text-xl font-bold text-green-600">₱{selectedServiceData.package_price?.toLocaleString()}</span>
+                          <span className="text-xl font-bold text-green-600">₱{formatMoney(selectedServiceData.package_price)}</span>
                         </div>
                         <p className="text-xs text-green-600 mt-1">
                           {selectedServiceData.duration_minutes
@@ -1230,7 +1231,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                             <div>
                               <span className="text-sm text-blue-700">Hourly Rate</span>
                               <div className="text-2xl font-bold text-blue-600">
-                                ₱{hourlyRate.toLocaleString()}/hr
+                                ₱{formatMoney(hourlyRate)}/hr
                               </div>
                             </div>
                             <div className="text-right">
@@ -1247,11 +1248,11 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                               </div>
                               <div className="flex items-center justify-between text-sm mb-1">
                                 <span className="text-blue-700">Calculation</span>
-                                <span className="text-blue-800">₱{hourlyRate.toLocaleString()} × {totalDurationHours.toFixed(1)} hrs</span>
+                                <span className="text-blue-800">₱{formatMoney(hourlyRate)} × {totalDurationHours.toFixed(1)} hrs</span>
                               </div>
                               <div className="flex items-center justify-between font-semibold text-lg mt-2 pt-2 border-t border-blue-200">
                                 <span className="text-blue-700">Total</span>
-                                <span className="text-blue-600">₱{(hourlyRate * totalDurationHours).toLocaleString()}</span>
+                                <span className="text-blue-600">₱{formatMoney(hourlyRate * totalDurationHours)}</span>
                               </div>
                             </div>
                           )}
@@ -1276,7 +1277,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                         <div className="p-4 rounded-xl bg-green-50 border border-green-200">
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-2xl font-bold text-green-600">
-                              ₱{basePrice.toLocaleString()}
+                              ₱{formatMoney(basePrice)}
                             </span>
                             <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">
                               📦 Package
@@ -1342,7 +1343,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                               className="w-9 h-9 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors"
                               aria-label="Previous month"
                             >
-                              <ChevronRight className="w-5 h-5 text-gray-600 rotate-180" />
+                              <ChevronLeft className="w-5 h-5 text-gray-600" />
                             </button>
 
                             <button
@@ -1534,7 +1535,7 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                               <p className="text-blue-100 text-xs sm:text-sm">
                                 {bookableSlotsCount > 0
                                   ? isHourlyPricing
-                                    ? `Tap consecutive slots for longer bookings (₱${hourlyRate.toLocaleString()}/hr)`
+                                    ? `Tap consecutive slots for longer bookings (₱${formatMoney(hourlyRate)}/hr)`
                                     : packageDurationMinutes > 0
                                       ? `Tap start (e.g. 8:00 AM), then tap end time (e.g. 4:00 PM for ${formatDuration(packageDurationMinutes)})`
                                       : 'Tap start time, then tap end time to select your range'
@@ -1619,12 +1620,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                                 <div className="flex items-center justify-between text-sm">
                                   {isHourlyPricing ? (
                                     <span className="text-blue-600">
-                                      ₱{hourlyRate.toLocaleString()}/hr × {totalDurationHours.toFixed(1)} hrs
+                                      ₱{formatMoney(hourlyRate)}/hr × {totalDurationHours.toFixed(1)} hrs
                                     </span>
                                   ) : (
                                     <span className="text-green-600">
                                       📦 {packageUnits > 1
-                                        ? `₱${basePrice.toLocaleString()} × ${packageUnits.toFixed(0)} (${formatDuration(packageDurationMinutes)} each)`
+                                        ? `₱${formatMoney(basePrice)} × ${packageUnits.toFixed(0)} (${formatDuration(packageDurationMinutes)} each)`
                                         : `Package: ${formatDuration(packageDurationMinutes)}`
                                       }
                                     </span>
@@ -1872,9 +1873,9 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                         {/* Rate breakdown */}
                         <div className="text-xs text-gray-500 pb-1 border-b border-gray-100">
                           {bookingType === 'hourly' ? (
-                            <>₱{hourlyRate.toLocaleString()} per hour × {totalDurationHours.toFixed(1)} hours</>
+                            <>₱{formatMoney(hourlyRate)} per hour × {totalDurationHours.toFixed(1)} hours</>
                           ) : packageUnits > 1 ? (
-                            <>₱{basePrice.toLocaleString()} per {formatDuration(packageDurationMinutes)} × {packageUnits.toFixed(0)}</>
+                            <>₱{formatMoney(basePrice)} per {formatDuration(packageDurationMinutes)} × {packageUnits.toFixed(0)}</>
                           ) : (
                             <>Package Price{packageDurationMinutes > 0 ? ` (${formatDuration(packageDurationMinutes)})` : ''}</>
                           )}
@@ -2048,12 +2049,12 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       {bookingType === 'hourly' ? (
                         <>
                           <span className="text-gray-500">Rate</span>
-                          <span className="text-blue-600 font-medium">₱{hourlyRate.toLocaleString()}/hr</span>
+                          <span className="text-blue-600 font-medium">₱{formatMoney(hourlyRate)}/hr</span>
                         </>
                       ) : selectedServiceData ? (
                         <>
                           <span className="text-gray-500">Package Price</span>
-                          <span className="text-green-600 font-medium">₱{basePrice.toLocaleString()}</span>
+                          <span className="text-green-600 font-medium">₱{formatMoney(basePrice)}</span>
                         </>
                       ) : null}
                     </div>
@@ -2062,13 +2063,13 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                         {bookingType === 'hourly' && (
                           <div className="flex justify-between text-sm text-gray-500">
                             <span>Calculation</span>
-                            <span>₱{hourlyRate.toLocaleString()} × {totalDurationHours.toFixed(1)} hrs</span>
+                            <span>₱{formatMoney(hourlyRate)} × {totalDurationHours.toFixed(1)} hrs</span>
                           </div>
                         )}
                         {bookingType === 'package' && packageUnits > 1 && (
                           <div className="flex justify-between text-sm text-gray-500">
                             <span>Calculation</span>
-                            <span>₱{basePrice.toLocaleString()} × {packageUnits.toFixed(0)}</span>
+                            <span>₱{formatMoney(basePrice)} × {packageUnits.toFixed(0)}</span>
                           </div>
                         )}
                         <div className="flex justify-between text-sm">
@@ -2094,9 +2095,9 @@ export function BookingFlow({ onComplete, providerId, providerName = 'Service Pr
                       <div className="text-center py-2">
                         <p className="text-sm text-gray-500">
                           {bookingType === 'hourly'
-                            ? `₱${hourlyRate.toLocaleString()}/hr`
+                            ? `₱${formatMoney(hourlyRate)}/hr`
                             : selectedServiceData
-                              ? `₱${basePrice.toLocaleString()}`
+                              ? `₱${formatMoney(basePrice)}`
                               : 'Select a service'
                           }
                         </p>
