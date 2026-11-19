@@ -1,11 +1,31 @@
 import express, { Request, Response } from 'express';
 import { pool } from '../config/database';
-import { verifyToken } from '../middleware/auth';
+import { verifyToken, invalidateUserAccessCache } from '../middleware/auth';
 import { auditService } from '../services/auditService';
+import { parsePagination, parseDateRange, DateRangeError } from '../utils/validation';
 import { notificationService } from '../services/notificationService';
 import { getSecurityEvents } from '../middleware/security';
 
 const router = express.Router();
+
+/**
+ * Payment statuses that represent money that was actually taken.
+ *
+ * 'succeeded' alone is wrong and was wrong everywhere it appeared. A refund does not leave
+ * a payment succeeded: refundService.ts:179 and :291 set status = 'refunded', and the
+ * dispute path at bookings.ts:4646 sets 'refunded' or 'partially_refunded' depending on the
+ * percentage - and those are the same statements that write refunded_amount. So filtering
+ * on 'succeeded' guaranteed refunded_amount was always 0 for every row examined, which made
+ * the refund subtraction and the commission proration unreachable code.
+ *
+ * The visible damage was in the other direction from the obvious one: a fully refunded
+ * payment nets zero either way, but a PARTIALLY refunded one was excluded from the window
+ * altogether, so a 10,000 booking refunded 2,000 contributed 0 to revenue instead of 8,000,
+ * and its commission vanished too. Revenue was understated and every refund total read zero.
+ *
+ * Passed as a parameter rather than interpolated so the query text stays static.
+ */
+const MONEY_BEARING_PAYMENT_STATUSES = ['succeeded', 'partially_refunded', 'refunded'];
 
 // Admin middleware - ensure user is admin
 const requireAdmin = async (req: Request & { userId?: string }, res: Response, next: Function) => {
@@ -84,8 +104,8 @@ router.get('/metrics/overview', async (req: Request & { userId?: string }, res: 
             commission_amount * (1 - LEAST(COALESCE(refunded_amount, 0) / NULLIF(gross_amount, 0), 1))
           ) FILTER (WHERE paid_at >= $1), 0) as this_month_commission,
           COALESCE(SUM(gross_amount - COALESCE(refunded_amount, 0)) FILTER (WHERE paid_at >= $2 AND paid_at < $3), 0) as last_month_revenue
-        FROM payments WHERE status = 'succeeded'
-      `, [thisMonth.toISOString(), lastMonth.toISOString(), thisMonth.toISOString()]),
+        FROM payments WHERE status = ANY($4)
+      `, [thisMonth.toISOString(), lastMonth.toISOString(), thisMonth.toISOString(), MONEY_BEARING_PAYMENT_STATUSES]),
 
       pool.query(`
         SELECT COUNT(DISTINCT client_id) + COUNT(DISTINCT provider_id) as active_users
@@ -298,7 +318,8 @@ router.get('/metrics/categories', async (req: Request & { userId?: string }, res
 
 router.get('/users', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { search, role, status, verified, limit = '50', offset = '0', sortBy = 'created_at', sortOrder = 'desc' } = req.query;
+    const { search, role, status, verified, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
+    const { limit, offset } = parsePagination(req.query);
 
     const conditions: string[] = [];
     const params: any[] = [];
@@ -351,13 +372,13 @@ router.get('/users', async (req: Request & { userId?: string }, res: Response) =
       ORDER BY u.${orderColumn} ${orderDir}
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    params.push(parseInt(limit as string), parseInt(offset as string));
+    params.push(limit, offset);
 
     const dataResult = await pool.query(dataQuery, params);
 
     return res.json({
       data: dataResult.rows,
-      meta: { total: parseInt(countResult.rows[0].total), limit: parseInt(limit as string), offset: parseInt(offset as string) },
+      meta: { total: parseInt(countResult.rows[0].total), limit: limit, offset: offset },
     });
   } catch (error) {
     console.error('Error fetching users:', error);
@@ -414,6 +435,11 @@ router.delete('/users/:id', async (req: Request & { userId?: string }, res: Resp
 
     await pool.query('UPDATE users SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id::text = $1', [userId]);
 
+    // Take effect now, not at the end of verifyToken's cache TTL. Their existing JWT stays
+    // cryptographically valid for up to 24 hours, so this is what actually ends the session
+    // of someone who is signed in at the moment they are deactivated.
+    invalidateUserAccessCache(userId);
+
     await auditService.logUserAction(adminId!, 'user.delete', userId, { oldValues: { deleted_at: null }, newValues: { deleted_at: new Date().toISOString() }, reason }, req);
 
     return res.json({ message: 'User deleted successfully' });
@@ -430,6 +456,10 @@ router.post('/users/:id/restore', async (req: Request & { userId?: string }, res
 
     await pool.query('UPDATE users SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id::text = $1', [userId]);
 
+    // Same reason as the deactivate path, in the other direction: without this a restored
+    // user keeps being turned away until the cached "inactive" answer expires.
+    invalidateUserAccessCache(userId);
+
     await auditService.logUserAction(adminId!, 'user.restore', userId, { oldValues: { deleted_at: 'timestamp' }, newValues: { deleted_at: null } }, req);
 
     return res.json({ message: 'User restored successfully' });
@@ -443,9 +473,7 @@ router.post('/users/:id/restore', async (req: Request & { userId?: string }, res
 
 router.get('/providers/pending-verification', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { limit = '20', offset = '0' } = req.query;
-    const limitNum = parseInt(limit as string);
-    const offsetNum = parseInt(offset as string);
+    const { limit: limitNum, offset: offsetNum } = parsePagination(req.query, { defaultLimit: 20 });
 
     const countResult = await pool.query(`
       SELECT COUNT(*) as total FROM users u
@@ -528,7 +556,8 @@ router.post('/providers/:id/reject', async (req: Request & { userId?: string }, 
 
 router.get('/reviews', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { status = 'all', limit = '50', offset = '0' } = req.query;
+    const { status = 'all' } = req.query;
+    const { limit, offset } = parsePagination(req.query);
 
     const conditions: string[] = ['r.deleted_at IS NULL'];
     const params: any[] = [];
@@ -557,13 +586,13 @@ router.get('/reviews', async (req: Request & { userId?: string }, res: Response)
       ORDER BY r.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    params.push(parseInt(limit as string), parseInt(offset as string));
+    params.push(limit, offset);
 
     const dataResult = await pool.query(dataQuery, params);
 
     return res.json({
       data: dataResult.rows,
-      meta: { total: parseInt(countResult.rows[0].total), limit: parseInt(limit as string), offset: parseInt(offset as string) },
+      meta: { total: parseInt(countResult.rows[0].total), limit: limit, offset: offset },
     });
   } catch (error) {
     console.error('Error fetching reviews:', error);
@@ -752,12 +781,13 @@ router.patch('/support-tickets/:id', async (req: Request & { userId?: string }, 
 
 router.get('/disputes', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { status = 'all', priority, limit = '50', offset = '0' } = req.query;
+    const { status = 'all', priority } = req.query;
+    const { limit, offset } = parsePagination(req.query);
 
     // Check if disputes table exists and has required columns
     const tableCheck = await pool.query(`SELECT to_regclass('public.disputes') as exists`);
     if (!tableCheck.rows[0].exists) {
-      return res.json({ data: [], meta: { total: 0, limit: parseInt(limit as string), offset: parseInt(offset as string) } });
+      return res.json({ data: [], meta: { total: 0, limit: limit, offset: offset } });
     }
 
     // Check what columns exist in disputes table
@@ -773,7 +803,7 @@ router.get('/disputes', async (req: Request & { userId?: string }, res: Response
 
     if (!hasRaisedBy || !hasAgainstUser) {
       console.warn('Disputes table missing required columns (raised_by, against_user)');
-      return res.json({ data: [], meta: { total: 0, limit: parseInt(limit as string), offset: parseInt(offset as string) } });
+      return res.json({ data: [], meta: { total: 0, limit: limit, offset: offset } });
     }
 
     const conditions: string[] = [];
@@ -811,13 +841,13 @@ router.get('/disputes', async (req: Request & { userId?: string }, res: Response
       ORDER BY CASE d.priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END, d.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    params.push(parseInt(limit as string), parseInt(offset as string));
+    params.push(limit, offset);
 
     const dataResult = await pool.query(dataQuery, params);
 
     return res.json({
       data: dataResult.rows,
-      meta: { total: parseInt(countResult.rows[0].total), limit: parseInt(limit as string), offset: parseInt(offset as string) },
+      meta: { total: parseInt(countResult.rows[0].total), limit: limit, offset: offset },
     });
   } catch (error) {
     console.error('Error fetching disputes:', error);
@@ -971,7 +1001,8 @@ router.get('/audit-logs/actions', async (_req: Request, res: Response) => {
 
 router.get('/audit-logs', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { userId, action, entityType, entityId, startDate, endDate, limit = '50', offset = '0' } = req.query;
+    const { userId, action, entityType, entityId, startDate, endDate } = req.query;
+    const { limit, offset } = parsePagination(req.query);
 
     const result = await auditService.getLogs({
       userId: userId as string,
@@ -980,13 +1011,13 @@ router.get('/audit-logs', async (req: Request & { userId?: string }, res: Respon
       entityId: entityId as string,
       startDate: startDate as string,
       endDate: endDate as string,
-      limit: parseInt(limit as string),
-      offset: parseInt(offset as string),
+      limit: limit,
+      offset: offset,
     });
 
     return res.json({
       data: result.data,
-      meta: { total: result.total, limit: parseInt(limit as string), offset: parseInt(offset as string) },
+      meta: { total: result.total, limit: limit, offset: offset },
     });
   } catch (error) {
     console.error('Error fetching audit logs:', error);
@@ -998,7 +1029,8 @@ router.get('/audit-logs', async (req: Request & { userId?: string }, res: Respon
 
 router.get('/bookings', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { status = 'all', limit = '50', offset = '0' } = req.query;
+    const { status = 'all', from, to } = req.query;
+    const { limit, offset } = parsePagination(req.query);
 
     const conditions: string[] = ['b.deleted_at IS NULL'];
     const params: any[] = [];
@@ -1008,6 +1040,28 @@ router.get('/bookings', async (req: Request & { userId?: string }, res: Response
       conditions.push(`b.status = $${paramIndex}`);
       params.push(status);
       paramIndex++;
+    }
+
+    // Optional as a PAIR - both or neither. parseDateRange requires both, so `?from=` alone
+    // is a 400 rather than a filter from that date; the comment here used to say "optional"
+    // flatly, which read as though one-sided worked. Erroring is the deliberate choice over
+    // silently ignoring a half-given filter: an admin who mistypes one bound should not be
+    // handed unfiltered figures that look filtered.
+    //
+    // A booking belongs to the day it was made; the date it is FOR lives in its own columns
+    // and answers a different question from "what came in this month".
+    if (from || to) {
+      try {
+        const range = parseDateRange(from, to);
+        conditions.push(`b.created_at >= $${paramIndex} AND b.created_at <= $${paramIndex + 1}`);
+        params.push(range.from.toISOString(), range.to.toISOString());
+        paramIndex += 2;
+      } catch (rangeError) {
+        if (rangeError instanceof DateRangeError) {
+          return res.status(400).json({ error: rangeError.message });
+        }
+        throw rangeError;
+      }
     }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
@@ -1028,13 +1082,13 @@ router.get('/bookings', async (req: Request & { userId?: string }, res: Response
       ORDER BY b.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    params.push(parseInt(limit as string), parseInt(offset as string));
+    params.push(limit, offset);
 
     const dataResult = await pool.query(dataQuery, params);
 
     return res.json({
       data: dataResult.rows,
-      meta: { total: parseInt(countResult.rows[0].total), limit: parseInt(limit as string), offset: parseInt(offset as string) },
+      meta: { total: parseInt(countResult.rows[0].total), limit: limit, offset: offset },
     });
   } catch (error) {
     console.error('Error fetching bookings:', error);
@@ -1046,7 +1100,8 @@ router.get('/bookings', async (req: Request & { userId?: string }, res: Response
 
 router.get('/payments', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { status, limit = '50', offset = '0' } = req.query;
+    const { status, from, to } = req.query;
+    const { limit, offset } = parsePagination(req.query);
 
     const conditions: string[] = [];
     const params: any[] = [];
@@ -1056,6 +1111,30 @@ router.get('/payments', async (req: Request & { userId?: string }, res: Response
       conditions.push(`p.status = $${paramIndex}`);
       params.push(status);
       paramIndex++;
+    }
+
+    // COALESCE(paid_at, created_at), so this table agrees with the summary below rather
+    // than quietly disagreeing with it. The summary measures revenue by paid_at (as the
+    // overview metrics do), so a payment settled in April belongs to April even if it was
+    // started in March. Filtering on created_at alone would list it under March and make
+    // the rows fail to add up to the total printed above them. paid_at alone would be
+    // worse still: it is NULL for failed and pending attempts, so they would vanish from
+    // a report whose whole job is showing what happened.
+    if (from || to) {
+      try {
+        const range = parseDateRange(from, to);
+        conditions.push(
+          `COALESCE(p.paid_at, p.created_at) >= $${paramIndex} ` +
+          `AND COALESCE(p.paid_at, p.created_at) <= $${paramIndex + 1}`
+        );
+        params.push(range.from.toISOString(), range.to.toISOString());
+        paramIndex += 2;
+      } catch (rangeError) {
+        if (rangeError instanceof DateRangeError) {
+          return res.status(400).json({ error: rangeError.message });
+        }
+        throw rangeError;
+      }
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -1074,17 +1153,131 @@ router.get('/payments', async (req: Request & { userId?: string }, res: Response
       ORDER BY p.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    params.push(parseInt(limit as string), parseInt(offset as string));
+    params.push(limit, offset);
 
     const dataResult = await pool.query(dataQuery, params);
 
     return res.json({
       data: dataResult.rows,
-      meta: { total: parseInt(countResult.rows[0].total), limit: parseInt(limit as string), offset: parseInt(offset as string) },
+      meta: { total: parseInt(countResult.rows[0].total), limit: limit, offset: offset },
     });
   } catch (error) {
     console.error('Error fetching payments:', error);
     return res.status(500).json({ error: 'Failed to fetch payments' });
+  }
+});
+
+// ==================== REPORTS ====================
+
+/**
+ * Totals for one reporting window.
+ *
+ * The revenue arithmetic is lifted from /metrics/overview deliberately, expression for
+ * expression, rather than written afresh. Overview learned the hard way that summing
+ * gross_amount alone counts money refunded to a client as revenue the platform earned,
+ * and that commission has to be reduced *in proportion* to what was refunded rather than
+ * by the refund itself, or a half-refunded booking drives the commission total negative.
+ * A second, independently written query would be free to reintroduce either bug, and the
+ * failure would be a report that quietly disagrees with the dashboard above it - the one
+ * thing worse than no report at all. If the definition of revenue changes, it has to
+ * change in both places, which is why they are worded identically.
+ */
+router.get('/reports/summary', async (req: Request & { userId?: string }, res: Response) => {
+  try {
+    let range;
+    try {
+      range = parseDateRange(req.query.from, req.query.to);
+    } catch (rangeError) {
+      if (rangeError instanceof DateRangeError) {
+        return res.status(400).json({ error: rangeError.message });
+      }
+      throw rangeError;
+    }
+
+    const fromIso = range.from.toISOString();
+    const toIso = range.to.toISOString();
+
+    const [moneyResult, statusResult, methodResult, bookingResult] = await Promise.all([
+      pool.query(`
+        SELECT
+          COALESCE(SUM(gross_amount), 0) AS gross,
+          COALESCE(SUM(COALESCE(refunded_amount, 0)), 0) AS refunded,
+          COALESCE(SUM(gross_amount - COALESCE(refunded_amount, 0)), 0) AS net,
+          COALESCE(SUM(
+            commission_amount * (1 - LEAST(COALESCE(refunded_amount, 0) / NULLIF(gross_amount, 0), 1))
+          ), 0) AS commission,
+          COUNT(*) AS count
+        FROM payments
+        WHERE status = ANY($3) AND paid_at >= $1 AND paid_at <= $2
+      `, [fromIso, toIso, MONEY_BEARING_PAYMENT_STATUSES]),
+
+      // Every attempt in the window, not just the settled ones - a report that hides
+      // failures cannot answer "why was this month low".
+      pool.query(`
+        SELECT status, COUNT(*) AS count
+        FROM payments
+        WHERE COALESCE(paid_at, created_at) >= $1 AND COALESCE(paid_at, created_at) <= $2
+        GROUP BY status
+      `, [fromIso, toIso]),
+
+      // Where the card-to-QR-Ph shift shows up. COALESCE because rows predating
+      // payment_method_type, and any attempt abandoned before a method was attached,
+      // have none - lumping those into 'card' would overstate card and is exactly the
+      // mislabelling the qrph work removed elsewhere.
+      pool.query(`
+        SELECT
+          COALESCE(NULLIF(payment_method_type, ''), 'unknown') AS method,
+          COUNT(*) AS count,
+          COALESCE(SUM(gross_amount - COALESCE(refunded_amount, 0)), 0) AS net
+        FROM payments
+        WHERE status = ANY($3) AND paid_at >= $1 AND paid_at <= $2
+        GROUP BY 1
+        ORDER BY net DESC
+      `, [fromIso, toIso, MONEY_BEARING_PAYMENT_STATUSES]),
+
+      pool.query(`
+        SELECT status, COUNT(*) AS count
+        FROM bookings
+        WHERE deleted_at IS NULL AND created_at >= $1 AND created_at <= $2
+        GROUP BY status
+      `, [fromIso, toIso]),
+    ]);
+
+    const money = moneyResult.rows[0];
+    const net = parseFloat(money.net) || 0;
+    const commission = parseFloat(money.commission) || 0;
+
+    const tally = (rows: Array<{ status: string; count: string }>) =>
+      rows.reduce<Record<string, number>>((acc, r) => {
+        acc[String(r.status)] = parseInt(r.count, 10) || 0;
+        return acc;
+      }, {});
+
+    return res.json({
+      data: {
+        range: { from: range.fromDate, to: range.toDate, timezone: 'Asia/Manila' },
+        revenue: {
+          gross: parseFloat(money.gross) || 0,
+          refunded: parseFloat(money.refunded) || 0,
+          net,
+          commission,
+          // What providers are owed out of it. Derived here so the UI cannot arrive at a
+          // different number by subtracting in a different order.
+          providerNet: Math.round((net - commission) * 100) / 100,
+          settledCount: parseInt(money.count, 10) || 0,
+        },
+        paymentsByStatus: tally(statusResult.rows),
+        byMethod: methodResult.rows.map((r) => ({
+          method: String(r.method),
+          count: parseInt(r.count, 10) || 0,
+          net: parseFloat(r.net) || 0,
+        })),
+        bookingsByStatus: tally(bookingResult.rows),
+      },
+    });
+  } catch (error) {
+    console.error('Error building report summary:', error);
+    return res.status(500).json({ error: 'Failed to build report summary' });
   }
 });
 
@@ -1093,8 +1286,8 @@ router.get('/payments', async (req: Request & { userId?: string }, res: Response
 // Get security events
 router.get('/security/events', async (req: Request & { userId?: string }, res: Response) => {
   try {
-    const { limit = '100' } = req.query;
-    const events = getSecurityEvents(parseInt(limit as string));
+    const { limit } = parsePagination(req.query, { defaultLimit: 100, maxLimit: 1000 });
+    const events = getSecurityEvents(limit);
 
     return res.json({
       data: events,

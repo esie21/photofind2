@@ -18,6 +18,7 @@ import {
   handleUpload,
 } from '../services/uploadService';
 import { uploadLimiter } from '../middleware/security';
+import { parsePagination } from '../utils/validation';
 
 interface AuthedRequest extends Request {
   userId?: string;
@@ -244,8 +245,7 @@ router.get('/tickets/my', verifyToken, async (req: AuthedRequest, res: Response)
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const limit = Math.min(50, parseInt(req.query.limit as string) || 20);
-    const offset = parseInt(req.query.offset as string) || 0;
+    const { limit, offset } = parsePagination(req.query, { defaultLimit: 20, maxLimit: 50 });
 
     const result = await pool.query(
       `SELECT t.*, s.title as service_title,

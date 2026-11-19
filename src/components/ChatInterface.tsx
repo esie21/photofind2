@@ -83,12 +83,6 @@ const participantId = useMemo(() => {
 
     const resolved = fromProp || fromProviderBookingId || fromProviderBookingIdCamel || fromProviderBooking || null;
 
-    console.log('ChatInterface bookingId resolved:', {
-      bookingIdProp,
-      fromProp,
-      providerBookingId: provider?.booking_id,
-      resolved
-    });
     return resolved;
   }, [bookingIdProp, provider]);
 
@@ -444,7 +438,7 @@ const participantId = useMemo(() => {
                           </p>
                         )}
                         {attachmentUrl && msg.attachment_type === 'image' && (
-                          <img src={attachmentUrl} alt={msg.attachment_name || 'attachment'} className="mt-2 max-h-56 rounded-xl" />
+                          <img src={attachmentUrl} alt={msg.attachment_name || 'attachment'} loading="lazy" decoding="async" className="mt-2 max-h-56 rounded-xl" />
                         )}
                         {attachmentUrl && msg.attachment_type === 'video' && (
                           <video src={attachmentUrl} controls className="mt-2 max-h-64 rounded-xl w-full" />

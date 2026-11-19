@@ -263,6 +263,8 @@ export function ConfirmCompletionModal({ booking, onClose, onSuccess }: ConfirmC
                       <img
                         src={getEvidenceUrl(e.file_url)}
                         alt={e.evidence_type}
+                        loading="lazy"
+                        decoding="async"
                         className="w-full h-32 object-cover rounded-lg bg-gray-100"
                         onError={(ev) => {
                           const target = ev.currentTarget;

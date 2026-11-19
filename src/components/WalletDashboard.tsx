@@ -101,30 +101,49 @@ export function WalletDashboard() {
     }
   };
 
+  // Money coming in is green and money going out is red, and every type the backend can
+  // write is named here. The types below the original five used to fall through to the
+  // grey "unknown" default: escrow_released (a completed booking's funds moving from
+  // pending to available), refund (a cancelled or disputed booking's escrow going back to
+  // the client) and adjustment (an admin correction, or commission reversed on a cancelled
+  // cash booking). Those are some of the largest movements a provider sees, and they were
+  // rendering as anonymous grey rows with a clock beside them.
   const getTransactionIcon = (type: string) => {
     switch (type) {
       case 'payment_received':
+      case 'escrow_released':
         return <ArrowDownLeft className="w-5 h-5 text-green-600" />;
       case 'payout_requested':
       case 'payout_completed':
         return <ArrowUpRight className="w-5 h-5 text-red-600" />;
       case 'payout_cancelled':
         return <XCircle className="w-5 h-5 text-gray-600" />;
+      case 'refund':
+        return <XCircle className="w-5 h-5 text-red-600" />;
       case 'commission_deducted':
         return <ArrowUpRight className="w-5 h-5 text-red-600" />;
+      // An adjustment can go either way, so it takes its direction from the amount
+      // rather than from its type.
+      case 'adjustment':
+        return <Clock className="w-5 h-5 text-gray-600" />;
       default:
         return <Clock className="w-5 h-5 text-gray-600" />;
     }
   };
 
-  const getTransactionColor = (type: string) => {
+  const getTransactionColor = (type: string, amount?: number) => {
     switch (type) {
       case 'payment_received':
+      case 'escrow_released':
+      case 'payout_cancelled':
         return 'text-green-600';
       case 'payout_requested':
       case 'payout_completed':
       case 'commission_deducted':
+      case 'refund':
         return 'text-red-600';
+      case 'adjustment':
+        return (amount ?? 0) < 0 ? 'text-red-600' : 'text-green-600';
       default:
         return 'text-gray-600';
     }
@@ -353,7 +372,7 @@ export function WalletDashboard() {
                       <p className="text-xs text-gray-500">{formatDate(tx.created_at)}</p>
                     </div>
                   </div>
-                  <p className={`font-medium ${getTransactionColor(tx.type)}`}>
+                  <p className={`font-medium ${getTransactionColor(tx.type, tx.amount)}`}>
                     {tx.amount > 0 ? '+' : ''}{php(tx.amount)}
                   </p>
                 </div>
@@ -426,7 +445,7 @@ export function WalletDashboard() {
                       <p className="text-sm text-gray-600 max-w-xs truncate">{tx.description}</p>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`font-medium ${getTransactionColor(tx.type)}`}>
+                      <span className={`font-medium ${getTransactionColor(tx.type, tx.amount)}`}>
                         {tx.amount > 0 ? '+' : ''}{php(tx.amount)}
                       </span>
                     </td>

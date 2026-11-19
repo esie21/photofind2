@@ -11,6 +11,12 @@ import {
 } from '../config/pricingConfig';
 import { computePaymentDueAt, PAYMENT_REMINDER_LEAD_HOURS, CASH_CONFIRM_GRACE_MINUTES } from '../config/paymentConfig';
 import { releaseEscrow, settleCashPayment } from '../services/walletService';
+import {
+  settleCancelledBooking,
+  PaymentInFlightError,
+  RefundGatewayError,
+  type CancellationSettlement,
+} from '../services/refundService';
 import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
 import { auditService } from '../services/auditService';
 import {
@@ -1321,34 +1327,91 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
       }
     }
 
+    const isAdminAction = role === 'admin' && !isParticipant;
+    let settlement: CancellationSettlement | null = null;
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [existing.provider_id]);
 
-      if (role === 'admin') {
-        await client.query('DELETE FROM bookings WHERE id::text = $1', [bookingId]);
-        await client.query('COMMIT');
-        // The row is gone but its slots still name it, and nothing else would ever match
-        // them again - time_slots.booking_id has no foreign key to cascade from.
-        await releaseBookingSlots(bookingId);
-        return res.json({ success: true });
+      // Re-read under a row lock: everything above was read outside the transaction, so
+      // two deletes arriving together would otherwise both settle and debit the escrow
+      // twice. Admins skip the status guard (that is the point of the admin path) but not
+      // the lock - concurrent settlement is a data problem, not a permissions one.
+      const lockedRes = await client.query(
+        `SELECT status, dispute_raised FROM bookings WHERE id::text = $1 FOR UPDATE`,
+        [bookingId]
+      );
+      const locked = lockedRes.rows[0];
+      if (!locked) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Booking not found' });
+      }
+      if (['cancelled', 'rejected'].includes(String(locked.status))) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'This booking is already cancelled' });
+      }
+      if (!isAdminAction && (String(locked.status) === 'completed' || locked.dispute_raised)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Cannot cancel this booking' });
       }
 
+      // Unwind the money before the status moves - the client is refunded in full and the
+      // escrow comes back out of the provider's pending_balance. Throws rather than
+      // half-settling, so a refund that cannot be issued leaves the booking untouched.
+      settlement = await settleCancelledBooking(client, {
+        bookingId,
+        providerUserId: existingProviderUserId,
+        reason: isAdminAction
+          ? 'Cancelled by an administrator'
+          : existingClientUserId === String(currentUserId)
+            ? 'Cancelled by the client'
+            : 'Cancelled by the provider',
+        cancelledBy: isAdminAction
+          ? 'admin'
+          : existingClientUserId === String(currentUserId)
+            ? 'client'
+            : 'provider',
+      });
+
+      // Admin "delete" is a soft delete, not a DELETE.
+      //
+      // It used to remove the row outright. payments, transactions, reviews and disputes
+      // all carry a booking_id, and only some of those cascade - so a paid booking could
+      // be erased while its payment row, its ledger entries and the client's money in
+      // escrow all survived, pointing at a booking that no longer existed and could never
+      // be reconciled against. deleted_at hides it from every listing (they already filter
+      // on it) while leaving the money trail intact and refundable, which is what the
+      // settlement above depends on.
       const updatedRes = await client.query(
         `
           UPDATE bookings
           SET status = 'cancelled',
               cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP),
+              cancellation_reason = COALESCE(cancellation_reason, $2),
+              deleted_at = CASE WHEN $3::boolean THEN COALESCE(deleted_at, CURRENT_TIMESTAMP) ELSE deleted_at END,
               updated_at = CURRENT_TIMESTAMP
           WHERE id::text = $1
           RETURNING *
         `,
-        [bookingId]
+        [
+          bookingId,
+          isAdminAction
+            ? 'Cancelled by an administrator'
+            : existingClientUserId === String(currentUserId)
+              ? 'Cancelled by the client'
+              : 'Cancelled by the provider',
+          isAdminAction,
+        ]
       );
       await client.query('COMMIT');
 
       await releaseBookingSlots(bookingId);
+
+      if (isAdminAction) {
+        return res.json({ success: true, data: updatedRes.rows[0], settlement });
+      }
 
       // Send cancellation notification to the other party
       try {
@@ -1369,7 +1432,7 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
         console.error('Failed to send cancellation notification:', notifError);
       }
 
-      return res.json({ data: updatedRes.rows[0] });
+      return res.json({ data: updatedRes.rows[0], ...(settlement ? { settlement } : {}) });
     } catch (e) {
       try {
         await client.query('ROLLBACK');
@@ -1380,6 +1443,20 @@ router.delete('/:id', verifyToken, async (req: Request & { userId?: string }, re
       client.release();
     }
   } catch (error) {
+    // As in PUT /:id - the booking is still live in both of these cases, and saying so
+    // is the difference between "try again" and "did that work?".
+    if (error instanceof PaymentInFlightError) {
+      return res.status(409).json({
+        error: 'A payment for this booking is being processed right now. Try again in a moment.',
+        payment_in_flight: true,
+      });
+    }
+    if (error instanceof RefundGatewayError) {
+      return res.status(502).json({
+        error: 'The booking was not cancelled because the refund could not be processed. Please try again.',
+        detail: error.message,
+      });
+    }
     console.error('Error deleting booking:', error);
     return res.status(500).json({ error: 'Failed to delete booking' });
   }
@@ -1448,18 +1525,6 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
   if (!bookingId) return res.status(400).json({ error: 'Invalid booking id' });
 
   try {
-    await pool.query(
-      `UPDATE bookings
-       SET status = 'cancelled',
-           cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP),
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id::text = $1
-         AND status = 'pending'
-         AND start_date IS NOT NULL
-         AND start_date <= CURRENT_TIMESTAMP`,
-      [bookingId]
-    );
-
     // Check what tables exist
     const tablesCheck = await pool.query(`
       SELECT table_name FROM information_schema.tables
@@ -1505,6 +1570,31 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       return res.status(400).json({ error: 'Missing status' });
     }
 
+    // Lapse a request the provider never answered before its own start time.
+    //
+    // This used to be the first statement in the handler, above the ownership check, so
+    // any signed-in user could move someone else's booking to 'cancelled' by naming its id
+    // - the write ran before anything established they had a reason to be here. Same sweep,
+    // now behind the check, and it deliberately only touches bookings that are still
+    // 'pending': the money paths below are for bookings that were accepted, and an unpaid
+    // pending request has nothing to unwind.
+    const lapsed = await pool.query(
+      `UPDATE bookings
+       SET status = 'cancelled',
+           cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP),
+           cancellation_reason = COALESCE(cancellation_reason, $2),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id::text = $1
+         AND status = 'pending'
+         AND start_date IS NOT NULL
+         AND start_date <= CURRENT_TIMESTAMP
+       RETURNING status`,
+      [bookingId, 'The booking start time passed before it was accepted']
+    );
+    if (lapsed.rows[0]) {
+      existing.status = lapsed.rows[0].status;
+    }
+
     // 'completed' is intentionally not settable through this generic endpoint - it
     // must go through POST /:id/complete (evidence upload) -> PUT /:id/confirm (or
     // the 48-hour auto-confirm / dispute resolution), which are the only paths that
@@ -1542,10 +1632,45 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       return res.status(400).json({ error: 'Cannot set booking back to pending' });
     }
 
+    let settlement: CancellationSettlement | null = null;
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [existing.provider_id]);
+
+      if (isCancel) {
+        // Re-read the booking under a row lock and re-run the guards.
+        //
+        // Everything above this point was read outside the transaction, so two cancels
+        // arriving together both saw 'confirmed' and both passed. That was survivable
+        // while cancelling was a status change; now that it refunds, it would take the
+        // escrow out of the provider's wallet twice. (PayMongo's idempotency key means
+        // the client would still only be paid back once, which is the worse shape of the
+        // two: the books would be short by exactly one escrow with nothing to show why.)
+        const lockedRes = await client.query(
+          `SELECT status, dispute_raised FROM bookings WHERE id::text = $1 FOR UPDATE`,
+          [bookingId]
+        );
+        const locked = lockedRes.rows[0];
+        if (!locked) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'Booking not found' });
+        }
+        if (['completed', 'cancelled', 'rejected'].includes(String(locked.status)) || locked.dispute_raised) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Cannot cancel this booking' });
+        }
+
+        // Unwind the money before the status moves. Throws rather than half-settling, so
+        // a refund that cannot be issued leaves the booking un-cancelled and retryable.
+        settlement = await settleCancelledBooking(client, {
+          bookingId,
+          providerUserId,
+          reason: isClient ? 'Cancelled by the client' : 'Cancelled by the provider',
+          cancelledBy: isClient ? 'client' : 'provider',
+        });
+      }
 
       if (isAccept) {
         const conflictRes = await client.query(
@@ -1591,6 +1716,8 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       }
       if (isCancel) {
         updates.push(`cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP)`);
+        updates.push(`cancellation_reason = COALESCE(cancellation_reason, $${idx++})`);
+        values.push(isClient ? 'Cancelled by the client' : 'Cancelled by the provider');
       }
 
       values.push(bookingId);
@@ -1676,7 +1803,7 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
         }
       }
 
-      return res.json({ data: updated });
+      return res.json({ data: updated, ...(settlement ? { settlement } : {}) });
     } catch (e) {
       try {
         await client.query('ROLLBACK');
@@ -1687,6 +1814,21 @@ router.put('/:id', verifyToken, async (req: Request & { userId?: string }, res: 
       client.release();
     }
   } catch (error) {
+    // A cancellation that could not settle must not read as a generic server error: in
+    // both cases below the booking is deliberately still live, and the caller needs to
+    // know that rather than being left unsure whether it went through.
+    if (error instanceof PaymentInFlightError) {
+      return res.status(409).json({
+        error: 'A payment for this booking is being processed right now. Try again in a moment.',
+        payment_in_flight: true,
+      });
+    }
+    if (error instanceof RefundGatewayError) {
+      return res.status(502).json({
+        error: 'The booking was not cancelled because the refund could not be processed. Please try again.',
+        detail: error.message,
+      });
+    }
     console.error('Error updating booking:', error);
     return res.status(500).json({ error: 'Failed to update booking' });
   }

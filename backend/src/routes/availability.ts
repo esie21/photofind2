@@ -1053,7 +1053,18 @@ async function releaseExpiredHolds() {
 
 // ==================== HOLD EXPIRATION CLEANUP (call periodically) ====================
 
-router.post('/cleanup-holds', async (_req: Request, res: Response) => {
+// Admin-only. This was unauthenticated: anyone who knew the path could POST to it and
+// write to time_slots. The damage available is genuinely small - it only releases holds
+// that have already expired, which every slot-reading route does anyway - but an open
+// write endpoint is not something to leave sitting there on the strength of its current
+// WHERE clause, and it is trivially a way to make the server do work on demand.
+//
+// releaseExpiredHolds() already runs on the read paths, so nothing depends on this being
+// callable; it stays for manual use and for an external scheduler.
+router.post('/cleanup-holds', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
+  if ((req as any).role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
   try {
     const result = await pool.query(
       `UPDATE time_slots

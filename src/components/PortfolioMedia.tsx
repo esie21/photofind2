@@ -84,5 +84,8 @@ export function PortfolioPlayer({ path, meta, alt }: PortfolioMediaProps) {
     );
   }
 
-  return <img key={path} src={getUploadUrl(path)} alt={alt} />;
+  // decoding only, no loading="lazy": this is the full-size viewer the user has just
+  // opened, so deferring it would be either a no-op or an outright delay of the one
+  // image they asked for. The thumbnail above is the one worth deferring.
+  return <img key={path} src={getUploadUrl(path)} alt={alt} decoding="async" />;
 }

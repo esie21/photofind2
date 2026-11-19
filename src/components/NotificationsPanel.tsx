@@ -110,12 +110,15 @@ export function NotificationsPanel({ onNavigate }: NotificationsPanelProps) {
         setNewlyArrivedId((current) => (current === notification.id ? null : current));
       }, 1600);
 
-      // Play notification sound (optional)
-      try {
-        const audio = new Audio('/notification.mp3');
-        audio.volume = 0.5;
-        audio.play().catch(() => {});
-      } catch {}
+      // No sound. There was a `new Audio('/notification.mp3')` here, but there is no
+      // public/ directory in this project and no such file has ever been built into it -
+      // so every notification fired a request that 404'd, and the .catch(() => {})
+      // swallowed the failure. It has never once made a sound.
+      //
+      // To actually enable it: add the file at public/notification.mp3 (Vite copies
+      // public/ to the build root verbatim), then restore the three lines. Worth knowing
+      // that browsers block audio until the user has interacted with the page, so it will
+      // stay silent on a freshly loaded tab regardless.
     });
 
     socket.on('notification:count', ({ count }: { count: number }) => {

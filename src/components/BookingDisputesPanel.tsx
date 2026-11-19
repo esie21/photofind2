@@ -1,3 +1,4 @@
+import { formatMoney } from '../utils/currency';
 import { useState, useEffect } from 'react';
 import { useModal } from '../hooks/useModal';
 import { AlertTriangle, CheckCircle, X, Loader2, Image, Eye, User, Clock, FileText, Calendar, PhilippinePeso } from 'lucide-react';
@@ -130,6 +131,8 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                 <img
                   src={getEvidenceUrl(e.file_url)}
                   alt={e.caption || e.evidence_type}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-32 object-cover rounded-lg bg-gray-100"
                   onError={(ev) => {
                     const target = ev.currentTarget;
@@ -313,6 +316,8 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                           <img
                             src={getEvidenceUrl(e.file_url)}
                             alt={e.evidence_type}
+                            loading="lazy"
+                            decoding="async"
                             className="w-20 h-20 object-cover rounded-lg bg-gray-100"
                             onError={(ev) => {
                               const target = ev.currentTarget;
@@ -440,7 +445,7 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
                   </p>
                   <div className="flex items-center gap-2">
                     <p className="text-sm font-medium text-gray-900">
-                      ₱{Number((selectedDispute as any).total_price || (selectedDispute as any).totalPrice || 0).toLocaleString()}
+                      ₱{formatMoney((selectedDispute as any).total_price || (selectedDispute as any).totalPrice || 0)}
                     </p>
                     <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
                       (selectedDispute as any).payment_status === 'paid' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
@@ -726,12 +731,12 @@ export function BookingDisputesPanel({ onRefresh }: BookingDisputesPanelProps) {
               <div className="bg-gray-50 rounded-xl p-3 text-sm text-left mb-4">
                 {resolutionResult.details.released_to_provider > 0 && (
                   <p className="text-green-700">
-                    Released to provider: <span className="font-medium">₱{resolutionResult.details.released_to_provider.toFixed(2)}</span>
+                    Released to provider: <span className="font-medium">₱{formatMoney(resolutionResult.details.released_to_provider)}</span>
                   </p>
                 )}
                 {resolutionResult.details.refunded_to_client > 0 && (
                   <p className="text-blue-700">
-                    Refunded to client: <span className="font-medium">₱{resolutionResult.details.refunded_to_client.toFixed(2)}</span>
+                    Refunded to client: <span className="font-medium">₱{formatMoney(resolutionResult.details.refunded_to_client)}</span>
                   </p>
                 )}
                 {Number((resolutionResult.details as any).manual_refund_required) > 0 && (

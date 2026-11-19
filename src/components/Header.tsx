@@ -1,10 +1,18 @@
-import { useState } from 'react';
+import { useState, lazy, Suspense } from 'react';
 import { Menu } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { NotificationsPanel } from './NotificationsPanel';
 import { MobileNav } from './MobileNav';
 import { Notification } from '../api/services/notificationService';
 import { UserAccountMenu, AccountMenuTarget } from './UserAccountMenu';
+
+// Split out because this is the only thing in the header that pulls in socket.io-client,
+// and it renders for signed-in users only - as a static import it put the whole websocket
+// client in the entry chunk for anonymous visitors on the landing page, who can never see
+// a notification bell. It loads a beat after the header paints; fallback={null} rather
+// than a placeholder so the header's layout doesn't shift when the real bell arrives.
+const NotificationsPanel = lazy(() =>
+  import('./NotificationsPanel').then((m) => ({ default: m.NotificationsPanel })),
+);
 
 interface HeaderProps {
   onViewChange: (view: 'landing' | 'client' | 'provider' | 'booking' | 'admin' | 'messages') => void;
@@ -97,7 +105,9 @@ export function Header({ onViewChange, currentView, onAuthClick, onNotificationN
               </>
             ) : (
               <>
-                <NotificationsPanel onNavigate={onNotificationNavigate} />
+                <Suspense fallback={null}>
+                  <NotificationsPanel onNavigate={onNotificationNavigate} />
+                </Suspense>
                 <UserAccountMenu onNavigate={onAccountMenuNavigate} />
                 <button
                   onClick={() => setMobileNavOpen(true)}

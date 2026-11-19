@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
 import path from 'path';
+import { getProviderStats } from '../services/providerStats';
+import { rankScore } from '../utils/providerRanking';
 
 const router = Router();
 
@@ -39,7 +41,7 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const q = (req.query.q as string) || '';
     const category = (req.query.category as string) || '';
-    const sort = (req.query.sort as string) || 'recommended';
+    const sort = (req.query.sort as string) || 'best';
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 12));
     const offset = (page - 1) * limit;
@@ -86,6 +88,103 @@ router.get('/', async (req: Request, res: Response) => {
         : '';
       whereClauses.push(`(u.category = $${values.length}${serviceCategoryMatch})`);
     }
+
+    // ---- Filters (all optional, all parameterised) ----
+    // Absent -> no filter; present but malformed -> 400, rather than silently ignoring the
+    // filter and showing the user results they asked not to see.
+    const num = (v: unknown): number | null | 'bad' => {
+      if (v === undefined || v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 'bad';
+    };
+    const minPrice = num(req.query.min_price);
+    const maxPrice = num(req.query.max_price);
+    const minRating = num(req.query.min_rating);
+    const lat = num(req.query.lat);
+    const lng = num(req.query.lng);
+    const radiusKm = num(req.query.radius_km);
+    if ([minPrice, maxPrice, minRating, lat, lng, radiusKm].includes('bad')) {
+      return res.status(400).json({ error: 'min_price, max_price, min_rating, lat, lng and radius_km must be numbers' });
+    }
+    if ((minPrice !== null && (minPrice as number) < 0) || (maxPrice !== null && (maxPrice as number) < 0)) {
+      return res.status(400).json({ error: 'Prices cannot be negative' });
+    }
+    if (minPrice !== null && maxPrice !== null && (minPrice as number) > (maxPrice as number)) {
+      return res.status(400).json({ error: 'min_price cannot be greater than max_price' });
+    }
+    if (minRating !== null && ((minRating as number) < 0 || (minRating as number) > 5)) {
+      return res.status(400).json({ error: 'min_rating must be between 0 and 5' });
+    }
+    if ((lat === null) !== (lng === null)) {
+      return res.status(400).json({ error: 'lat and lng must be provided together' });
+    }
+    if (lat !== null && (Math.abs(lat as number) > 90 || Math.abs(lng as number) > 180)) {
+      return res.status(400).json({ error: 'lat/lng out of range' });
+    }
+    if (radiusKm !== null && (lat === null || (radiusKm as number) <= 0 || (radiusKm as number) > 500)) {
+      return res.status(400).json({ error: 'radius_km must be between 0 and 500 and needs lat/lng' });
+    }
+    if (sort === 'distance' && lat === null) {
+      return res.status(400).json({ error: 'sort=distance needs lat and lng' });
+    }
+
+    if (minPrice !== null || maxPrice !== null) {
+      // Matches a provider offering ANY service in the range (same rule as search/category above).
+      const priceConds: string[] = [];
+      if (minPrice !== null) { values.push(minPrice); priceConds.push(`sp.price >= $${values.length}`); }
+      if (maxPrice !== null) { values.push(maxPrice); priceConds.push(`sp.price <= $${values.length}`); }
+      whereClauses.push(`EXISTS (SELECT 1 FROM services sp WHERE sp.provider_id = ${providerIdExpr} AND ${priceConds.join(' AND ')})`);
+    }
+    if (minRating !== null) {
+      values.push(minRating);
+      whereClauses.push(`u.rating >= $${values.length}`);
+    }
+    if (String(req.query.verified || '') === '1' || String(req.query.verified || '') === 'true') {
+      whereClauses.push('u.is_verified = TRUE');
+    }
+
+    const availableDate = req.query.available_date ? String(req.query.available_date) : '';
+    if (availableDate) {
+      const parsed = new Date(`${availableDate}T00:00:00Z`);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(availableDate) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== availableDate) {
+        return res.status(400).json({ error: 'available_date must be a real date in YYYY-MM-DD format' });
+      }
+      values.push(availableDate);
+      const d = `$${values.length}::date`;
+      // Same sources the booking calendar uses. A day-specific override wins: unavailable
+      // removes the provider, available keeps them. Otherwise the provider needs a weekly
+      // rule for that weekday (Sunday = 0 in both Postgres DOW and availability_rules).
+      // Slots are generated lazily when a provider's calendar is opened, so they are only
+      // consulted when they already exist for that date - then at least one must be free.
+      whereClauses.push(`(
+        CASE
+          WHEN EXISTS (SELECT 1 FROM availability_overrides ao WHERE ao.provider_id::text = u.id::text AND ao.override_date = ${d})
+            THEN EXISTS (SELECT 1 FROM availability_overrides ao WHERE ao.provider_id::text = u.id::text AND ao.override_date = ${d} AND ao.is_available = TRUE)
+          ELSE EXISTS (SELECT 1 FROM availability_rules ar WHERE ar.provider_id::text = u.id::text AND ar.is_active = TRUE AND ar.day_of_week = EXTRACT(DOW FROM ${d})::int)
+        END
+        AND (
+          NOT EXISTS (SELECT 1 FROM time_slots t WHERE t.provider_id::text = u.id::text AND DATE(t.start_datetime) = ${d})
+          OR EXISTS (SELECT 1 FROM time_slots t WHERE t.provider_id::text = u.id::text AND DATE(t.start_datetime) = ${d}
+                       AND t.start_datetime > NOW()
+                       AND (t.status = 'available' OR (t.status = 'held' AND t.hold_expires_at <= NOW())))
+        )
+      )`);
+    }
+
+    // Great-circle distance in km (haversine). Providers without coordinates have a NULL
+    // distance and are excluded whenever a location is supplied.
+    let distanceExpr = '';
+    if (lat !== null) {
+      values.push(lat);
+      const latP = `$${values.length}::float8`;
+      values.push(lng);
+      const lngP = `$${values.length}::float8`;
+      distanceExpr = `(6371 * 2 * ASIN(SQRT(LEAST(1,
+        POWER(SIN(RADIANS(u.latitude - ${latP}) / 2), 2)
+        + COS(RADIANS(${latP})) * COS(RADIANS(u.latitude)) * POWER(SIN(RADIANS(u.longitude - ${lngP}) / 2), 2)))))`;
+      whereClauses.push('u.latitude IS NOT NULL AND u.longitude IS NOT NULL');
+      if (radiusKm !== null) whereClauses.push(`${distanceExpr} <= ${radiusKm}`);
+    }
     const searchClause = whereClauses.length ? `AND ${whereClauses.join(' AND ')}` : '';
 
     const serviceSelectParts = [`id`, `title`, `price`];
@@ -107,6 +206,10 @@ router.get('/', async (req: Request, res: Response) => {
     // (see serviceSelect above), not a raw column, but Postgres resolves ORDER BY
     // against output aliases so this is safe - `sort` itself is never interpolated,
     // only used to pick one of these fixed literals, so there's no injection surface.
+    // 'best' (alias: the old 'recommended') ranks by a blended score - rating, response time
+    // and completion rate - that can't be expressed as a column, so it is computed in
+    // JS (see below) and the SQL ORDER BY is only used by the other sorts.
+    const useScoreSort = sort === 'best' || sort === 'recommended' || !['rating', 'price-low', 'price-high', 'distance'].includes(sort);
     let orderBy: string;
     switch (sort) {
       case 'rating':
@@ -118,12 +221,40 @@ router.get('/', async (req: Request, res: Response) => {
       case 'price-high':
         orderBy = 'service_price DESC NULLS LAST, u.name ASC';
         break;
-      case 'recommended':
-      default:
-        // Verified and well-rated providers surface first; alphabetical is only the
-        // final tiebreaker, not the primary order it used to be.
-        orderBy = 'u.is_verified DESC, u.rating DESC NULLS LAST, u.review_count DESC NULLS LAST, u.name ASC';
+      case 'distance':
+        orderBy = 'distance_km ASC, u.name ASC';
         break;
+      default:
+        orderBy = 'u.name ASC';
+        break;
+    }
+
+    // Score every matching provider, then page the ranked ids. Stats come from one grouped
+    // query for the whole match set, so cost scales with matches, not with page count.
+    let pageIds: string[] | null = null;
+    let scoreById = new Map<string, number>();
+    let scoredTotal = 0;
+    if (useScoreSort) {
+      const idsRes = await pool.query(
+        `SELECT u.id::text AS id, u.rating, u.review_count, u.is_verified, u.name
+           FROM users u ${providersJoin}
+          WHERE u.role = 'provider' ${searchClause}`,
+        values
+      );
+      const stats = await getProviderStats(idsRes.rows.map((r: any) => r.id));
+      const ranked = idsRes.rows
+        .map((r: any) => ({
+          id: String(r.id),
+          name: String(r.name || ''),
+          verified: !!r.is_verified,
+          reviews: parseInt(r.review_count) || 0,
+          score: rankScore(parseFloat(r.rating) || 0, parseInt(r.review_count) || 0, stats.get(String(r.id))),
+        }))
+        .sort((a: any, b: any) =>
+          b.score - a.score || Number(b.verified) - Number(a.verified) || b.reviews - a.reviews || a.name.localeCompare(b.name));
+      scoredTotal = ranked.length;
+      scoreById = new Map(ranked.map((r: any) => [r.id, r.score]));
+      pageIds = ranked.slice(offset, offset + limit).map((r: any) => r.id);
     }
 
     // Use LATERAL join to fetch featured service
@@ -132,6 +263,7 @@ router.get('/', async (req: Request, res: Response) => {
     // full portfolio - up to 24 paths each, plus captions, albums and poster paths -
     // was bytes no caller has ever read. GET /providers/:id still returns them.
     const sql = `SELECT u.id, u.email, u.name, u.role, u.profile_image, u.bio, u.years_experience, u.location, u.category, u.title, u.rating, u.review_count, u.is_verified,
+      ${distanceExpr ? `${distanceExpr} AS distance_km,` : ''}
       ${serviceSelect}
       FROM users u
       ${providersJoin}
@@ -142,17 +274,16 @@ router.get('/', async (req: Request, res: Response) => {
         ORDER BY ${featuredOrderBy}
         LIMIT 1
       ) s ON true
-      WHERE u.role = 'provider' ${searchClause}
+      WHERE u.role = 'provider' ${searchClause}${pageIds ? ` AND u.id::text = ANY($${values.length + 1}::text[])` : ''}
       ORDER BY ${orderBy}
-      LIMIT ${limit} OFFSET ${offset}`;
+      ${pageIds ? '' : `LIMIT ${limit} OFFSET ${offset}`}`;
     console.debug('Get providers SQL:', sql, 'values:', values);
-    const result = await pool.query(sql, values);
+    const result = await pool.query(sql, pageIds ? [...values, pageIds] : values);
     // Get total count for pagination meta
     const countSql = `SELECT COUNT(DISTINCT u.id) as total FROM users u
       ${providersJoin}
       WHERE u.role = 'provider' ${searchClause}`;
-    const countResult = await pool.query(countSql, values);
-    const total = Number(countResult.rows[0]?.total || 0);
+    const total = useScoreSort ? scoredTotal : Number((await pool.query(countSql, values)).rows[0]?.total || 0);
     const ensureArray = (v: any) => {
       if (!v) return [];
       if (Array.isArray(v)) return v;
@@ -178,6 +309,7 @@ router.get('/', async (req: Request, res: Response) => {
       rating: parseFloat(r.rating) || 0,
       review_count: parseInt(r.review_count) || 0,
       is_verified: !!r.is_verified,
+      ...(r.distance_km !== undefined && r.distance_km !== null ? { distance_km: Number(Number(r.distance_km).toFixed(1)) } : {}),
       featured_service: r.service_id ? {
         id: r.service_id,
         title: r.service_title,
@@ -190,6 +322,12 @@ router.get('/', async (req: Request, res: Response) => {
     } catch (mapErr) {
       console.error('Error mapping provider rows:', mapErr, 'sampleRow:', result.rows[0]);
       throw mapErr; // rethrow to be handled by outer catch
+    }
+    if (pageIds) {
+      // The page query has no meaningful ORDER BY; restore the ranked order here.
+      const position = new Map(pageIds.map((id, i) => [id, i]));
+      rows.sort((a: any, b: any) => (position.get(String(a.id)) ?? 0) - (position.get(String(b.id)) ?? 0));
+      rows = rows.map((r: any) => ({ ...r, rank_score: Number((scoreById.get(String(r.id)) ?? 0).toFixed(3)) }));
     }
     res.json({ data: rows, meta: { page, limit, total } });
   } catch (error: any) {
@@ -291,7 +429,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     // Deliberately narrower than the row we hold internally: this is unauthenticated, so
     // no email, verification documents or anything else a client has no business seeing.
     const result = await pool.query(
-      `SELECT id, name, profile_image, portfolio_images, portfolio_meta, portfolio_albums, bio, years_experience,
+      `SELECT id, name, profile_image, portfolio_images, portfolio_meta, portfolio_albums, portfolio_cover, bio, years_experience,
               location, category, title, rating, review_count, is_verified
        FROM users
        WHERE id = $1 AND role = 'provider'`,
@@ -322,6 +460,8 @@ router.get('/:id', async (req: Request, res: Response) => {
       portfolio_meta: r.portfolio_meta || {},
       // Keyed by album name, not by path - see users.portfolio_albums.
       portfolio_albums: r.portfolio_albums || {},
+      // A stored path, like the keys of portfolio_meta. '' means "choose automatically".
+      portfolio_cover: r.portfolio_cover || '',
       bio: r.bio || '',
       years_experience: r.years_experience || 0,
       location: r.location || '',

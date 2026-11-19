@@ -1,8 +1,49 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
 import { verifyToken } from '../middleware/auth';
+import { parseRating, parseBoundedText, parsePagination } from '../utils/validation';
 
 const router = Router();
+
+// reviews.comment is TEXT, so the database imposes no limit of its own. Roughly the length
+// of a long, considered review; past that it is somebody pasting something.
+const MAX_REVIEW_COMMENT = 2000;
+
+/**
+ * Recomputes a provider's cached rating and review_count from their visible reviews.
+ *
+ * users.rating and users.review_count are a denormalised copy of what the reviews table
+ * says, and they are what the search listing and profile header render - so if they drift,
+ * a provider's public star rating stops matching their own reviews page.
+ *
+ * Takes the caller's client so the recompute commits with the write that caused it. The
+ * three call sites used to run it as a separate statement on the pool afterwards, which
+ * meant an error in between - or two reviews landing at once - could leave the cached
+ * figures describing a set of reviews that no longer existed.
+ */
+async function recomputeProviderRating(db: { query: Function }, revieweeId: string) {
+  await db.query(
+    `UPDATE users
+     SET rating = (
+       SELECT COALESCE(AVG(rating), 0)
+       FROM reviews
+       WHERE reviewee_id::text = $1
+         AND is_visible = TRUE
+         AND moderation_status = 'approved'
+         AND deleted_at IS NULL
+     ),
+     review_count = (
+       SELECT COUNT(*)
+       FROM reviews
+       WHERE reviewee_id::text = $1
+         AND is_visible = TRUE
+         AND moderation_status = 'approved'
+         AND deleted_at IS NULL
+     )
+     WHERE id::text = $1`,
+    [String(revieweeId)]
+  );
+}
 
 // ==============================================
 // REVIEW ROUTES
@@ -12,7 +53,11 @@ const router = Router();
 router.get('/provider/:providerId', async (req: Request, res: Response) => {
   try {
     const { providerId } = req.params;
-    const { limit = 10, offset = 0 } = req.query;
+    // Bound before they reach the query. These were passed through raw, so `?limit=abc`
+    // reached Postgres as a LIMIT and came back a 500, and `?limit=999999` was an open
+    // invitation to dump every review a provider has ever had in one response - on a
+    // public, unauthenticated endpoint.
+    const { limit, offset } = parsePagination(req.query, { defaultLimit: 10, maxLimit: 50 });
 
     const result = await pool.query(
       `SELECT
@@ -233,9 +278,16 @@ router.post('/', verifyToken, async (req: any, res: Response) => {
       return res.status(400).json({ error: 'Booking ID is required' });
     }
 
-    if (!rating || rating < 1 || rating > 5) {
-      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+    const ratingValue = parseRating(rating);
+    if (ratingValue === null) {
+      return res.status(400).json({ error: 'Rating must be a whole number between 1 and 5' });
     }
+
+    const commentCheck = parseBoundedText(comment, MAX_REVIEW_COMMENT, 'Comment');
+    if ('error' in commentCheck) {
+      return res.status(400).json({ error: commentCheck.error });
+    }
+    const commentValue = commentCheck.value;
 
     // Get booking and verify eligibility
     const bookingResult = await pool.query(
@@ -301,43 +353,48 @@ router.post('/', verifyToken, async (req: any, res: Response) => {
       return res.status(400).json({ error: 'You have already reviewed this booking' });
     }
 
-    // Create the review with the actual provider USER ID (not providers table ID)
-    const result = await pool.query(
-      `INSERT INTO reviews (booking_id, reviewer_id, reviewee_id, rating, comment, is_visible, moderation_status)
-       VALUES ($1, $2, $3, $4, $5, TRUE, 'approved')
-       RETURNING id, booking_id, rating, comment, created_at`,
-      [booking_id, userId, providerUserId, rating, comment || null]
-    );
+    // Create the review with the actual provider USER ID (not providers table ID).
+    //
+    // The insert and the rating recompute go in one transaction. Apart they were two
+    // independent writes: a failure between them left the review stored but the provider's
+    // displayed rating still describing the set of reviews from before it, and two reviews
+    // arriving together could both recompute from a snapshot that did not include the
+    // other. Nothing surfaces that drift - it just sits there being wrong on the profile.
+    const dbClient = await pool.connect();
+    let created;
+    try {
+      await dbClient.query('BEGIN');
 
-    // Update provider's average rating and review count (use actual user ID)
-    await pool.query(
-      `UPDATE users
-       SET rating = (
-         SELECT COALESCE(AVG(rating), 0)
-         FROM reviews
-         WHERE reviewee_id::text = $1
-           AND is_visible = TRUE
-           AND moderation_status = 'approved'
-           AND deleted_at IS NULL
-       ),
-       review_count = (
-         SELECT COUNT(*)
-         FROM reviews
-         WHERE reviewee_id::text = $1
-           AND is_visible = TRUE
-           AND moderation_status = 'approved'
-           AND deleted_at IS NULL
-       )
-       WHERE id::text = $1`,
-      [providerUserId]
-    );
+      const result = await dbClient.query(
+        `INSERT INTO reviews (booking_id, reviewer_id, reviewee_id, rating, comment, is_visible, moderation_status)
+         VALUES ($1, $2, $3, $4, $5, TRUE, 'approved')
+         RETURNING id, booking_id, rating, comment, created_at`,
+        [booking_id, userId, providerUserId, ratingValue, commentValue]
+      );
+      created = result.rows[0];
 
-    console.log('Review created:', result.rows[0], 'for provider user:', providerUserId);
-    res.status(201).json(result.rows[0]);
+      await recomputeProviderRating(dbClient, providerUserId);
+
+      await dbClient.query('COMMIT');
+    } catch (txError) {
+      try {
+        await dbClient.query('ROLLBACK');
+      } catch (_e) {
+        /* nothing to roll back */
+      }
+      throw txError;
+    } finally {
+      dbClient.release();
+    }
+
+    console.log('Review created:', created, 'for provider user:', providerUserId);
+    res.status(201).json(created);
   } catch (error: any) {
     console.error('Create review error:', error);
-    if (error.constraint === 'unique_booking_reviewer') {
-      return res.status(400).json({ error: 'You have already reviewed this booking' });
+    // 23505 covers the same collision the constraint name does, on a database where the
+    // constraint was created under a different name.
+    if (error.constraint === 'unique_booking_reviewer' || error.code === '23505') {
+      return res.status(409).json({ error: 'You have already reviewed this booking' });
     }
     res.status(500).json({ error: 'Failed to create review' });
   }
@@ -374,42 +431,47 @@ router.put('/:reviewId', verifyToken, async (req: any, res: Response) => {
       return res.status(400).json({ error: 'Reviews can only be edited within 48 hours of creation' });
     }
 
-    if (!rating || rating < 1 || rating > 5) {
-      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+    const ratingValue = parseRating(rating);
+    if (ratingValue === null) {
+      return res.status(400).json({ error: 'Rating must be a whole number between 1 and 5' });
     }
 
-    const result = await pool.query(
-      `UPDATE reviews
-       SET rating = $1, comment = $2, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $3
-       RETURNING id, rating, comment, updated_at`,
-      [rating, comment || null, reviewId]
-    );
+    const commentCheck = parseBoundedText(comment, MAX_REVIEW_COMMENT, 'Comment');
+    if ('error' in commentCheck) {
+      return res.status(400).json({ error: commentCheck.error });
+    }
 
-    // Update provider's average rating and review count
-    await pool.query(
-      `UPDATE users
-       SET rating = (
-         SELECT COALESCE(AVG(rating), 0)
-         FROM reviews
-         WHERE reviewee_id = $1
-           AND is_visible = TRUE
-           AND moderation_status = 'approved'
-           AND deleted_at IS NULL
-       ),
-       review_count = (
-         SELECT COUNT(*)
-         FROM reviews
-         WHERE reviewee_id = $1
-           AND is_visible = TRUE
-           AND moderation_status = 'approved'
-           AND deleted_at IS NULL
-       )
-       WHERE id = $1`,
-      [review.reviewee_id]
-    );
+    // One transaction, same reasoning as the create path: an edited star rating and the
+    // cached average it feeds must not be able to disagree.
+    const dbClient = await pool.connect();
+    let updated;
+    try {
+      await dbClient.query('BEGIN');
 
-    res.json(result.rows[0]);
+      const result = await dbClient.query(
+        `UPDATE reviews
+         SET rating = $1, comment = $2, updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $3
+         RETURNING id, rating, comment, updated_at`,
+        [ratingValue, commentCheck.value, reviewId]
+      );
+      updated = result.rows[0];
+
+      await recomputeProviderRating(dbClient, String(review.reviewee_id));
+
+      await dbClient.query('COMMIT');
+    } catch (txError) {
+      try {
+        await dbClient.query('ROLLBACK');
+      } catch (_e) {
+        /* nothing to roll back */
+      }
+      throw txError;
+    } finally {
+      dbClient.release();
+    }
+
+    res.json(updated);
   } catch (error) {
     console.error('Update review error:', error);
     res.status(500).json({ error: 'Failed to update review' });
@@ -438,33 +500,31 @@ router.delete('/:reviewId', verifyToken, async (req: any, res: Response) => {
       return res.status(403).json({ error: 'You can only delete your own reviews' });
     }
 
-    await pool.query(
-      `UPDATE reviews SET deleted_at = CURRENT_TIMESTAMP WHERE id = $1`,
-      [reviewId]
-    );
+    // Deleting a review and recomputing the average it fed are one change, so they commit
+    // together - otherwise a failure between them leaves a provider's public rating still
+    // counting a review that no longer exists.
+    const dbClient = await pool.connect();
+    try {
+      await dbClient.query('BEGIN');
 
-    // Update provider's average rating and review count
-    await pool.query(
-      `UPDATE users
-       SET rating = (
-         SELECT COALESCE(AVG(rating), 0)
-         FROM reviews
-         WHERE reviewee_id = $1
-           AND is_visible = TRUE
-           AND moderation_status = 'approved'
-           AND deleted_at IS NULL
-       ),
-       review_count = (
-         SELECT COUNT(*)
-         FROM reviews
-         WHERE reviewee_id = $1
-           AND is_visible = TRUE
-           AND moderation_status = 'approved'
-           AND deleted_at IS NULL
-       )
-       WHERE id = $1`,
-      [review.reviewee_id]
-    );
+      await dbClient.query(
+        `UPDATE reviews SET deleted_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
+        [reviewId]
+      );
+
+      await recomputeProviderRating(dbClient, String(review.reviewee_id));
+
+      await dbClient.query('COMMIT');
+    } catch (txError) {
+      try {
+        await dbClient.query('ROLLBACK');
+      } catch (_e) {
+        /* nothing to roll back */
+      }
+      throw txError;
+    } finally {
+      dbClient.release();
+    }
 
     res.json({ success: true });
   } catch (error) {

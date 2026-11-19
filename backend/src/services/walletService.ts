@@ -6,8 +6,28 @@ import type { PoolClient } from 'pg';
 // provider), ON CONFLICT DO NOTHING lets the loser's INSERT succeed as a no-op
 // instead of throwing a unique-constraint error, then falls back to reading the
 // winner's row.
-export async function ensureProviderWallet(providerId: string): Promise<string> {
-  const inserted = await pool.query(
+//
+// `dbClient` MUST be passed by every caller that is already inside a transaction.
+//
+// This used to always use the shared pool, even when called from inside one - and both
+// settlement functions below do exactly that, while holding a connection of their own. So
+// each in-flight settlement needed a SECOND connection just to get here, out of a pool of
+// ten. Eleven concurrent settlements and every one of them is holding a connection while
+// waiting for a connection that only another of them can release: a deadlock that no
+// amount of waiting clears, and which before the connectionTimeoutMillis added in
+// config/database.ts would have hung every request forever rather than failing.
+//
+// It was also wrong in a quieter way. An INSERT on the pool commits immediately, outside
+// the caller's transaction, so a settlement that rolled back still left a wallet row
+// behind - and the row the caller then locked FOR UPDATE was not one its own transaction
+// could see consistently.
+export async function ensureProviderWallet(
+  providerId: string,
+  dbClient?: PoolClient
+): Promise<string> {
+  const db = dbClient ?? pool;
+
+  const inserted = await db.query(
     `INSERT INTO wallets (provider_id) VALUES ($1)
      ON CONFLICT (provider_id) DO NOTHING
      RETURNING id`,
@@ -18,7 +38,7 @@ export async function ensureProviderWallet(providerId: string): Promise<string> 
     return inserted.rows[0].id;
   }
 
-  const existing = await pool.query(
+  const existing = await db.query(
     'SELECT id FROM wallets WHERE provider_id::text = $1',
     [providerId]
   );
@@ -41,18 +61,89 @@ export async function ensureProviderWallet(providerId: string): Promise<string> 
 // claims a dedicated wallet_credited_at column with a single atomic UPDATE - Postgres
 // resolves the race via row locking, so exactly one caller gets `settled: true` no
 // matter which of the three code paths gets here first or how many call concurrently.
+//
+// The claim also requires the booking to still be live. A client can pay after their
+// booking stopped existing - a QR code scanned after the provider cancelled, or after the
+// unpaid-booking sweep released the slot - and PayMongo captures that money regardless.
+// Crediting it put the client's money in the provider's escrow for a shoot that was never
+// going to happen, where nothing would ever release or return it. Such a payment is left
+// 'succeeded' (the money really did arrive) but uncredited, and `bookingUnpayable` tells
+// the caller to refund it - see refundLatePayment in refundService.
+//
+// No lock is taken on the booking. Every path that cancels a booking with a payment on it
+// also locks the payment row (settleCancelledBooking, and the sweep's payments UPDATE), and
+// the caller already holds that lock, so the two serialise on the payment row; under READ
+// COMMITTED this read then sees whichever cancellation committed first. Locking the booking
+// here as well would take the two locks in the opposite order to settleCancelledBooking,
+// which can deadlock.
+export const UNPAYABLE_BOOKING_STATUSES = ['cancelled', 'rejected'];
+
+/** failure_reason prefix marking a payment detected as late, and so eligible for auto-refund. */
+export const LATE_PAYMENT_PREFIX = 'LATE_PAYMENT';
+
 export async function settlePaymentSuccess(
   dbClient: PoolClient,
   paymentId: string
-): Promise<{ settled: boolean; creditedAmount: number; bookingId?: string; providerId?: string; clientId?: string }> {
+): Promise<{
+  settled: boolean;
+  creditedAmount: number;
+  bookingId?: string;
+  providerId?: string;
+  clientId?: string;
+  /** Money arrived for a cancelled or rejected booking: not credited, needs refunding. */
+  bookingUnpayable?: boolean;
+}> {
   const claimRes = await dbClient.query(
-    `UPDATE payments
+    `UPDATE payments p
      SET wallet_credited_at = CURRENT_TIMESTAMP
-     WHERE id::text = $1 AND status = 'succeeded' AND wallet_credited_at IS NULL
-     RETURNING id, booking_id, provider_id, client_id, net_provider_amount, commission_rate`,
-    [paymentId]
+     FROM bookings b
+     WHERE p.id::text = $1
+       AND p.status = 'succeeded'
+       AND p.wallet_credited_at IS NULL
+       AND b.id::text = p.booking_id::text
+       AND b.status <> ALL($2::text[])
+     RETURNING p.id, p.booking_id, p.provider_id, p.client_id, p.net_provider_amount, p.commission_rate`,
+    [paymentId, UNPAYABLE_BOOKING_STATUSES]
   );
   if (!claimRes.rows[0]) {
+    // Nothing claimed. Usually that is the ordinary case - another path already credited
+    // it - but tell the caller apart from a payment that landed on a dead booking.
+    const stranded = await dbClient.query(
+      `SELECT p.booking_id, p.provider_id, p.client_id
+       FROM payments p
+       LEFT JOIN bookings b ON b.id::text = p.booking_id::text
+       WHERE p.id::text = $1
+         AND p.status = 'succeeded'
+         AND p.wallet_credited_at IS NULL
+         AND (b.id IS NULL OR b.status = ANY($2::text[]))`,
+      [paymentId, UNPAYABLE_BOOKING_STATUSES]
+    );
+    if (stranded.rows[0]) {
+      const row = stranded.rows[0];
+      // Tag it, in the caller's transaction, as a late payment this code detected. The tag is
+      // what refundLatePayment and the reconciliation sweep require before they will refund:
+      // older rows that merely look similar (paid, uncredited, booking since cancelled under
+      // the pre-refund cancellation flow) are history for a person to review, not something
+      // a background job should start sending money back for on the first deploy.
+      await dbClient.query(
+        `UPDATE payments
+         SET failure_reason = $2, updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = $1 AND (failure_reason IS NULL OR failure_reason NOT LIKE $3)`,
+        [paymentId, `${LATE_PAYMENT_PREFIX}: arrived after the booking was cancelled or rejected; refund pending`, `${LATE_PAYMENT_PREFIX}%`]
+      );
+      console.error(
+        `[settlePaymentSuccess] Payment ${paymentId} succeeded for booking ${row.booking_id}, ` +
+        'which is cancelled, rejected or missing. NOT crediting the provider; it will be refunded.'
+      );
+      return {
+        settled: false,
+        creditedAmount: 0,
+        bookingUnpayable: true,
+        bookingId: String(row.booking_id),
+        providerId: String(row.provider_id),
+        clientId: String(row.client_id),
+      };
+    }
     return { settled: false, creditedAmount: 0 };
   }
   const payment = claimRes.rows[0];
@@ -64,7 +155,7 @@ export async function settlePaymentSuccess(
     [payment.booking_id]
   );
 
-  const walletId = await ensureProviderWallet(String(payment.provider_id));
+  const walletId = await ensureProviderWallet(String(payment.provider_id), dbClient);
 
   // Lock the wallet row to prevent races with any other payment settling concurrently
   // for the same provider.
@@ -166,9 +257,12 @@ export async function releaseEscrow(
     [newPending, newAvailable, String(wallet.id)]
   );
 
+  // 'escrow_released', not 'payment_received': this is the SAME money the client already
+  // paid, moving from pending to available now that the booking is done. Recording it as a
+  // second payment made every completed job show up twice in the provider's ledger.
   await dbClient.query(
     `INSERT INTO transactions (wallet_id, payment_id, type, amount, balance_after, reference_id, description)
-     VALUES ($1, $2, 'payment_received', $3, $4, $5, $6)`,
+     VALUES ($1, $2, 'escrow_released', $3, $4, $5, $6)`,
     [String(wallet.id), opts.paymentId, released, newAvailable, opts.referenceId, opts.description]
   );
 
@@ -218,7 +312,7 @@ export async function settleCashPayment(
     [payment.booking_id]
   );
 
-  const walletId = await ensureProviderWallet(String(payment.provider_id));
+  const walletId = await ensureProviderWallet(String(payment.provider_id), dbClient);
 
   const walletLockRes = await dbClient.query(
     `SELECT id, available_balance FROM wallets WHERE id::text = $1 FOR UPDATE`,

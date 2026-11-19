@@ -1,3 +1,4 @@
+import { formatMoney } from '../utils/currency';
 import { useEffect, useState } from 'react';
 import {
   X, Calendar, Clock, PhilippinePeso, Mail, Tag, FileText,
@@ -181,7 +182,7 @@ export function BookingDetailsModal({ booking, isProvider, onClose }: BookingDet
               <div className="bg-gray-50 rounded-xl p-3 flex items-center justify-between">
                 <span className="flex items-center gap-2 text-sm text-gray-900">
                   <PhilippinePeso className="w-4 h-4 text-gray-400" />
-                  {booking.price.toLocaleString()}
+                  {formatMoney(booking.price)}
                 </span>
                 {booking.payment_status && (
                   <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
@@ -299,6 +300,8 @@ export function BookingDetailsModal({ booking, isProvider, onClose }: BookingDet
                           <img
                             src={getEvidenceUrl(e.file_url)}
                             alt={e.evidence_type}
+                            loading="lazy"
+                            decoding="async"
                             className="w-full h-20 object-cover rounded-lg bg-gray-100"
                           />
                         </button>

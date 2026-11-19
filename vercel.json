@@ -1,25 +1,8 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+
   "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "https://photofind2.onrender.com/api/:path*"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "https://photofind2.onrender.com/api/$1"
-    },
-    {
-      "src": "/reset-password",
-      "dest": "/index.html"
-    },
-    {
-      "handle": "filesystem"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/index.html"
-    }
+    { "source": "/api/:path*", "destination": "https://photofind2.onrender.com/api/:path*" },
+    { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

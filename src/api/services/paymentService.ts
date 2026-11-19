@@ -31,6 +31,13 @@ export interface PaymentIntentResponse {
   provider_amount: number;
   status: string;
   public_key: string;
+  /**
+   * The online methods this intent will actually accept, decided by the server. QR Ph is
+   * the only one in normal operation; the card/e-wallet list appears only when QR Ph has
+   * been switched off for an outage. Read from the intent itself when an existing payment
+   * is resumed, so a client is never offered a method their in-flight intent predates.
+   */
+  payment_methods?: string[];
 }
 
 export interface AttachMethodResponse {
@@ -41,7 +48,18 @@ export interface AttachMethodResponse {
       url: string;
       return_url: string;
     };
+    /** QR Ph. `image_url` is a base64 data URI meant to go straight into an <img src>. */
+    code?: {
+      image_url?: string;
+      [key: string]: unknown;
+    };
   };
+  /**
+   * QR Ph only. When the code stops being scannable, as an ISO timestamp, computed by the
+   * server from the expiry it asked PayMongo for. A countdown hint for the UI - the
+   * authority on an expired code is the server saying so, not this clock.
+   */
+  qr_expires_at?: string | null;
 }
 
 const paymentService = {
@@ -58,6 +76,20 @@ const paymentService = {
     const resp = await apiClient.post<{ data: AttachMethodResponse }>('/payments/attach-method', {
       payment_intent_id: paymentIntentId,
       payment_method_id: paymentMethodId,
+    });
+    return resp.data;
+  },
+
+  // Ask the server to mint and attach a QR Ph payment method.
+  //
+  // No payment_method_id, unlike the card path: a card has to be turned into a payment
+  // method in the browser so the number never reaches our server, while QR Ph has no
+  // sensitive input at all and is created server-side, which is what keeps the code's
+  // expiry out of the client's hands.
+  async attachQrPh(paymentIntentId: string): Promise<AttachMethodResponse> {
+    const resp = await apiClient.post<{ data: AttachMethodResponse }>('/payments/attach-method', {
+      payment_intent_id: paymentIntentId,
+      method: 'qrph',
     });
     return resp.data;
   },

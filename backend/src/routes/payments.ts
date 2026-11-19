@@ -4,22 +4,91 @@ import { verifyToken } from '../middleware/auth';
 import crypto from 'crypto';
 import { notificationService } from '../services/notificationService';
 import { settlePaymentSuccess } from '../services/walletService';
-import { paymongoRequest, PayMongoResponse } from '../services/paymongoService';
+import {
+  SUCCEEDED_UNLESS_REFUNDED,
+  FINAL_MONEY_STATUSES,
+  checkPaidAmount,
+  alertAmountMismatch,
+  startLatePaymentRefund,
+  notifyPaymentSettled,
+  applyIntentState,
+} from '../services/paymentSettlement';
+import { paymongoRequest, PayMongoResponse, PayMongoApiError } from '../services/paymongoService';
 import { PLATFORM_COMMISSION_RATE } from '../config/commissionConfig';
 import { isPriceAcceptable } from '../config/pricingConfig';
+import { allowedPaymentMethods, QRPH_ENABLED, QRPH_EXPIRY_SECONDS } from '../config/paymentConfig';
+// Read and validated once at startup - see paymongoConfig.ts.
+import { PAYMONGO_PUBLIC_KEY, PAYMONGO_WEBHOOK_SECRET, PAYMENT_RETURN_URL } from '../config/paymongoConfig';
 
 const router = express.Router();
 
-// PayMongo API configuration
-const PAYMONGO_PUBLIC_KEY = process.env.PAYMONGO_PUBLIC_KEY || '';
-const PAYMONGO_WEBHOOK_SECRET = process.env.PAYMONGO_WEBHOOK_SECRET || '';
 
 // Commission rate - shared with bookings.ts price validation, see commissionConfig.ts
 
-// Generate idempotency key for payment - deterministic to prevent duplicate payments
-function generateIdempotencyKey(bookingId: string, clientId: string): string {
-  // Use only bookingId and clientId to ensure same booking+client always gets same key
-  return `payment_${bookingId}_${clientId}`;
+// Idempotency key for a payment attempt.
+//
+// Deterministic per (booking, client, attempt), so a double-submitted request for the
+// same attempt makes PayMongo return the intent it already created instead of opening a
+// second one. The attempt number is what makes a genuine retry different: after a failed
+// attempt the client needs a NEW intent, and reusing the first key would hand back the
+// one that just failed. Attempt 1 keeps the original key shape so rows written before
+// retries were possible keep matching their own PayMongo intent.
+function generateIdempotencyKey(bookingId: string, clientId: string, attempt: number): string {
+  const base = `payment_${bookingId}_${clientId}`;
+  return attempt <= 1 ? base : `${base}_r${attempt}`;
+}
+
+// The response for a payment route that failed unexpectedly.
+//
+// These used to send `detail: error.message` to the client, which put PayMongo's own wording
+// about our merchant account, and on a database error the SQL error text, in front of the
+// person paying. The detail is logged by the caller and by paymongoRequest; the client gets
+// a message it can act on.
+//
+// The status codes matter to PaymentSummary, so they are chosen with it in mind: it treats
+// any 4xx as "nothing was attached, safe to retry" and 503 as "QR Ph is switched off". A
+// gateway failure is neither - the call may have gone through - so it is 502, or 504 for a
+// timeout, which routes the client to verifying the intent rather than declaring failure.
+function sendPaymentFailure(res: Response, error: unknown, fallbackMessage: string) {
+  if (error instanceof PayMongoApiError) {
+    return res.status(error.timedOut ? 504 : 502).json({
+      error: error.isGatewayProblem
+        ? 'The payment provider is not responding right now. Please try again in a moment.'
+        : fallbackMessage,
+      gateway_error: true,
+    });
+  }
+  return res.status(500).json({ error: fallbackMessage });
+}
+
+// Which payment intent a `payment.paid` event is talking about.
+//
+// The two success events are shaped differently, and mixing them up is silent money loss.
+// For payment_intent.succeeded, eventData.id IS the intent (pi_...) and the payment id is
+// under attributes.payments[]. For payment.paid, eventData.id is the PAYMENT (pay_...) and
+// the intent is a field on it. Reading eventData.id as an intent id for payment.paid would
+// match no row, and the handler would no-op on a payment that really happened.
+//
+// The metadata fallback is ours, not PayMongo's: create-intent stamps booking_id into the
+// intent's metadata, and PayMongo copies intent metadata onto the payment. So if the field
+// name ever moves we can still find the booking. Worth the few lines - the alternative
+// failure is a client who paid, a provider who was never credited, and nothing in the
+// database explaining why.
+function resolveIntentRef(eventData: any): { intentId: string | null; bookingId: string | null } {
+  const attrs = eventData?.attributes || {};
+  const candidates = [
+    attrs.payment_intent_id,
+    attrs.payment_intent?.id,
+    attrs.payment_intent,
+    // qrph.expired's documented payload shape could not be confirmed (PayMongo's own
+    // reference pages for it 404 as of 2026-09-28), so accept the object itself being the
+    // intent. The pi_ prefix check is what keeps that from mistaking a payment or a
+    // payment-method id for an intent id and updating nothing while reporting success.
+    typeof eventData?.id === 'string' && eventData.id.startsWith('pi_') ? eventData.id : null,
+  ];
+  const intentId = candidates.find((c) => typeof c === 'string' && c.length > 0) || null;
+  const bookingId = attrs.metadata?.booking_id != null ? String(attrs.metadata.booking_id) : null;
+  return { intentId: (intentId as string) || null, bookingId };
 }
 
 // Create payment intent for a booking
@@ -39,13 +108,20 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
   try {
     await dbClient.query('BEGIN');
 
-    // Get booking details with provider's user_id and service price
+    // Get booking details with provider's user_id and service price.
+    //
+    // FOR UPDATE OF b serialises this endpoint per booking. Without it two calls - a
+    // double-clicked Pay button, or the page and a retry racing - could both read the
+    // same state, both find no open attempt and both open a PayMongo intent. The
+    // idempotency key stops that becoming two charges, but only when both calls derive
+    // the same attempt number, which they can only do if they don't overlap.
     const bookingRes = await dbClient.query(
       `SELECT b.*, s.title as service_title, s.price as service_price, p.user_id as provider_user_id
        FROM bookings b
        LEFT JOIN services s ON s.id::text = b.service_id::text
        LEFT JOIN providers p ON p.id::text = b.provider_id::text
-       WHERE b.id::text = $1`,
+       WHERE b.id::text = $1
+       FOR UPDATE OF b`,
       [booking_id]
     );
     const booking = bookingRes.rows[0];
@@ -131,16 +207,21 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
       return res.status(400).json({ error: 'This booking has no valid price to charge.' });
     }
 
-    // A booking can accumulate several payment rows - a new one is inserted below
-    // whenever the previous attempt ended 'failed'. So "has this already been paid?"
-    // has to be asked of ALL of them, not of whichever row Postgres happens to return
-    // first: reading rows[0] from an unordered query could hand back the failed
-    // attempt, fall through both guards, and let the client be charged a second time.
-    const settledPayment = await dbClient.query(
-      `SELECT id, paid_at FROM payments WHERE booking_id::text = $1 AND status = 'succeeded' LIMIT 1`,
+    // Everything this booking has ever tried to pay with, locked for the rest of the
+    // transaction so two create-intent calls for the same booking can't both decide they
+    // are the first one. `unique_booking_payment` means there is at most one row today;
+    // the ordering makes the choice below deterministic either way rather than depending
+    // on a schema constraint holding.
+    const existingPayments = await dbClient.query(
+      `SELECT * FROM payments
+       WHERE booking_id::text = $1
+       ORDER BY CASE status WHEN 'succeeded' THEN 0 ELSE 1 END, created_at DESC
+       FOR UPDATE`,
       [booking_id]
     );
-    if (settledPayment.rows[0]) {
+
+    const settledPayment = existingPayments.rows.find((p: any) => String(p.status) === 'succeeded');
+    if (settledPayment) {
       await dbClient.query('ROLLBACK');
       // 409, not 400: nothing about the request is malformed - the client is asking to pay
       // for something that is already paid, which usually means its booking list is stale.
@@ -149,41 +230,106 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
       return res.status(409).json({
         error: 'This booking has already been paid.',
         already_paid: true,
-        payment_id: settledPayment.rows[0].id,
-        paid_at: settledPayment.rows[0].paid_at,
+        payment_id: settledPayment.id,
+        paid_at: settledPayment.paid_at,
       });
     }
 
-    // Otherwise reuse the most recent still-open attempt, if there is one.
-    const openPayment = await dbClient.query(
-      `SELECT * FROM payments
-       WHERE booking_id::text = $1 AND status IN ('pending', 'processing')
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [booking_id]
+    // Money that has already been sent back cannot be re-collected against the same row -
+    // the refund bookkeeping on it would be overwritten and the ledger would stop
+    // explaining itself. This only happens on a booking whose dispute was resolved with a
+    // refund, which is not a booking anyone should be paying for again anyway.
+    const refundedPayment = existingPayments.rows.find((p: any) =>
+      ['refunded', 'partially_refunded'].includes(String(p.status))
+    );
+    if (refundedPayment) {
+      await dbClient.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'This booking has already been refunded and cannot be paid for again. Please make a new booking.',
+        already_refunded: true,
+      });
+    }
+
+    // Reuse a still-open attempt rather than opening a second one.
+    const openPayment = existingPayments.rows.find((p: any) =>
+      ['pending', 'processing'].includes(String(p.status))
     );
 
-    if (openPayment.rows[0]) {
-      const payment = openPayment.rows[0];
-      await dbClient.query('ROLLBACK');
+    if (openPayment) {
+      // Rows written before paymongo_client_key existed have none stored, and the client
+      // key is what PaymentSummary needs to attach a payment method - without it the
+      // reopened modal renders a form that can never be submitted. Read it back off the
+      // intent and keep it, so this heals once per row instead of on every reopen.
+      let clientKey = openPayment.paymongo_client_key || null;
+
+      // Which methods THIS intent was opened with - not necessarily what the config offers
+      // now. An intent created before PAYMONGO_QRPH_ENABLED was flipped keeps the list it
+      // was created with, and PayMongo will refuse a method that is not on it. Telling the
+      // client the current config instead would offer them a method this intent cannot
+      // accept, and since create-intent resumes rather than replaces an open payment, the
+      // retry would land right back here - a client permanently unable to pay.
+      let resumeMethods: string[] | null = null;
+
+      // Now fetched whenever an intent is resumed, not only when the client key is missing:
+      // the allowed list has to come from the intent itself. One extra call on reopening a
+      // payment, which is a deliberate user action rather than a hot path.
+      if (openPayment.paymongo_payment_intent_id) {
+        try {
+          const intentRes = await paymongoRequest(
+            `/payment_intents/${openPayment.paymongo_payment_intent_id}`,
+            'GET'
+          );
+          const attrs = intentRes.data.attributes;
+          const allowed = (attrs as { payment_method_allowed?: unknown }).payment_method_allowed;
+          if (Array.isArray(allowed) && allowed.length > 0) {
+            resumeMethods = allowed.map(String);
+          }
+          if (!clientKey) {
+            clientKey = attrs.client_key || null;
+            if (clientKey) {
+              await dbClient.query(
+                `UPDATE payments SET paymongo_client_key = $2, updated_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
+                [String(openPayment.id), clientKey]
+              );
+            }
+          }
+        } catch (lookupError: any) {
+          console.error('Could not read the payment intent back:', lookupError?.message);
+        }
+      }
+
+      if (!clientKey) {
+        await dbClient.query('ROLLBACK');
+        return res.status(502).json({
+          error: 'Could not resume the existing payment for this booking. Please try again in a moment.',
+        });
+      }
+
+      await dbClient.query('COMMIT');
       // Must return the same shape as the fresh-intent response below. PaymentSummary
       // authenticates to PayMongo with `btoa(public_key + ':')`, so omitting public_key
       // here made every retry send "Basic undefined:" and fail with a 401 - once a
       // client closed the payment modal they could never pay for that booking again.
-      const reusedGross = parseFloat(payment.gross_amount);
       return res.json({
         data: {
-          payment_id: payment.id,
-          payment_intent_id: payment.paymongo_payment_intent_id,
-          client_key: payment.paymongo_client_key,
-          amount: reusedGross,
-          commission: parseFloat(payment.commission_amount),
-          provider_amount: parseFloat(payment.net_provider_amount),
-          status: payment.status,
+          payment_id: openPayment.id,
+          payment_intent_id: openPayment.paymongo_payment_intent_id,
+          client_key: clientKey,
+          amount: parseFloat(openPayment.gross_amount),
+          commission: parseFloat(openPayment.commission_amount),
+          provider_amount: parseFloat(openPayment.net_provider_amount),
+          status: openPayment.status,
           public_key: PAYMONGO_PUBLIC_KEY,
+          // What the CLIENT may render a control for. The intent's own list when we could
+          // read it, the current config otherwise.
+          payment_methods: resumeMethods || allowedPaymentMethods(),
         }
       });
     }
+
+    // Whatever is left is a dead attempt - 'failed', or 'cancelled' by the expiry sweep.
+    // Its row is the one that gets reused; see the note on payments.attempt_count.
+    const deadAttempt = existingPayments.rows[0] || null;
 
     // Calculate amounts
     const grossAmount = parseFloat(booking.total_price || 0);
@@ -195,8 +341,9 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
     const commissionAmount = Math.round(grossAmount * PLATFORM_COMMISSION_RATE * 100) / 100;
     const netProviderAmount = Math.round((grossAmount - commissionAmount) * 100) / 100;
 
-    // Generate idempotency key
-    const idempotencyKey = generateIdempotencyKey(booking_id, clientId);
+    // Generate idempotency key for this attempt
+    const attemptNumber = deadAttempt ? (parseInt(deadAttempt.attempt_count, 10) || 1) + 1 : 1;
+    const idempotencyKey = generateIdempotencyKey(booking_id, clientId, attemptNumber);
 
     // Create PayMongo Payment Intent
     // Amount in PayMongo is in cents (smallest currency unit)
@@ -208,7 +355,9 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
         data: {
           attributes: {
             amount: amountInCents,
-            payment_method_allowed: ['card', 'gcash', 'grab_pay', 'paymaya'],
+            // Includes 'qrph' unless PAYMONGO_QRPH_ENABLED=false - see paymentConfig.ts
+            // for why that switch exists.
+            payment_method_allowed: allowedPaymentMethods(),
             payment_method_options: {
               card: {
                 request_three_d_secure: 'any'
@@ -228,34 +377,79 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
       }, idempotencyKey);
     } catch (paymongoError: any) {
       await dbClient.query('ROLLBACK');
-      console.error('PayMongo error:', paymongoError);
-      return res.status(500).json({ error: 'Failed to create payment intent', detail: paymongoError.message });
+      console.error('PayMongo error creating payment intent:', paymongoError?.message);
+      return sendPaymentFailure(res, paymongoError, 'Could not start the payment. Please try again.');
     }
 
     const paymentIntent = paymentIntentData.data;
 
-    // Store payment record (use provider_user_id which references users table)
+    // Store payment record (use provider_user_id which references users table).
+    //
+    // A booking gets one payments row for its whole life: `unique_booking_payment` and the
+    // UNIQUE on idempotency_key both say so. A retry after a declined card therefore has to
+    // update that row rather than insert beside it - the old code inserted, violated both
+    // constraints and returned 500, which is why a client who was declined once could never
+    // pay for that booking again. The refund columns are deliberately left alone: nothing
+    // reaches here with a refund recorded (that is a 409 above), so there is nothing to
+    // clear, and blanking them blind would erase history if that ever stopped being true.
     const providerUserId = booking.provider_user_id || booking.provider_id;
-    const paymentRes = await dbClient.query(
-      `INSERT INTO payments (
-        booking_id, client_id, provider_id,
-        paymongo_payment_intent_id, idempotency_key,
-        gross_amount, commission_rate, commission_amount, net_provider_amount,
-        status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
-      RETURNING *`,
-      [
-        booking_id,
-        clientId,
-        providerUserId,
-        paymentIntent.id,
-        idempotencyKey,
-        grossAmount,
-        PLATFORM_COMMISSION_RATE,
-        commissionAmount,
-        netProviderAmount,
-      ]
-    );
+    const paymentRes = deadAttempt
+      ? await dbClient.query(
+          `UPDATE payments
+           SET client_id = $2,
+               provider_id = $3,
+               paymongo_payment_intent_id = $4,
+               paymongo_client_key = $5,
+               idempotency_key = $6,
+               gross_amount = $7,
+               commission_rate = $8,
+               commission_amount = $9,
+               net_provider_amount = $10,
+               status = 'pending',
+               attempt_count = $11,
+               failure_reason = NULL,
+               paymongo_payment_method_id = NULL,
+               payment_method_type = NULL,
+               paid_at = NULL,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id::text = $1
+           RETURNING *`,
+          [
+            String(deadAttempt.id),
+            clientId,
+            providerUserId,
+            paymentIntent.id,
+            paymentIntent.attributes.client_key || null,
+            idempotencyKey,
+            grossAmount,
+            PLATFORM_COMMISSION_RATE,
+            commissionAmount,
+            netProviderAmount,
+            attemptNumber,
+          ]
+        )
+      : await dbClient.query(
+          `INSERT INTO payments (
+            booking_id, client_id, provider_id,
+            paymongo_payment_intent_id, paymongo_client_key, idempotency_key,
+            gross_amount, commission_rate, commission_amount, net_provider_amount,
+            status, attempt_count
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11)
+          RETURNING *`,
+          [
+            booking_id,
+            clientId,
+            providerUserId,
+            paymentIntent.id,
+            paymentIntent.attributes.client_key || null,
+            idempotencyKey,
+            grossAmount,
+            PLATFORM_COMMISSION_RATE,
+            commissionAmount,
+            netProviderAmount,
+            attemptNumber,
+          ]
+        );
 
     // Update booking payment status
     await dbClient.query(
@@ -275,12 +469,15 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
         provider_amount: netProviderAmount,
         status: 'pending',
         public_key: PAYMONGO_PUBLIC_KEY,
+        // The UI renders whatever is in here and nothing else, so the server stays the one
+        // place that decides which methods exist.
+        payment_methods: allowedPaymentMethods(),
       }
     });
   } catch (error: any) {
     await dbClient.query('ROLLBACK');
     console.error('Error creating payment intent:', error);
-    return res.status(500).json({ error: 'Failed to create payment intent', detail: error.message });
+    return sendPaymentFailure(res, error, 'Could not start the payment. Please try again.');
   } finally {
     dbClient.release();
   }
@@ -289,14 +486,22 @@ router.post('/create-intent', verifyToken, async (req: Request & { userId?: stri
 // Attach payment method to payment intent
 router.post('/attach-method', verifyToken, async (req: Request & { userId?: string }, res: Response) => {
   const clientId = req.userId;
-  const { payment_intent_id, payment_method_id } = req.body;
+  // Two shapes. `payment_method_id` is the card path: the browser creates the payment
+  // method directly against PayMongo with the public key, because raw card numbers must
+  // never reach this server. `method: 'qrph'` is the opposite - a QR Ph method carries no
+  // sensitive input at all, so it is minted here instead, which keeps expiry_seconds under
+  // server control rather than letting a caller ask for a 9000-second code.
+  const { payment_intent_id, payment_method_id, method } = req.body;
+  const wantsQrph = method === 'qrph';
 
   if (!clientId) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  if (!payment_intent_id || !payment_method_id) {
-    return res.status(400).json({ error: 'payment_intent_id and payment_method_id are required' });
+  if (!payment_intent_id || (!payment_method_id && !wantsQrph)) {
+    return res.status(400).json({
+      error: "payment_intent_id is required, with either payment_method_id or method: 'qrph'",
+    });
   }
 
   try {
@@ -314,6 +519,23 @@ router.post('/attach-method', verifyToken, async (req: Request & { userId?: stri
       return res.status(403).json({ error: 'Access denied' });
     }
     const paymentRecord = paymentRes.rows[0];
+
+    // This route never looked at the payment's own status, only at the booking's. create-intent
+    // refuses a settled or refunded booking with a 409; an attach aimed at the same payment fell
+    // through to PayMongo and came back as a 500, telling a client who had already paid that
+    // something had broken. Same flags as create-intent, so the UI can react identically.
+    if (String(paymentRecord.status) === 'succeeded') {
+      return res.status(409).json({
+        error: 'This booking has already been paid.',
+        already_paid: true,
+      });
+    }
+    if (['refunded', 'partially_refunded'].includes(String(paymentRecord.status))) {
+      return res.status(409).json({
+        error: 'This booking has already been refunded and cannot be paid for again.',
+        already_refunded: true,
+      });
+    }
 
     // Re-check the booking here too, not just at create-intent. An intent obtained
     // while the booking was accepted stays attachable afterwards, so without this a
@@ -342,19 +564,71 @@ router.post('/attach-method', verifyToken, async (req: Request & { userId?: stri
       });
     }
 
+    // Mint the QR Ph method now that the booking, ownership and deadline checks above have
+    // passed - creating it earlier would leave an orphan method behind on every refusal.
+    let attachMethodId: string = payment_method_id;
+    if (wantsQrph) {
+      // Refuse a second code while the first is still scannable.
+      //
+      // PayMongo permits attaching over a live method (verified in test mode), so nothing
+      // upstream stops this: two QR codes for one intent, both scannable, and the panel
+      // actively encourages saving codes to the gallery. The UI only offers the button from
+      // 'ready'/'failed', but the endpoint is reachable directly.
+      //
+      // The intent is asked rather than trusting our own row, because the client's local
+      // expiry countdown can run out before the qrph.expired webhook lands - at which point
+      // our row still says 'processing' though the code is dead, and a flat refusal would
+      // block a legitimate "get a new code". awaiting_next_action means a code really is
+      // still live; anything else means it is not.
+      if (String(paymentRecord.status) === 'processing' && paymentRecord.paymongo_payment_method_id) {
+        try {
+          const current = await paymongoRequest(`/payment_intents/${payment_intent_id}`, 'GET');
+          if (current.data.attributes.status === 'awaiting_next_action') {
+            return res.status(409).json({
+              error: 'A payment code for this booking is already active. Use it, or wait for it to expire.',
+              qr_already_active: true,
+            });
+          }
+        } catch (lookupError: any) {
+          // Unreachable gateway: let the attach proceed rather than blocking a client on a
+          // check that is a safety margin, not a correctness requirement. The attach itself
+          // is the operation that must succeed or fail honestly.
+          console.error('Could not check the intent before minting a QR code:', lookupError?.message);
+        }
+      }
+
+      if (!QRPH_ENABLED) {
+        // 503, not 400: the request is perfectly valid, the capability is switched off.
+        return res.status(503).json({
+          error: 'QR Ph is not available right now. Please pay by card instead.',
+          qrph_unavailable: true,
+        });
+      }
+      const qrphMethod = await paymongoRequest('/payment_methods', 'POST', {
+        data: {
+          attributes: {
+            type: 'qrph',
+            expiry_seconds: QRPH_EXPIRY_SECONDS,
+          }
+        }
+      });
+      attachMethodId = qrphMethod.data.id;
+    }
+
     // Attach payment method to intent
     const result = await paymongoRequest(`/payment_intents/${payment_intent_id}/attach`, 'POST', {
       data: {
         attributes: {
-          payment_method: payment_method_id,
-          return_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/callback`,
+          payment_method: attachMethodId,
+          return_url: PAYMENT_RETURN_URL,
         }
       }
     });
 
     const updatedIntent = result.data;
     const capturedPaymentId = updatedIntent.attributes.payments?.[0]?.id || null;
-    const newStatus = updatedIntent.attributes.status === 'succeeded' ? 'succeeded' : 'processing';
+    let newStatus = updatedIntent.attributes.status === 'succeeded' ? 'succeeded' : 'processing';
+    let amountAlert: string | undefined;
 
     // A card without 3D Secure can resolve to 'succeeded' right here, synchronously -
     // wrap the status update and settlement in a transaction so both land atomically.
@@ -363,18 +637,31 @@ router.post('/attach-method', verifyToken, async (req: Request & { userId?: stri
     try {
       await dbClient.query('BEGIN');
 
+      if (newStatus === 'succeeded') {
+        const amountCheck = await checkPaidAmount(dbClient, paymentRecord, updatedIntent.attributes, 'attach');
+        if (!amountCheck.ok) {
+          // Held at 'processing': the money moved, but it is not settled until a person
+          // has looked. The unpaid-booking sweep leaves 'processing' rows alone.
+          newStatus = 'processing';
+          amountAlert = amountCheck.alert;
+        }
+      }
+
       await dbClient.query(
         `UPDATE payments
          SET paymongo_payment_method_id = $1,
              payment_method_type = $2,
-             status = $3,
+             status = CASE WHEN status IN ('refunded', 'partially_refunded') THEN status ELSE $3 END,
              paymongo_payment_id = COALESCE($5, paymongo_payment_id),
              paid_at = CASE WHEN $3::varchar = 'succeeded' THEN COALESCE(paid_at, CURRENT_TIMESTAMP) ELSE paid_at END,
              updated_at = CURRENT_TIMESTAMP
          WHERE paymongo_payment_intent_id = $4`,
         [
-          payment_method_id,
-          updatedIntent.attributes.payment_method_type || 'card',
+          attachMethodId,
+          // The `|| 'card'` default predates there being any other method, and would have
+          // filed every QR Ph payment in the books as a card payment. Card behaviour is
+          // unchanged; only the fallback for a qrph attach is different.
+          updatedIntent.attributes.payment_method_type || (wantsQrph ? 'qrph' : 'card'),
           newStatus,
           payment_intent_id,
           capturedPaymentId
@@ -393,30 +680,50 @@ router.post('/attach-method', verifyToken, async (req: Request & { userId?: stri
       dbClient.release();
     }
 
-    if (settleResult.settled) {
-      try {
-        const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [settleResult.clientId]);
-        await notificationService.notifyPaymentReceived(
-          String(settleResult.providerId),
-          String(settleResult.clientId),
-          settleResult.creditedAmount,
-          clientInfo.rows[0]?.name || 'Client',
-          String(settleResult.bookingId)
-        );
-      } catch (notifError) {
-        console.error('Failed to send payment notification (attach-method):', notifError);
-      }
+    await notifyPaymentSettled(settleResult, 'attach-method');
+    if (settleResult.bookingUnpayable) {
+      startLatePaymentRefund(String(paymentRecord.id));
+    }
+    if (amountAlert) {
+      alertAmountMismatch(paymentRecord, amountAlert);
+    }
+
+    // PayMongo's own expiry, when it sends one. Test mode confirmed it does:
+    // next_action.code.expires_at, RFC3339. Preferred over computing now + expiry_seconds,
+    // which was only ever an estimate of a clock PayMongo starts on its own side - the two
+    // drift by however long the attach round-trip took.
+    //
+    // Normalised through Date so the nanosecond precision PayMongo emits
+    // ("...:06.142489286Z") reaches the browser as ordinary milliseconds, and so a
+    // malformed value falls back rather than becoming a NaN countdown.
+    //
+    // Still only a countdown hint: the authority on an expired code is the qrph.expired
+    // webhook and the awaiting_payment_method branch of /confirm, never this timestamp.
+    let qrExpiresAt: string | null = null;
+    if (wantsQrph) {
+      const reported = updatedIntent.attributes.next_action?.code?.expires_at;
+      const reportedMs = reported ? new Date(reported).getTime() : NaN;
+      qrExpiresAt = Number.isFinite(reportedMs)
+        ? new Date(reportedMs).toISOString()
+        : new Date(Date.now() + QRPH_EXPIRY_SECONDS * 1000).toISOString();
     }
 
     return res.json({
       data: {
-        status: updatedIntent.attributes.status,
+        // A held payment reports 'processing' so the client's screen keeps verifying
+        // rather than celebrating a payment the platform has not accepted.
+        status: newStatus === 'processing' && updatedIntent.attributes.status === 'succeeded'
+          ? 'processing'
+          : updatedIntent.attributes.status,
         next_action: updatedIntent.attributes.next_action,
+        qr_expires_at: qrExpiresAt,
+        // The money arrived but the booking is gone; it is being refunded.
+        late_payment_refund: settleResult.bookingUnpayable === true,
       }
     });
   } catch (error: any) {
     console.error('Error attaching payment method:', error);
-    return res.status(500).json({ error: 'Failed to attach payment method', detail: error.message });
+    return sendPaymentFailure(res, error, 'Could not process the payment method. Please try again.');
   }
 });
 
@@ -433,11 +740,9 @@ router.post('/confirm', verifyToken, async (req: Request & { userId?: string }, 
     return res.status(400).json({ error: 'payment_intent_id is required' });
   }
 
-  const dbClient = await pool.connect();
   try {
-    // Get payment record
-    const paymentRes = await dbClient.query(
-      'SELECT * FROM payments WHERE paymongo_payment_intent_id = $1',
+    const paymentRes = await pool.query(
+      'SELECT id, client_id FROM payments WHERE paymongo_payment_intent_id = $1',
       [payment_intent_id]
     );
 
@@ -451,105 +756,45 @@ router.post('/confirm', verifyToken, async (req: Request & { userId?: string }, 
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    // Check PayMongo status
+    // Ask PayMongo, then record what it says. The recording is shared with the
+    // reconciliation sweep - see applyIntentState in services/paymentSettlement.ts.
     const result = await paymongoRequest(`/payment_intents/${payment_intent_id}`, 'GET');
-    const paymentIntent = result.data;
-    const status = paymentIntent.attributes.status;
-
-    if (status === 'succeeded') {
-      await dbClient.query('BEGIN');
-
-      // Re-fetch and lock the payment row. attach-method (for cards that don't need
-      // 3D Secure) or the webhook may already have marked this 'succeeded' - the
-      // status update below is an idempotent no-op in that case, and
-      // settlePaymentSuccess's own atomic claim (not this row lock) is what actually
-      // prevents crediting the wallet twice across all three paths.
-      const lockedRes = await dbClient.query(
-        'SELECT * FROM payments WHERE id::text = $1 FOR UPDATE',
-        [payment.id]
-      );
-      const lockedPayment = lockedRes.rows[0];
-      const capturedPaymentId = paymentIntent.attributes.payments?.[0]?.id || null;
-
-      await dbClient.query(
-        `UPDATE payments
-         SET status = 'succeeded',
-             paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
-             paymongo_payment_id = COALESCE($2, paymongo_payment_id),
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id::text = $1`,
-        [lockedPayment.id, capturedPaymentId]
-      );
-
-      const settleResult = await settlePaymentSuccess(dbClient, String(lockedPayment.id));
-
-      await dbClient.query('COMMIT');
-
-      if (settleResult.settled) {
-        try {
-          const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [settleResult.clientId]);
-          await notificationService.notifyPaymentReceived(
-            String(settleResult.providerId),
-            String(settleResult.clientId),
-            settleResult.creditedAmount,
-            clientInfo.rows[0]?.name || 'Client',
-            String(settleResult.bookingId)
-          );
-        } catch (notifError) {
-          console.error('Failed to send payment notification:', notifError);
-        }
-      }
-    } else if (status === 'failed') {
-      await dbClient.query(
-        `UPDATE payments
-         SET status = 'failed',
-             failure_reason = $1,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id::text = $2`,
-        [paymentIntent.attributes.last_payment_error?.message || 'Payment failed', payment.id]
-      );
-
-      await dbClient.query(
-        `UPDATE bookings SET payment_status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id::text = $1`,
-        [payment.booking_id]
-      );
-
-      // Notify client of payment failure
-      try {
-        const bookingInfo = await pool.query(
-          `SELECT s.title FROM bookings b LEFT JOIN services s ON s.id::text = b.service_id::text WHERE b.id::text = $1`,
-          [payment.booking_id]
-        );
-        const serviceTitle = bookingInfo.rows[0]?.title || 'service';
-
-        await notificationService.notifyPaymentFailed(
-          String(payment.client_id),
-          String(payment.provider_id),
-          String(payment.booking_id),
-          paymentIntent.attributes.last_payment_error?.message || 'Payment could not be processed'
-        );
-      } catch (notifError) {
-        console.error('Failed to send payment failure notification:', notifError);
-      }
-    }
+    const outcome = await applyIntentState(String(payment.id), result.data, '/confirm');
 
     return res.json({
       data: {
         payment_id: payment.id,
-        status: status,
-        paid_at: status === 'succeeded' ? new Date().toISOString() : null,
+        status: outcome.status,
+        paid_at: outcome.status === 'succeeded' ? new Date().toISOString() : null,
+        late_payment_refund: outcome.latePaymentRefund,
+        ...(outcome.underReview ? { under_review: true } : {}),
       }
     });
   } catch (error: any) {
-    await dbClient.query('ROLLBACK');
     console.error('Error confirming payment:', error);
-    return res.status(500).json({ error: 'Failed to confirm payment', detail: error.message });
-  } finally {
-    dbClient.release();
+    return sendPaymentFailure(res, error, 'Could not check the payment status. Please try again.');
   }
 });
 
 // PayMongo Webhook handler
+// How far out of date a webhook's own timestamp may be before it is refused. A valid
+// signature stays valid forever on its own, so without this anyone who ever observed one
+// delivery could replay it later; PayMongo retries a failed delivery for a while, so the
+// window has to be generous enough not to reject an honest retry.
+const WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 15 * 60;
+
+// Compares two hex digests without leaking, through timing, how far along they matched.
+function signaturesMatch(received: string, expected: string): boolean {
+  const a = Buffer.from(received, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  // timingSafeEqual throws outright on a length mismatch, which would 500 instead of 400.
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+// The raw body parser is mounted in server.ts, ahead of express.json - see the comment
+// there. Leaving express.raw here too is harmless (it no-ops once the body is parsed) and
+// keeps the route's requirement visible at the route itself.
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req: Request, res: Response) => {
   const signature = req.headers['paymongo-signature'] as string;
 
@@ -558,14 +803,51 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
     return res.status(400).json({ error: 'Missing signature' });
   }
 
-  // Verify webhook signature
-  const payload = req.body.toString();
-  const [timestampPart, signaturePart] = signature.split(',');
-  const timestamp = timestampPart?.split('=')[1];
-  const receivedSignature = signaturePart?.split('=')[1];
+  // If this is not a Buffer, some middleware parsed the body before we got here and the
+  // exact bytes PayMongo signed are gone. Say so, rather than hashing "[object Object]"
+  // and reporting it as a signature mismatch - that misdirection is what hid this for so
+  // long, since a misconfigured parser and a forged request looked identical from here.
+  if (!Buffer.isBuffer(req.body)) {
+    console.error(
+      'Webhook: body was already parsed before reaching this route, so the raw bytes the ' +
+      'signature covers are unavailable. Check that express.raw for /api/payments/webhook ' +
+      'is still mounted before express.json in server.ts.'
+    );
+    return res.status(500).json({ error: 'Webhook misconfigured' });
+  }
 
-  if (!timestamp || !receivedSignature) {
+  // Verify webhook signature.
+  //
+  // The header is a comma-separated list of key=value pairs: `t=<unix>,te=<test sig>,
+  // li=<live sig>`. This used to read the second pair positionally and treat it as "the"
+  // signature, which only works in test mode - in live mode `te` is empty and the real
+  // digest is in `li`, so every live webhook failed the format check. Parse by name and
+  // accept whichever digest is actually populated.
+  const payload = req.body.toString('utf8');
+  const signatureParts = new Map<string, string>();
+  for (const part of signature.split(',')) {
+    const eq = part.indexOf('=');
+    if (eq > 0) signatureParts.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
+  }
+
+  const timestamp = signatureParts.get('t');
+  const candidateSignatures = [signatureParts.get('li'), signatureParts.get('te')].filter(
+    (s): s is string => Boolean(s)
+  );
+
+  if (!timestamp || candidateSignatures.length === 0) {
     return res.status(400).json({ error: 'Invalid signature format' });
+  }
+
+  const timestampSeconds = Number(timestamp);
+  if (!Number.isFinite(timestampSeconds)) {
+    return res.status(400).json({ error: 'Invalid signature format' });
+  }
+
+  const ageSeconds = Math.abs(Date.now() / 1000 - timestampSeconds);
+  if (ageSeconds > WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS) {
+    console.warn(`Webhook: rejected, timestamp is ${Math.round(ageSeconds)}s out of date`);
+    return res.status(400).json({ error: 'Signature timestamp out of range' });
   }
 
   const signedPayload = `${timestamp}.${payload}`;
@@ -574,7 +856,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
     .update(signedPayload)
     .digest('hex');
 
-  if (receivedSignature !== expectedSignature) {
+  if (!candidateSignatures.some((candidate) => signaturesMatch(candidate, expectedSignature))) {
     console.log('Webhook: Signature mismatch');
     return res.status(400).json({ error: 'Invalid signature' });
   }
@@ -587,8 +869,50 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
 
   const dbClient = await pool.connect();
   try {
-    if (eventType === 'payment_intent.succeeded') {
-      const paymentIntentId = eventData?.id;
+    // QR Ph confirms as `payment.paid`, not `payment_intent.succeeded`. Both are handled
+    // here, and handling both is safe rather than merely tolerable: settlePaymentSuccess
+    // claims the row with `wallet_credited_at IS NULL`, so if PayMongo sends both for the
+    // same payment the second one credits nothing. Handling only one of them was the real
+    // risk - a scanned, paid QR that nothing ever recorded.
+    if (eventType === 'payment_intent.succeeded' || eventType === 'payment.paid') {
+      const isPaymentEvent = eventType === 'payment.paid';
+      const fromPaymentEvent = isPaymentEvent
+        ? resolveIntentRef(eventData)
+        : { intentId: null, bookingId: null };
+
+      let paymentIntentId = isPaymentEvent ? fromPaymentEvent.intentId : eventData?.id;
+
+      // Fall back to the booking stamped in our own metadata. Restricted to rows that are
+      // still open: a booking with a settled payment must not be re-resolved by a stray
+      // event, and 'succeeded' is excluded rather than relied on being absent.
+      if (!paymentIntentId && fromPaymentEvent.bookingId) {
+        const byBooking = await dbClient.query(
+          `SELECT paymongo_payment_intent_id FROM payments
+           WHERE booking_id::text = $1 AND status IN ('pending', 'processing')
+           ORDER BY updated_at DESC LIMIT 1`,
+          [fromPaymentEvent.bookingId]
+        );
+        paymentIntentId = byBooking.rows[0]?.paymongo_payment_intent_id || null;
+        if (paymentIntentId) {
+          console.warn(
+            `Webhook: ${eventType} carried no payment_intent_id; resolved via metadata.booking_id ` +
+            `${fromPaymentEvent.bookingId} to intent ${paymentIntentId}.`
+          );
+        }
+      }
+
+      if (!paymentIntentId) {
+        // Deliberately not a 500. PayMongo retries 5xx, and a payload we cannot map will
+        // not become mappable on the tenth attempt - it would just retry until it gave up
+        // and then be just as lost. console.error so it is findable, with the payment id
+        // so it can be reconciled against the PayMongo dashboard by hand.
+        console.error(
+          `Webhook: ${eventType} could not be mapped to a payment intent. PayMongo object ` +
+          `id=${eventData?.id || 'unknown'}. This payment may have succeeded WITHOUT being ` +
+          'recorded - reconcile it manually.'
+        );
+        return res.json({ received: true });
+      }
 
       await dbClient.query('BEGIN');
 
@@ -601,15 +925,26 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
         [paymentIntentId]
       );
 
-      let settleResult: { settled: boolean; creditedAmount: number; bookingId?: string; providerId?: string; clientId?: string } = { settled: false, creditedAmount: 0 };
+      let settleResult: Awaited<ReturnType<typeof settlePaymentSuccess>> = { settled: false, creditedAmount: 0 };
 
       if (paymentRes.rows[0]) {
         const payment = paymentRes.rows[0];
-        const capturedPaymentId = eventData?.attributes?.payments?.[0]?.id || null;
+        // payment.paid's own object IS the payment; payment_intent.succeeded nests it.
+        const capturedPaymentId = isPaymentEvent
+          ? (eventData?.id || null)
+          : (eventData?.attributes?.payments?.[0]?.id || null);
+
+        const amountCheck = await checkPaidAmount(dbClient, payment, eventData?.attributes, eventType);
+        if (!amountCheck.ok) {
+          // 200, not 500: a redelivery carries the same amount and would be held again.
+          await dbClient.query('COMMIT');
+          if (amountCheck.alert) alertAmountMismatch(payment, amountCheck.alert);
+          return res.json({ received: true });
+        }
 
         await dbClient.query(
           `UPDATE payments
-           SET status = 'succeeded',
+           SET status = ${SUCCEEDED_UNLESS_REFUNDED},
                paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
                paymongo_payment_id = COALESCE($2, paymongo_payment_id),
                updated_at = CURRENT_TIMESTAMP
@@ -618,23 +953,20 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
         );
 
         settleResult = await settlePaymentSuccess(dbClient, String(payment.id));
+      } else {
+        // Real money PayMongo says arrived, for an intent no payment row points at. Not a
+        // 500 - a retry will not make the row appear - but it must never be silent.
+        console.error(
+          `Webhook: ${eventType} for intent ${paymentIntentId} matches no payment row. This ` +
+          `payment (PayMongo object ${eventData?.id || 'unknown'}) was NOT recorded - reconcile it manually.`
+        );
       }
 
       await dbClient.query('COMMIT');
 
-      if (settleResult.settled) {
-        try {
-          const clientInfo = await pool.query('SELECT name FROM users WHERE id::text = $1', [settleResult.clientId]);
-          await notificationService.notifyPaymentReceived(
-            String(settleResult.providerId),
-            String(settleResult.clientId),
-            settleResult.creditedAmount,
-            clientInfo.rows[0]?.name || 'Client',
-            String(settleResult.bookingId)
-          );
-        } catch (notifError) {
-          console.error('Failed to send webhook payment notification:', notifError);
-        }
+      await notifyPaymentSettled(settleResult, 'webhook');
+      if (settleResult.bookingUnpayable && paymentRes.rows[0]) {
+        startLatePaymentRefund(String(paymentRes.rows[0].id));
       }
     } else if (eventType === 'payment_intent.failed') {
       const paymentIntentId = eventData?.id;
@@ -645,25 +977,39 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
         [paymentIntentId]
       );
 
-      await dbClient.query(
+      // `AND status <> 'succeeded'` is what stops a late or retried failure event from
+      // unwinding a payment that already settled. Webhook deliveries are not ordered and
+      // are retried on our own 5xx, so a failed attempt's event can legitimately arrive
+      // after a later attempt on the same intent succeeded. Without the guard that event
+      // marked a settled payment 'failed' and flipped the booking to unpaid, while the
+      // provider's wallet - credited by settlePaymentSuccess, which is keyed off its own
+      // wallet_credited_at claim and never reads this back - stayed credited. The books
+      // then disagreed with themselves with no way to tell which side was right.
+      const failedUpdate = await dbClient.query(
         `UPDATE payments
          SET status = 'failed',
              failure_reason = $1,
              updated_at = CURRENT_TIMESTAMP
-         WHERE paymongo_payment_intent_id = $2`,
-        [eventData?.attributes?.last_payment_error?.message || 'Payment failed', paymentIntentId]
+         WHERE paymongo_payment_intent_id = $2
+           AND status <> ALL($3::text[])
+         RETURNING id`,
+        [eventData?.attributes?.last_payment_error?.message || 'Payment failed', paymentIntentId, FINAL_MONEY_STATUSES]
       );
+      const failedRowCount = failedUpdate.rowCount ?? 0;
 
-      // Notify client of payment failure (via webhook)
-      if (paymentRes.rows[0]) {
+      if (failedRowCount === 0) {
+        console.log(
+          `Webhook: payment_intent.failed for ${paymentIntentId} ignored - no matching payment, ` +
+          'or it has already succeeded.'
+        );
+      }
+
+      // Notify client of payment failure (via webhook). Only when the row actually moved
+      // to 'failed': telling a client their payment failed for a booking they have paid
+      // for is worse than saying nothing.
+      if (paymentRes.rows[0] && failedRowCount > 0) {
         const payment = paymentRes.rows[0];
         try {
-          const bookingInfo = await dbClient.query(
-            `SELECT s.title FROM bookings b LEFT JOIN services s ON s.id::text = b.service_id::text WHERE b.id::text = $1`,
-            [payment.booking_id]
-          );
-          const serviceTitle = bookingInfo.rows[0]?.title || 'service';
-
           await notificationService.notifyPaymentFailed(
             String(payment.client_id),
             String(payment.provider_id),
@@ -674,11 +1020,77 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
           console.error('Failed to send webhook payment failure notification:', notifError);
         }
       }
+    } else if (eventType === 'qrph.expired') {
+      // A QR Ph code that was never scanned. PayMongo detaches the expired payment method
+      // and puts the intent back to awaiting_payment_method, so the INTENT is still good -
+      // a fresh QR, or a card, can be attached to it.
+      //
+      // Hence 'pending' rather than 'failed'. create-intent treats pending/processing as an
+      // open attempt and resumes the same intent (see the openPayment branch), which is
+      // exactly what should happen. Marking it 'failed' would make it a dead attempt,
+      // throwing away a perfectly reusable intent and burning an attempt number - and
+      // 'failed' also drives the client's "Payment Failed" copy, which would tell someone
+      // their payment was refused when in truth they simply took too long to scan.
+      const ref = resolveIntentRef(eventData);
+      let expiredIntentId = ref.intentId;
+
+      if (!expiredIntentId && ref.bookingId) {
+        const byBooking = await dbClient.query(
+          `SELECT paymongo_payment_intent_id FROM payments
+           WHERE booking_id::text = $1 AND status = 'processing'
+           ORDER BY updated_at DESC LIMIT 1`,
+          [ref.bookingId]
+        );
+        expiredIntentId = byBooking.rows[0]?.paymongo_payment_intent_id || null;
+      }
+
+      if (!expiredIntentId) {
+        // Benign compared with a lost payment: the row stays 'processing' and the client's
+        // own polling of /confirm sees the intent back at awaiting_payment_method and
+        // recovers. Logged rather than 500'd for the same reason as above - a payload we
+        // cannot map will not map on a retry.
+        console.warn(
+          `Webhook: qrph.expired could not be mapped to a payment intent (object id=` +
+          `${eventData?.id || 'unknown'}); leaving the payment row for /confirm to reconcile.`
+        );
+        return res.json({ received: true });
+      }
+
+      // `status = 'processing'` is the precise guard, not `<> 'succeeded'`: a row that is
+      // already 'pending' needs nothing, a 'succeeded' one must never be reopened (the
+      // client can pay in the last second before expiry), and 'failed' or 'cancelled'
+      // should not be resurrected by a late expiry event.
+      const reset = await dbClient.query(
+        `UPDATE payments
+         SET status = 'pending',
+             paymongo_payment_method_id = NULL,
+             payment_method_type = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE paymongo_payment_intent_id = $1
+           AND status = 'processing'
+         RETURNING id`,
+        [expiredIntentId]
+      );
+
+      if ((reset.rowCount ?? 0) === 0) {
+        console.log(
+          `Webhook: qrph.expired for ${expiredIntentId} changed nothing - the payment is no ` +
+          'longer processing (already paid, retried, or cancelled).'
+        );
+      }
     }
 
     return res.json({ received: true });
   } catch (error: any) {
-    await dbClient.query('ROLLBACK');
+    // Only the succeeded branch opens a transaction, so this can fire with none in
+    // progress - and a throwing ROLLBACK here would replace the real error below with a
+    // meaningless one. 500 is deliberate: PayMongo retries on it, which is exactly what
+    // should happen to a delivery we failed to record.
+    try {
+      await dbClient.query('ROLLBACK');
+    } catch (_rollbackError) {
+      /* no transaction was open */
+    }
     console.error('Webhook processing error:', error);
     return res.status(500).json({ error: 'Webhook processing failed' });
   } finally {
@@ -735,12 +1147,26 @@ router.get('/booking/:bookingId', verifyToken, async (req: Request & { userId?: 
   }
 
   try {
+    // This took rows[0] from an unordered result. `unique_booking_payment` means there is
+    // only one row per booking today, so the ordering is belt-and-braces - but it is the
+    // difference between "correct" and "correct by accident", and the constraint being
+    // there at all is what this file used to get wrong (see create-intent). Rank the
+    // settled payment first, then the newest of whatever is left.
     const paymentRes = await pool.query(
       `SELECT p.*, b.start_date, b.end_date, s.title as service_title
        FROM payments p
        JOIN bookings b ON b.id::text = p.booking_id::text
        LEFT JOIN services s ON s.id::text = b.service_id::text
-       WHERE p.booking_id::text = $1`,
+       WHERE p.booking_id::text = $1
+       ORDER BY
+         CASE p.status
+           WHEN 'succeeded' THEN 0
+           WHEN 'processing' THEN 1
+           WHEN 'pending' THEN 2
+           ELSE 3
+         END,
+         p.created_at DESC
+       LIMIT 1`,
       [bookingId]
     );
 

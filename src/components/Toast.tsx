@@ -80,6 +80,7 @@ export function Toast({ id, type, title, message, duration = 5000, onClose }: To
     <div
       className={`
         relative overflow-hidden rounded-lg border shadow-lg
+        pointer-events-auto
         ${config.bgColor} ${config.borderColor}
         transform transition-all duration-300 ease-out
         ${isExiting ? 'opacity-0 translate-x-full' : 'opacity-100 translate-x-0'}

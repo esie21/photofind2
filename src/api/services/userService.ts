@@ -58,11 +58,25 @@ const userService = {
     return apiClient.get<User[]>(API_CONFIG.ENDPOINTS.USERS.GET_ALL);
   },
 
-  async getAllProviders(params?: { q?: string; category?: string; sort?: string; page?: number; limit?: number }): Promise<{ data: User[]; meta?: any }> {
+  async getAllProviders(params?: {
+    q?: string; category?: string; sort?: string; page?: number; limit?: number;
+    minPrice?: string; maxPrice?: string; minRating?: string; verified?: boolean;
+    availableDate?: string; lat?: number; lng?: number; radiusKm?: string;
+  }): Promise<{ data: User[]; meta?: any }> {
     const searchParams = new URLSearchParams();
     if (params?.q) searchParams.set('q', params.q);
     if (params?.category && params.category !== 'all') searchParams.set('category', params.category);
     if (params?.sort && params.sort !== 'recommended') searchParams.set('sort', params.sort);
+    if (params?.minPrice) searchParams.set('min_price', params.minPrice);
+    if (params?.maxPrice) searchParams.set('max_price', params.maxPrice);
+    if (params?.minRating) searchParams.set('min_rating', params.minRating);
+    if (params?.verified) searchParams.set('verified', '1');
+    if (params?.availableDate) searchParams.set('available_date', params.availableDate);
+    if (params?.lat !== undefined && params?.lng !== undefined) {
+      searchParams.set('lat', String(params.lat));
+      searchParams.set('lng', String(params.lng));
+      if (params.radiusKm) searchParams.set('radius_km', params.radiusKm);
+    }
     if (params?.page) searchParams.set('page', params.page.toString());
     if (params?.limit) searchParams.set('limit', params.limit.toString());
     const queryString = searchParams.toString();
@@ -107,12 +121,12 @@ const userService = {
     id: string,
     files: File[],
     onProgress?: (percent: number) => void
-  ): Promise<User> {
+  ): Promise<User & { added?: string[] }> {
     const fd = new FormData();
     files.forEach((f) => fd.append('images', f));
     // Use direct backend URL for file uploads (bypasses Vercel proxy limits)
     const directUrl = `${API_CONFIG.DIRECT_UPLOAD_URL}${API_CONFIG.ENDPOINTS.USERS.UPLOAD_PORTFOLIO(id)}`;
-    return postFormData<User>(directUrl, fd, onProgress);
+    return postFormData<User & { added?: string[] }>(directUrl, fd, onProgress);
   },
 
   /**

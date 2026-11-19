@@ -1,15 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-  <!DOCTYPE html>
-  <html lang="en">
-    <head>
-      <meta charset="UTF-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>PhotoFind UI Design</title>
-    </head>
+    <title>PhotoFind — Book photographers & videographers near you</title>
+    <meta
+      name="description"
+      content="PhotoFind connects you with verified photographers, videographers, makeup artists and designers near you. Compare portfolios, check real availability, and book with secure payments."
+    />
+    <link rel="canonical" href="https://photofind2.vercel.app/" />
+    <meta name="theme-color" content="#a855f7" />
+    <meta name="color-scheme" content="light" />
 
-    <body>
-      <div id="root"></div>
-      <script type="module" src="/src/main.tsx"></script>
-    </body>
-  </html>
-  
+    <!-- Icons -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <!-- Link previews (Facebook, Messenger, LinkedIn, iMessage) -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="PhotoFind" />
+    <meta property="og:url" content="https://photofind2.vercel.app/" />
+    <meta property="og:title" content="PhotoFind — Book photographers & videographers near you" />
+    <meta
+      property="og:description"
+      content="Compare portfolios, check real availability, and book verified creative professionals with secure payments."
+    />
+    <meta property="og:locale" content="en_PH" />
+    <!--
+      og:image needs a real 1200x630 PNG or JPEG - SVG is not supported by Facebook,
+      LinkedIn or iMessage, so it is deliberately left out rather than pointed at
+      favicon.svg (a broken image is treated worse than no image at all). Drop a
+      1200x630 file at public/og-image.png and add:
+        <meta property="og:image" content="https://photofind2.vercel.app/og-image.png" />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+    -->
+
+    <!-- Link previews (X/Twitter) -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="PhotoFind — Book photographers & videographers near you" />
+    <meta
+      name="twitter:description"
+      content="Compare portfolios, check real availability, and book verified creative professionals with secure payments."
+    />
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
