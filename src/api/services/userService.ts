@@ -58,11 +58,25 @@ const userService = {
     return apiClient.get<User[]>(API_CONFIG.ENDPOINTS.USERS.GET_ALL);
   },
 
-  async getAllProviders(params?: { q?: string; category?: string; sort?: string; page?: number; limit?: number }): Promise<{ data: User[]; meta?: any }> {
+  async getAllProviders(params?: {
+    q?: string; category?: string; sort?: string; page?: number; limit?: number;
+    minPrice?: string; maxPrice?: string; minRating?: string; verified?: boolean;
+    availableDate?: string; lat?: number; lng?: number; radiusKm?: string;
+  }): Promise<{ data: User[]; meta?: any }> {
     const searchParams = new URLSearchParams();
     if (params?.q) searchParams.set('q', params.q);
     if (params?.category && params.category !== 'all') searchParams.set('category', params.category);
     if (params?.sort && params.sort !== 'recommended') searchParams.set('sort', params.sort);
+    if (params?.minPrice) searchParams.set('min_price', params.minPrice);
+    if (params?.maxPrice) searchParams.set('max_price', params.maxPrice);
+    if (params?.minRating) searchParams.set('min_rating', params.minRating);
+    if (params?.verified) searchParams.set('verified', '1');
+    if (params?.availableDate) searchParams.set('available_date', params.availableDate);
+    if (params?.lat !== undefined && params?.lng !== undefined) {
+      searchParams.set('lat', String(params.lat));
+      searchParams.set('lng', String(params.lng));
+      if (params.radiusKm) searchParams.set('radius_km', params.radiusKm);
+    }
     if (params?.page) searchParams.set('page', params.page.toString());
     if (params?.limit) searchParams.set('limit', params.limit.toString());
     const queryString = searchParams.toString();

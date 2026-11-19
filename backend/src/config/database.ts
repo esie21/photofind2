@@ -129,6 +129,11 @@ export async function initializeTables() {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS years_experience INTEGER DEFAULT 0;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);`);
+    // Coordinates for distance search/sort. `location` above is free text ("Cebu City") and
+    // can't be measured, so providers pin a point themselves. NULL = not set: those providers
+    // simply drop out of distance filtering rather than being treated as 0,0.
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS category VARCHAR(100);`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS title VARCHAR(255);`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS rating DECIMAL(3,2) DEFAULT 0;`);
@@ -493,6 +498,8 @@ export async function initializeTables() {
 
     await client.query(`CREATE INDEX IF NOT EXISTS idx_bookings_provider_start ON bookings (provider_id, start_date);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_bookings_provider_end ON bookings (provider_id, end_date);`);
+    // Provider ranking stats (completion rate, response time) group a provider's bookings by status.
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_bookings_provider_status ON bookings (provider_id, status);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_availability_provider_start ON availability_slots (provider_id, start_time);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_availability_provider_end ON availability_slots (provider_id, end_time);`);
 

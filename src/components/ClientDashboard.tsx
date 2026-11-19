@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useModal } from '../hooks/useModal';
-import { Search, SlidersHorizontal, Star, MapPin, MessageSquare, Clock, ChevronRight, Filter, ShieldCheck } from 'lucide-react';
+import { Search, SlidersHorizontal, Star, MapPin, MessageSquare, Clock, ChevronRight, Filter, ShieldCheck, X, Navigation } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { ChatInterface } from './ChatInterface';
 import { ProviderCardSkeleton, BookingCardSkeleton } from './ui/skeleton';
@@ -38,6 +38,25 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
   const [totalProviders, setTotalProviders] = useState<number | null>(null);
   const [selectedCategory, setSelectedCategory] = useState(initialCategory || 'all');
   const [sortBy, setSortBy] = useState('recommended');
+  // Discovery filters. The text/number inputs update on every keystroke, so the request is
+  // driven by a debounced copy (below) instead of firing once per character.
+  const [minPrice, setMinPrice] = useState('');
+  const [maxPrice, setMaxPrice] = useState('');
+  const [minRating, setMinRating] = useState('');
+  const [verifiedOnly, setVerifiedOnly] = useState(false);
+  const [availableDate, setAvailableDate] = useState('');
+  const [nearMe, setNearMe] = useState<{ lat: number; lng: number } | null>(null);
+  const [radiusKm, setRadiusKm] = useState('25');
+  const [locating, setLocating] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const filterKey = JSON.stringify({ minPrice, maxPrice, minRating, verifiedOnly, availableDate, nearMe, radiusKm });
+  const [debouncedFilterKey, setDebouncedFilterKey] = useState(filterKey);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedFilterKey(filterKey), 400);
+    return () => clearTimeout(t);
+  }, [filterKey]);
+  const today = new Date().toLocaleDateString('en-CA');
+  const priceRangeInvalid = minPrice !== '' && maxPrice !== '' && Number(minPrice) > Number(maxPrice);
   const [myBookings, setMyBookings] = useState<any[]>([]);
   const [loadingBookings, setLoadingBookings] = useState(false);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
@@ -50,7 +69,17 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
     setLoadingProviders(true);
     setProvidersError(null);
     try {
-      const res = await userService.getAllProviders({ q: searchQuery, category: selectedCategory, sort: sortBy, page, limit });
+      const f = JSON.parse(debouncedFilterKey);
+      // An inverted price range is a 400 from the server; it is shown inline instead.
+      if (f.minPrice !== '' && f.maxPrice !== '' && Number(f.minPrice) > Number(f.maxPrice)) {
+        return;
+      }
+      const res = await userService.getAllProviders({
+        q: searchQuery, category: selectedCategory, sort: sortBy, page, limit,
+        minPrice: f.minPrice, maxPrice: f.maxPrice, minRating: f.minRating, verified: f.verifiedOnly,
+        availableDate: f.availableDate,
+        ...(f.nearMe ? { lat: f.nearMe.lat, lng: f.nearMe.lng, radiusKm: f.radiusKm } : {}),
+      });
       const list = res.data;
       const total = res.meta?.total ?? null;
       setProvidersList(list);
@@ -71,6 +100,53 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
     }
   };
 
+  const handleNearMe = () => {
+    if (!navigator.geolocation) {
+      setLocationError('Your browser does not support location.');
+      return;
+    }
+    setLocating(true);
+    setLocationError(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setNearMe({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setLocating(false);
+        setPage(1);
+      },
+      (err) => {
+        setLocating(false);
+        setLocationError(err.code === err.PERMISSION_DENIED ? 'Location permission was denied.' : 'Could not get your location.');
+      },
+      { enableHighAccuracy: false, timeout: 10000 }
+    );
+  };
+
+  const clearNearMe = () => {
+    setNearMe(null);
+    if (sortBy === 'distance') setSortBy('recommended');
+    setPage(1);
+  };
+
+  const clearAllFilters = () => {
+    setSearchQuery(''); setTypedQuery('');
+    setSelectedCategory('all');
+    setMinPrice(''); setMaxPrice(''); setMinRating(''); setVerifiedOnly(false); setAvailableDate('');
+    clearNearMe();
+  };
+
+  // One chip per active filter, each removable on its own.
+  const activeChips: { label: string; clear: () => void }[] = [];
+  if (minPrice || maxPrice) {
+    activeChips.push({
+      label: minPrice && maxPrice ? `₱${minPrice} – ₱${maxPrice}` : minPrice ? `From ₱${minPrice}` : `Up to ₱${maxPrice}`,
+      clear: () => { setMinPrice(''); setMaxPrice(''); setPage(1); },
+    });
+  }
+  if (minRating) activeChips.push({ label: `${minRating}★ & up`, clear: () => { setMinRating(''); setPage(1); } });
+  if (verifiedOnly) activeChips.push({ label: 'Verified only', clear: () => { setVerifiedOnly(false); setPage(1); } });
+  if (availableDate) activeChips.push({ label: `Available ${availableDate}`, clear: () => { setAvailableDate(''); setPage(1); } });
+  if (nearMe) activeChips.push({ label: `Within ${radiusKm} km`, clear: clearNearMe });
+
   const handleViewProfile = (provider: any) => {
     if (onViewProvider) {
       onViewProvider(String(provider.id));
@@ -81,7 +157,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
 
   useEffect(() => {
     fetchProviders();
-  }, [searchQuery, selectedCategory, sortBy, page, limit]);
+  }, [searchQuery, selectedCategory, sortBy, page, limit, debouncedFilterKey]);
 
   const fetchMyBookings = async () => {
     setLoadingBookings(true);
@@ -189,12 +265,98 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
                       onChange={(e) => { setSortBy(e.target.value); setPage(1); }}
                       className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
                     >
-                      <option value="recommended">Recommended</option>
+                      <option value="recommended">Best match</option>
                       <option value="rating">Highest Rated</option>
                       <option value="price-low">Price: Low to High</option>
                       <option value="price-high">Price: High to Low</option>
+                      {nearMe && <option value="distance">Nearest first</option>}
                     </select>
                   </div>
+                  <div>
+                    <label className="block text-sm text-gray-700 mb-2">Price range (₱)</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number" min="0" inputMode="numeric" placeholder="Min" value={minPrice}
+                        onChange={(e) => { setMinPrice(e.target.value); setPage(1); }}
+                        className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
+                      />
+                      <span className="text-gray-400">–</span>
+                      <input
+                        type="number" min="0" inputMode="numeric" placeholder="Max" value={maxPrice}
+                        onChange={(e) => { setMaxPrice(e.target.value); setPage(1); }}
+                        className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
+                      />
+                    </div>
+                    {priceRangeInvalid && <p className="text-xs text-red-600 mt-2">Minimum is higher than maximum.</p>}
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-700 mb-2">Minimum rating</label>
+                    <select
+                      value={minRating}
+                      onChange={(e) => { setMinRating(e.target.value); setPage(1); }}
+                      className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
+                    >
+                      <option value="">Any rating</option>
+                      <option value="3">3★ &amp; up</option>
+                      <option value="4">4★ &amp; up</option>
+                      <option value="4.5">4.5★ &amp; up</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-700 mb-2">Available on</label>
+                    <input
+                      type="date" min={today} value={availableDate}
+                      onChange={(e) => { setAvailableDate(e.target.value); setPage(1); }}
+                      className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-700 mb-2">Distance</label>
+                    {nearMe ? (
+                      <select
+                        value={radiusKm}
+                        onChange={(e) => { setRadiusKm(e.target.value); setPage(1); }}
+                        className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
+                      >
+                        {['5', '10', '25', '50', '100'].map((km) => <option key={km} value={km}>Within {km} km</option>)}
+                      </select>
+                    ) : (
+                      <button
+                        type="button" onClick={handleNearMe} disabled={locating}
+                        className="w-full px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 flex items-center gap-2 justify-center"
+                      >
+                        <Navigation className="w-4 h-4" />
+                        {locating ? 'Locating...' : 'Near me'}
+                      </button>
+                    )}
+                    {locationError && <p className="text-xs text-red-600 mt-2">{locationError}</p>}
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox" checked={verifiedOnly}
+                      onChange={(e) => { setVerifiedOnly(e.target.checked); setPage(1); }}
+                    />
+                    <ShieldCheck className="w-4 h-4 text-blue-600" />
+                    Verified providers only
+                  </label>
+                </div>
+              )}
+
+              {activeChips.length > 0 && (
+                <div className="pt-4 flex flex-wrap items-center gap-2">
+                  {activeChips.map((chip) => (
+                    <button
+                      key={chip.label} type="button" onClick={chip.clear}
+                      className="flex items-center gap-1 px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-xs"
+                      aria-label={`Remove filter: ${chip.label}`}
+                    >
+                      {chip.label}
+                      <X className="w-3 h-3" />
+                    </button>
+                  ))}
+                  <button type="button" onClick={clearAllFilters} className="text-xs text-purple-600 underline">
+                    Clear all
+                  </button>
                 </div>
               )}
             </div>
@@ -245,7 +407,7 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
                       description="Try adjusting your search or filters to find service providers."
                       action={
                         <button
-                          onClick={() => { setSearchQuery(''); setTypedQuery(''); }}
+                          onClick={clearAllFilters}
                           className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm"
                         >
                           Clear filters
@@ -312,6 +474,9 @@ export function ClientDashboard({ onStartBooking, onViewProvider, initialSearchQ
                           <div className="flex items-center gap-1">
                             <MapPin className="w-4 h-4" />
                             <span>{provider.location}</span>
+                            {typeof provider.distance_km === 'number' && (
+                              <span className="text-gray-400">· {provider.distance_km} km away</span>
+                            )}
                           </div>
                         </div>
 

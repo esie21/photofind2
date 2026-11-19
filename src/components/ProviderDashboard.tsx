@@ -1425,6 +1425,13 @@ export function ProviderDashboard({ initialTab, tabRequestId }: ProviderDashboar
                       : 'Submit a government ID or business permit to get a Verified badge clients can see on your profile.'}
               </p>
 
+              <div className="mb-4 flex items-start gap-2 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
+                <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                <span>
+                  <strong>Reminder:</strong> upload only a selfie of you holding any valid government ID. Make sure your face and the ID details are clear and readable.
+                </span>
+              </div>
+
               {Array.isArray((user as any)?.verification_documents) && (user as any).verification_documents.length > 0 && (
                 <div className="mb-4 space-y-2">
                   {(user as any).verification_documents.map((doc: { path: string; original_name: string; uploaded_at: string }, index: number) => (
